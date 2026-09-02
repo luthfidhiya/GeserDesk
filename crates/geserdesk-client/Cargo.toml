@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "geserdesk-client"
+description = "Client-side logic for GeserDesk: connection, handshake, input injection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Real input injection via `enigo`. Off by default so the crate builds and
+# tests on a headless CI box; the CLI turns it on.
+default = []
+inject = ["dep:enigo"]
+
+[dependencies]
+geserdesk-proto.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+enigo = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+geserdesk-server.workspace = true

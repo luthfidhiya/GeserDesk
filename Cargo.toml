@@ -1,0 +1,42 @@
+# GeserDesk -- software KVM lintas platform (Linux + Windows)
+# Copyright (C) 2026 GeserDesk contributors
+# SPDX-License-Identifier: GPL-3.0-or-later
+[workspace]
+resolver = "2"
+members = [
+    "crates/geserdesk-proto",
+    "crates/geserdesk-server",
+    "crates/geserdesk-client",
+    "apps/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/lytcherdev/geserdesk"
+authors = ["GeserDesk contributors"]
+
+[workspace.dependencies]
+geserdesk-proto = { path = "crates/geserdesk-proto" }
+geserdesk-server = { path = "crates/geserdesk-server" }
+geserdesk-client = { path = "crates/geserdesk-client" }
+
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+futures = "0.3"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+directories = "5"
+
+[profile.release]
+lto = "thin"
+strip = true
