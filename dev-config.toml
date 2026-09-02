@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Development config: Linux PC on the left, Windows PC on its right.
+# Start the server on the Linux box:
+#   cargo run -p geserdesk-cli -- server --config dev-config.toml -v
+# Then the client on the Windows box:
+#   cargo run -p geserdesk-cli --features inject -- client --name windows-pc --server <LINUX-IP>:24810 -v
+
+[server]
+listen = "0.0.0.0:24810"
+
+[[screens]]
+name = "linux-pc"
+
+[[screens]]
+name = "windows-pc"
+
+[links]
+linux-pc   = { right = "windows-pc" }
+windows-pc = { left  = "linux-pc" }
+
+[options]
+switch_delay_ms      = 0
+switch_double_tap_ms = 250
+switch_corner_size   = 0
+jump_zone_size       = 1
+scroll_lock_locks    = true
+clipboard_sharing    = true
+relative_mouse_moves = true

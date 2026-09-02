@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "geserdesk-cli"
+description = "GeserDesk command-line entry point (server and client)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "geserdesk"
+path = "src/main.rs"
+
+[features]
+# Forward real input injection to the client crate.
+default = []
+inject = ["geserdesk-client/inject"]
+
+[dependencies]
+geserdesk-proto.workspace = true
+geserdesk-server.workspace = true
+geserdesk-client.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
