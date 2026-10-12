@@ -190,6 +190,26 @@ where
     Ok(connected)
 }
 
+/// What a client is doing, for a front end to display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientStatus {
+    /// Trying to reach the server and finish the handshake.
+    Connecting,
+    /// Handshake done; the server is driving this machine.
+    Connected,
+    /// The server refused the client until a person approves it there. The
+    /// text is the server's own explanation.
+    AwaitingApproval(String),
+    /// Not connected; will try again. The text says why.
+    Retrying(String),
+    /// Gave up for good (protocol mismatch, changed or declined server
+    /// certificate): retrying cannot fix it.
+    Fatal(String),
+}
+
+/// Receives [`ClientStatus`] changes.
+pub type StatusFn<'a> = &'a (dyn Fn(ClientStatus) + Send + Sync);
+
 /// How [`connect_with_retry`] paces its attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconnectPolicy {
@@ -238,17 +258,46 @@ impl ConnectError {
 /// [`ConnectError::is_fatal`]).
 pub async fn connect_with_retry(
     config: &ClientConfig,
+    sink: impl InputSink,
+    policy: ReconnectPolicy,
+) -> ConnectError {
+    connect_with_status(config, sink, policy, &|_| {}).await
+}
+
+/// [`connect_with_retry`] that also reports what it is doing to `on_status`.
+pub async fn connect_with_status(
+    config: &ClientConfig,
     mut sink: impl InputSink,
     policy: ReconnectPolicy,
+    on_status: StatusFn<'_>,
 ) -> ConnectError {
     let mut config = config.clone();
     let mut delay = policy.initial;
     loop {
         let started = tokio::time::Instant::now();
-        match connect(&config, &mut sink).await {
-            Ok(()) => info!("disconnected from the server"),
-            Err(e) if e.is_fatal() => return e,
-            Err(e) => warn!("connection failed: {e}"),
+        match connect_observed(&config, &mut sink, on_status).await {
+            Ok(()) => {
+                info!("disconnected from the server");
+                on_status(ClientStatus::Retrying(
+                    "disconnected from the server".into(),
+                ));
+            }
+            Err(e) if e.is_fatal() => {
+                on_status(ClientStatus::Fatal(e.to_string()));
+                return e;
+            }
+            Err(e) => {
+                warn!("connection failed: {e}");
+                on_status(match &e {
+                    ConnectError::Rejected(reason)
+                        if reason.contains("approval")
+                            || reason.contains("different certificate") =>
+                    {
+                        ClientStatus::AwaitingApproval(reason.clone())
+                    }
+                    other => ClientStatus::Retrying(other.to_string()),
+                });
+            }
         }
         // Whatever the server had us holding is no longer being driven.
         sink.leave();
@@ -273,61 +322,84 @@ pub async fn connect_with_retry(
 /// Connect, handshake, and run the session loop until the server closes or the
 /// connection drops.
 pub async fn connect(config: &ClientConfig, sink: impl InputSink) -> Result<(), ConnectError> {
-    let stream =
-        TcpStream::connect(&config.server)
-            .await
-            .map_err(|source| ConnectError::Connect {
-                server: config.server.clone(),
-                source,
-            })?;
-    let _ = stream.set_nodelay(true);
+    connect_observed(config, sink, &|_| {}).await
+}
 
-    let Some(tls) = &config.tls else {
-        warn!("connecting WITHOUT encryption or server verification (--no-tls)");
-        return run(MessageStream::new(stream), config, sink).await;
-    };
-
-    // Pin the server we know; for one we do not, accept the certificate at the
-    // TLS layer and ask before a single application byte is sent.
-    let pinned = tls.trust.pinned(&config.server);
-    let (cfg, observed) =
-        client_config(&tls.identity, pinned).map_err(|e| ConnectError::Tls(e.to_string()))?;
-    let name = ServerName::try_from(geserdesk_tls::SERVER_NAME).expect("a valid DNS name");
-    let handshake = tokio::time::timeout(
-        config.handshake_timeout,
-        TlsConnector::from(cfg).connect(name, stream),
-    )
-    .await
-    .map_err(|_| ConnectError::HandshakeTimeout)?;
-    let secured = match handshake {
-        Ok(s) => s,
-        Err(e) => {
-            let seen = *observed.lock().unwrap();
-            return Err(match (pinned, seen) {
-                (Some(expected), Some(seen)) if expected != seen => ConnectError::ServerChanged {
+/// [`connect`] that reports progress to `on_status`.
+pub async fn connect_observed(
+    config: &ClientConfig,
+    sink: impl InputSink,
+    on_status: StatusFn<'_>,
+) -> Result<(), ConnectError> {
+    // Set once the user has just trusted a new server (see below).
+    let mut just_trusted: Option<Fingerprint> = None;
+    loop {
+        on_status(ClientStatus::Connecting);
+        let stream =
+            TcpStream::connect(&config.server)
+                .await
+                .map_err(|source| ConnectError::Connect {
                     server: config.server.clone(),
-                    expected,
-                    seen,
-                },
-                _ => ConnectError::Tls(e.to_string()),
-            });
-        }
-    };
-    let seen = peer_fingerprint(secured.get_ref().1.peer_certificates())
-        .ok_or_else(|| ConnectError::Tls("the server sent no certificate".into()))?;
+                    source,
+                })?;
+        let _ = stream.set_nodelay(true);
 
-    if pinned.is_none() {
-        let trust = Arc::clone(&tls.trust);
-        let server = config.server.clone();
-        let accepted = tokio::task::spawn_blocking(move || trust.confirm_new(&server, &seen))
-            .await
-            .unwrap_or(false);
-        if !accepted {
-            return Err(ConnectError::ServerNotTrusted(seen));
+        let Some(tls) = &config.tls else {
+            warn!("connecting WITHOUT encryption or server verification (--no-tls)");
+            return run(MessageStream::new(stream), config, sink, on_status).await;
+        };
+
+        // Pin the server we know; for one we do not, accept the certificate at
+        // the TLS layer and ask before a single application byte is sent.
+        let pinned = just_trusted.or_else(|| tls.trust.pinned(&config.server));
+        let (cfg, observed) =
+            client_config(&tls.identity, pinned).map_err(|e| ConnectError::Tls(e.to_string()))?;
+        let name = ServerName::try_from(geserdesk_tls::SERVER_NAME).expect("a valid DNS name");
+        let handshake = tokio::time::timeout(
+            config.handshake_timeout,
+            TlsConnector::from(cfg).connect(name, stream),
+        )
+        .await
+        .map_err(|_| ConnectError::HandshakeTimeout)?;
+        let secured = match handshake {
+            Ok(s) => s,
+            Err(e) => {
+                let seen = *observed.lock().unwrap();
+                return Err(match (pinned, seen) {
+                    (Some(expected), Some(seen)) if expected != seen => {
+                        ConnectError::ServerChanged {
+                            server: config.server.clone(),
+                            expected,
+                            seen,
+                        }
+                    }
+                    _ => ConnectError::Tls(e.to_string()),
+                });
+            }
+        };
+        let seen = peer_fingerprint(secured.get_ref().1.peer_certificates())
+            .ok_or_else(|| ConnectError::Tls("the server sent no certificate".into()))?;
+
+        if pinned.is_none() {
+            let trust = Arc::clone(&tls.trust);
+            let server = config.server.clone();
+            let accepted = tokio::task::spawn_blocking(move || trust.confirm_new(&server, &seen))
+                .await
+                .unwrap_or(false);
+            if !accepted {
+                return Err(ConnectError::ServerNotTrusted(seen));
+            }
+            info!(fingerprint = %seen, "server trusted");
+            // Comparing a fingerprint takes a person far longer than the server
+            // waits for a Hello, so this connection has probably been closed.
+            // Start a fresh one, pinned to exactly what was just approved (if
+            // the server presents anything else this time, that is a fatal
+            // mismatch, not a second prompt).
+            just_trusted = Some(seen);
+            continue;
         }
-        info!(fingerprint = %seen, "server trusted");
+        return run(MessageStream::new(secured), config, sink, on_status).await;
     }
-    run(MessageStream::new(secured), config, sink).await
 }
 
 /// The handshake and session over an established (and, normally, secured)
@@ -336,6 +408,7 @@ async fn run<S>(
     mut ms: MessageStream<S>,
     config: &ClientConfig,
     mut sink: impl InputSink,
+    on_status: StatusFn<'_>,
 ) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -350,6 +423,7 @@ where
         keepalive_s = connected.keepalive.as_secs(),
         "connected"
     );
+    on_status(ClientStatus::Connected);
 
     let mut watch = MonitorWatch {
         name: config.name.clone(),
@@ -981,6 +1055,74 @@ mod tests {
                 matches!(err, ConnectError::HandshakeTimeout | ConnectError::Tls(_)),
                 "{err:?}"
             );
+        }
+
+        #[tokio::test]
+        async fn after_the_user_trusts_a_new_server_a_fresh_pinned_connection_is_used() {
+            use geserdesk_tls::server_config;
+            use geserdesk_tls::tokio_rustls::TlsAcceptor;
+
+            // A bare TLS server that records, per connection, whether a Hello
+            // ever arrived on it.
+            let server_id = Identity::generate("server").unwrap();
+            let acceptor = TlsAcceptor::from(server_config(&server_id).unwrap());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+            let log = Arc::clone(&seen);
+            tokio::spawn(async move {
+                loop {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let acceptor = acceptor.clone();
+                    let log = Arc::clone(&log);
+                    tokio::spawn(async move {
+                        let Ok(tls) = acceptor.accept(tcp).await else {
+                            return;
+                        };
+                        let mut ms = MessageStream::new(tls);
+                        let got_hello = matches!(
+                            tokio::time::timeout(
+                                Duration::from_millis(600),
+                                ms.recv::<ClientMsg>()
+                            )
+                            .await,
+                            Ok(Ok(ClientMsg::Hello { .. }))
+                        );
+                        log.lock().unwrap().push(got_hello);
+                        if got_hello {
+                            let _ = ms
+                                .send(&ServerMsg::Rejected {
+                                    reason: "stop here".into(),
+                                })
+                                .await;
+                        }
+                    });
+                }
+            });
+
+            let id = Arc::new(Identity::generate("client").unwrap());
+            let trust = TestTrust::new(true);
+            let config = ClientConfig {
+                server: addr.to_string(),
+                name: "win".into(),
+                monitors: vec![Rect::new(0, 0, 1920, 1080)],
+                detect: None,
+                tls: Some(ClientTls {
+                    identity: id,
+                    trust: Arc::clone(&trust) as Arc<dyn ServerTrust>,
+                }),
+                handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            };
+            let err = connect(&config, RecordingSink::default())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ConnectError::Rejected(_)), "{err:?}");
+            assert_eq!(trust.asked.load(Ordering::SeqCst), 1);
+
+            // Two TLS connections: the first (used for the prompt) never sent a
+            // Hello; the second, pinned, did.
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            assert_eq!(*seen.lock().unwrap(), vec![false, true]);
         }
     }
 }

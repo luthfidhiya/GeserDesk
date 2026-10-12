@@ -40,6 +40,22 @@ impl<T: InputSink + ?Sized> InputSink for &mut T {
     }
 }
 
+/// A boxed sink is a sink, so the kind can be chosen at runtime.
+impl<T: InputSink + ?Sized> InputSink for Box<T> {
+    fn enter(&mut self, at: Point) {
+        (**self).enter(at);
+    }
+    fn leave(&mut self) {
+        (**self).leave();
+    }
+    fn key(&mut self, ev: &KeyEvent) {
+        (**self).key(ev);
+    }
+    fn mouse(&mut self, ev: MouseEvent) {
+        (**self).mouse(ev);
+    }
+}
+
 /// Discards all input. Useful for `--dry-run` and headless runs.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NullSink;

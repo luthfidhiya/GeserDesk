@@ -8,12 +8,14 @@
 
 pub mod inject;
 pub mod net;
+pub mod trust_store;
 
 pub use inject::{InputSink, NullSink};
 pub use net::{
-    connect, connect_with_retry, ClientConfig, ClientTls, ConnectError, Connected, ReconnectPolicy,
-    ServerTrust, DEFAULT_HANDSHAKE_TIMEOUT,
+    connect, connect_observed, connect_with_retry, connect_with_status, ClientConfig, ClientStatus,
+    ClientTls, ConnectError, Connected, ReconnectPolicy, ServerTrust, DEFAULT_HANDSHAKE_TIMEOUT,
 };
+pub use trust_store::KnownServers;
 
 #[cfg(feature = "inject")]
 pub use inject::EnigoSink;

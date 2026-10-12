@@ -185,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
                 Some(ClientTls {
                     identity: Arc::new(identity),
                     trust: Arc::new(trust::FileTrust::new(
-                        dir.join("known_servers.toml"),
+                        geserdesk_client::KnownServers::in_dir(&dir),
                         forced,
                     )),
                 })

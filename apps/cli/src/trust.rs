@@ -13,57 +13,26 @@
 //! is refused outright.
 
 use std::io::{BufRead, IsTerminal, Write};
-use std::path::PathBuf;
 
-use geserdesk_client::ServerTrust;
+use geserdesk_client::{KnownServers, ServerTrust};
 use geserdesk_tls::Fingerprint;
 
 pub struct FileTrust {
-    path: PathBuf,
+    known: KnownServers,
     /// A fingerprint given on the command line (`--server-fingerprint`): it
     /// is pinned for whichever server we connect to, so nothing is asked.
     forced: Option<Fingerprint>,
 }
 
 impl FileTrust {
-    pub fn new(path: PathBuf, forced: Option<Fingerprint>) -> Self {
-        Self { path, forced }
-    }
-
-    fn read(&self) -> toml::Table {
-        std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|t| t.parse::<toml::Table>().ok())
-            .unwrap_or_default()
-    }
-
-    fn remember(&self, server: &str, fp: &Fingerprint) -> std::io::Result<()> {
-        let mut doc = self.read();
-        let servers = doc
-            .entry("servers")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        if let Some(t) = servers.as_table_mut() {
-            t.insert(server.to_string(), toml::Value::String(fp.to_string()));
-        }
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&self.path, doc.to_string())
+    pub fn new(known: KnownServers, forced: Option<Fingerprint>) -> Self {
+        Self { known, forced }
     }
 }
 
 impl ServerTrust for FileTrust {
     fn pinned(&self, server: &str) -> Option<Fingerprint> {
-        if let Some(fp) = self.forced {
-            return Some(fp);
-        }
-        self.read()
-            .get("servers")?
-            .as_table()?
-            .get(server)?
-            .as_str()?
-            .parse()
-            .ok()
+        self.forced.or_else(|| self.known.get(server))
     }
 
     fn confirm_new(&self, server: &str, fp: &Fingerprint) -> bool {
@@ -90,14 +59,11 @@ impl ServerTrust for FileTrust {
         if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
             return false;
         }
-        match self.remember(server, fp) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("could not save {}: {e}", self.path.display());
-                // Trusted for this run only; it will ask again next time.
-                true
-            }
+        if let Err(e) = self.known.remember(server, fp) {
+            eprintln!("could not save {}: {e}", self.known.path().display());
+            // Trusted for this run only; it will ask again next time.
         }
+        true
     }
 }
 
@@ -105,37 +71,11 @@ impl ServerTrust for FileTrust {
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("geserdesk-cli-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d.join("known_servers.toml")
-    }
-
-    #[test]
-    fn a_remembered_server_is_pinned_per_address() {
-        let t = FileTrust::new(temp("pin"), None);
-        let fp = Fingerprint::of_cert(b"srv");
-        assert_eq!(t.pinned("10.0.0.1:24810"), None);
-        t.remember("10.0.0.1:24810", &fp).unwrap();
-        t.remember("10.0.0.2:24810", &Fingerprint::of_cert(b"other"))
-            .unwrap();
-        assert_eq!(t.pinned("10.0.0.1:24810"), Some(fp));
-        assert_ne!(t.pinned("10.0.0.2:24810"), Some(fp));
-        assert_eq!(t.pinned("10.0.0.3:24810"), None);
-    }
-
     #[test]
     fn a_fingerprint_from_the_command_line_wins_and_is_never_asked_about() {
         let forced = Fingerprint::of_cert(b"forced");
-        let t = FileTrust::new(temp("forced"), Some(forced));
+        let dir = std::env::temp_dir().join(format!("geserdesk-cli-{}-forced", std::process::id()));
+        let t = FileTrust::new(KnownServers::in_dir(&dir), Some(forced));
         assert_eq!(t.pinned("anything:1"), Some(forced));
-    }
-
-    #[test]
-    fn a_damaged_file_pins_nothing_rather_than_trusting_something() {
-        let path = temp("damaged");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "[servers]\n\"a:1\" = \"not a fingerprint\"\n").unwrap();
-        assert_eq!(FileTrust::new(path, None).pinned("a:1"), None);
     }
 }
