@@ -110,11 +110,13 @@ geserdesk/
 ├── crates/
 │   ├── geserdesk-proto/          # M1: message types, codec, framing
 │   ├── geserdesk-platform/       # M4: trait + x11/ and windows/ backends
-│   ├── geserdesk-server/         # M5: screen layout, switch policy
-│   └── geserdesk-client/         # M3: connection, receive events, inject
+│   ├── geserdesk-tls/            # M8: identities, fingerprints, pinned TLS 1.3
+│   ├── geserdesk-server/         # M5: screen layout, switch policy; admin.rs for front ends
+│   ├── geserdesk-client/         # M3: connection, receive events, inject
+│   └── geserdesk-app/            # application layer for any front end (no GUI toolkit)
 └── apps/
     ├── cli/                      # the `geserdesk` binary (server / client)
-    └── gui/                      # M11: `geserdesk-gui` (eframe/egui + tray)
+    └── desktop/                  # M11: Tauri shell (src-tauri/) + React page (src/), with tray
 ```
 
 One CLI binary with subcommands (`geserdesk server`, `geserdesk client`), not
@@ -329,7 +331,7 @@ All testing is **direct Linux ↔ Windows**, no VM.
 | **M8** | TLS (`tokio-rustls`) + fingerprint TOFU, concept from `FingerprintDatabase.cpp`. **Safe on a real network from here on** |
 | **M9** | clipboard sync (`arboard` + change polling) |
 | **M10** | file transfer (32 KiB chunks on the M1 foundation) |
-| **M11** | `egui` GUI + tray (`tray-icon`) — drag-and-drop grid for the layout, **no system Qt/GTK dependency** |
+| **M11** | GUI + tray — drag-and-drop grid for the layout. Planned as `egui`; **built as Tauri 2 + React instead** (session 6): the layout editor and approvals were already a web UI, and one front end beats two. Costs a system WebView (WebKitGTK on Linux, WebView2 on Windows 11) |
 | **M12** | service/autostart (`windows-service`, systemd user unit) + packaging (`.deb`, InnoSetup installer) |
 
 ### Later
@@ -410,8 +412,17 @@ Not done / known limits:
 - **Approval in the layout editor** (decided with the user): pending list with fingerprints, *Percayai* / *Abaikan*, per-screen *Cabut kepercayaan*; saved as `fingerprint = "..."` in the config. Only a pending request with the exact fingerprint shown can be approved.
 - Found on the way: the handshake had **no timeout**, so a plaintext/TLS mismatch (or a stalled peer) left both sides waiting forever. Added 10 s limits on both ends.
 - Verified with the real binaries: new client -> pending -> approved in the browser -> connects on retry; wrong server fingerprint exits with an error; plaintext client refused; terminal prompt `n`/`y`/remembered. 162 tests.
-- **Not verified:** the Windows build (`ring` needs a C compiler; cross-checking from Linux needs mingw), and Windows key-file permissions.
+- **Confirmed on real hardware afterwards:** the Windows build (MSVC + `ring`), the TLS pairing (server fingerprint confirmed, client approved in the layout editor), a live session with cursor crossings, and Windows monitor detection (two monitors reported). **Still unchecked:** key-file permissions on Windows.
 - Both machines need rebuilding; a TLS client cannot talk to a `--no-tls` server or vice versa.
+
+### Session 5 — 2026-10-12 — the `geserdesk-gui` window
+
+- **Why:** the user wanted less CLI: a window like Barrier's (mode, settings, Start/Stop, status, live log). Layout and approvals stay on the server's web page; the client has no web page.
+- **`apps/gui`** (eframe/egui): Client or Server mode, remembered settings (`gui.toml`), coloured status, scrolling log fed by a `tracing` layer, *Buka pengaturan layar*, and a dialog instead of the terminal prompt for trusting a new server. `--start` begins immediately.
+- **Core changes it needed:** `run_server(config, capture, shutdown)` stops cleanly (closes every session via a `JoinSet`, drops the capture handle so the grab is released, stops the editor); `connect_with_status` reports a `ClientStatus`; the known-servers store moved to `geserdesk_client::KnownServers` so the CLI and the window share it.
+- **Bug found by driving the real window:** the prompt takes a human far longer than the server's 10 s Hello timeout, so the connection that showed the prompt was dead by the time the user clicked (log: `Broken pipe`, then a retry). After approval the client now opens a fresh connection pinned to exactly the approved fingerprint (a different certificate there is a fatal mismatch, not a second prompt).
+- Verified on this Linux desktop by typing into and clicking the window with XTest: type the address, Start, fingerprint dialog, approve on the server, connected; server mode Start/Stop/Start; closing the window frees the ports. 174 tests.
+- **Not done:** the tray icon (Windows-first; GTK on Linux), autostart, and any check of the Windows build of the window (`ring` needs a C compiler to cross-check from Linux).
 
 ---
 
@@ -470,3 +481,20 @@ with the `inject` feature.
 | Grab/warp timing on X11 is subtle and hard to debug | M4 (hotkey) separates "capture works" from "edge crossing works" so bugs can be isolated |
 | Stalling after the prototype runs | M3 is deliberately early as a morale marker; every milestone produces something visible |
 | Using it on a real network before TLS exists | Flagged explicitly: trusted networks only until M8 |
+
+### Session 6 — 2026-10-12 — one front end: Tauri + React, and a layered code base
+
+- **Why:** two half-finished front ends (the egui window and the axum web page) split the settings across two places, and window code had leaked into the core (`runner.rs` woke egui; `ui.rs` mixed state, validation, config writing and HTTP). The user asked for a single GUI on Tauri + React and a tidier core/GUI split.
+- **Decisions (with the user):** the web page is **deleted outright** (no HTTP left in the core, so `axum`/`serde_json`/`webbrowser` are gone from the workspace); UI is Tailwind + shadcn/ui; system packages installed from the session.
+- **Layers:** `proto -> platform/tls -> server/client -> geserdesk-app -> geserdesk-desktop -> React`.
+  - `geserdesk-server::admin::DeskState` is the old `ui.rs` minus HTTP: `snapshot()`, `apply_layout()`, `approve/dismiss/revoke()`, typed `AdminError`, same validation, same comment-preserving `toml_edit` writes, same undo when a config write fails. `run_server_with(.., ready)` hands the `DeskState` to the caller once the listener is up; `run_server` is unchanged for the CLI.
+  - `geserdesk-app` (new): `Session` (start/stop, `Status` over a `watch` channel, same 3 s grace before forcing a server down), `settings` (`gui.toml`, plus `close_to_tray`), `log` (ring buffer + `broadcast` stream), `trust` (`PromptTrust`, the 5-minute first-contact question).
+  - `apps/desktop/src-tauri`: commands, event forwarding, tray. Quit always stops the session first so the keyboard and mouse are released.
+  - `apps/desktop/src`: React; `lib/geometry.ts` is a pure port of the old page's snap/overlap/neighbour/auto-arrange code with vitest tests.
+- **Config:** `Config.ui` and `--no-ui` are gone; a leftover `[server] ui = ...` is ignored with a warning, so old configs still load.
+- **Tray:** icon + tooltip follow the status; menu = open, layout tab, Start/Stop, quit; left click toggles the window; closing the window hides it (setting `close_to_tray`); if the tray cannot be created the window closes normally.
+- **Verified:** `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` (all green; server 88, app 15), `vitest` (10), and the page builds.
+- **Driven end to end on this Ubuntu 24.04 / X11 desktop** (`tauri dev`, isolated `XDG_CONFIG_HOME`, loopback ports, input via libxdo, screenshots read back): server Start; a dry-run CLI client appearing under *Menunggu persetujuan* with the same fingerprint it printed; *Percayai* writing `fingerprint = ...` and the client getting in on its next retry; dragging with snap and *Simpan & terapkan* writing `x`/`y` with the config's comments intact; two-click *Cabut kepercayaan* removing the fingerprint; Stop releasing the port. Client mode: the first-contact dialog showed the server's fingerprint (matching the server log), *Percayai & Sambungkan* pinned it in `known_servers.toml`, the status became *Menunggu persetujuan*. Tray: icon visible, menu (Buka jendela / Pengaturan layar / Start-Stop / Keluar) works, its Stop and Start drive the session and the label follows the status, closing the window hides it with the session still running, *Pengaturan layar* re-shows it on the layout tab, *Keluar* stops the session and exits.
+- **Still not verified:** the Windows build of the app and the new CI steps (pnpm/Node install, Tauri apt packages); a real cursor crossing driven from the app (the test server never had a capturing client at an edge); the exit code of `tauri dev` after *Keluar* (pnpm printed `ELIFECYCLE` although the app logged a clean quit).
+- **Known gaps:** no toast when the window hides to the tray (a log line says so); on GNOME the window comes back at a different position after hide/show; the layout is polled every 2 s rather than pushed; autostart is still M12.
+- **UI rework (same session, after review):** mode tabs *Client | Server* now sit at the top; a server gets *Konfigurasi* and *Pengaturan monitor* beneath them, a client only its configuration. The monitor tab lists only machines that are connected right now (no stand-in boxes); trusted-but-offline machines get a small list so they can still be revoked. `DeskState::validate` now checks overlap only among connected machines. New `theme` setting (`system` / `light` / `dark`, in `gui.toml`) with a single sun/moon icon toggle (the stored value stays `system` until the first click). Checked by screenshot only (client + light, server + dark); the monitor tab itself was not driven again because the user's own server was running.

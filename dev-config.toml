@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Development config: Linux PC on the left, Windows PC on its right.
-# Start the server on the Linux box:
+# Start the server on the Linux box, from the desktop app (Server tab, pick this
+# file, Start; `pnpm -C apps/desktop tauri dev`) or from the CLI, which has no
+# layout editor:
 #   cargo run -p geserdesk-cli -- server --config dev-config.toml -v
 # Push the cursor against the right edge, or press Ctrl+Alt+Home, to switch.
-# Arrange the screens visually at http://127.0.0.1:24811/ (saves x/y below).
+# Connections are TLS: new clients are approved in the desktop app's "Susunan
+# layar" tab (it saves `fingerprint = "..."` below). `tls = false` / --no-tls is
+# for debugging only. Arrange the screens in the same tab (it saves x/y below).
 # Then the client on the Windows box:
 #   cargo run -p geserdesk-cli --features inject -- client --name windows-pc --server <LINUX-IP>:24810 -v
 
@@ -13,9 +17,14 @@ screen = "linux-pc"   # this machine's own screen
 
 [[screens]]
 name = "linux-pc"
+x = 3840
+y = 0
 
 [[screens]]
 name = "windows-pc"
+x = 1920
+y = 0
+fingerprint = "SHA256:37:f6:b8:19:29:82:8e:3c:c5:ec:0c:e6:f4:76:36:ec:98:de:7c:9c:d6:2b:e6:4e:85:7f:5b:ba:5e:64:a8:27"
 
 [links]
 linux-pc   = { right = "windows-pc" }
