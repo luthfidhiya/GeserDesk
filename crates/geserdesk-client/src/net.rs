@@ -128,6 +128,80 @@ where
     Ok(connected)
 }
 
+/// How [`connect_with_retry`] paces its attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectPolicy {
+    /// Wait before the first retry.
+    pub initial: Duration,
+    /// The wait doubles after each failure up to this.
+    pub max: Duration,
+    /// A connection that lasted at least this long counts as healthy, so the
+    /// next retry starts from `initial` again.
+    pub stable_after: Duration,
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(10),
+            stable_after: Duration::from_secs(10),
+        }
+    }
+}
+
+impl ConnectError {
+    /// Whether trying again could ever help. Only a protocol mismatch cannot:
+    /// the two programs need to be updated, not retried.
+    fn is_fatal(&self) -> bool {
+        matches!(self, ConnectError::Incompatible(_))
+    }
+}
+
+/// Keep a client connected: connect, run until the link drops, wait, repeat.
+///
+/// Survives the server restarting, the network blipping, and a stale session
+/// still being held by the server (it answers "already connected" until its
+/// keep-alive notices, and the retry simply tries again). On every drop the
+/// sink releases whatever was held, and the monitor list is re-read so a
+/// changed arrangement is reported at the next handshake.
+///
+/// Only returns for an error that retrying cannot fix (see
+/// [`ConnectError::is_fatal`]).
+pub async fn connect_with_retry(
+    config: &ClientConfig,
+    mut sink: impl InputSink,
+    policy: ReconnectPolicy,
+) -> ConnectError {
+    let mut config = config.clone();
+    let mut delay = policy.initial;
+    loop {
+        let started = tokio::time::Instant::now();
+        match connect(&config, &mut sink).await {
+            Ok(()) => info!("disconnected from the server"),
+            Err(e) if e.is_fatal() => return e,
+            Err(e) => warn!("connection failed: {e}"),
+        }
+        // Whatever the server had us holding is no longer being driven.
+        sink.leave();
+
+        if started.elapsed() >= policy.stable_after {
+            delay = policy.initial;
+        }
+        info!(retry_in_ms = delay.as_millis() as u64, "reconnecting");
+        tokio::time::sleep(delay).await;
+        delay = delay.saturating_mul(2).min(policy.max);
+
+        if let Some(detect) = config.detect {
+            if let Some(fresh) = tokio::task::spawn_blocking(detect).await.ok().flatten() {
+                if !fresh.is_empty() {
+                    config.monitors = fresh;
+                }
+            }
+        }
+    }
+}
+
 /// Connect, handshake, and run the session loop until the server closes or the
 /// connection drops.
 pub async fn connect(config: &ClientConfig, mut sink: impl InputSink) -> Result<(), ConnectError> {
@@ -410,5 +484,154 @@ mod tests {
         }
         // Reported once; the same list again is not news.
         assert!(w.check().await.is_none());
+    }
+
+    /// A server that accepts, completes the handshake, then hangs up.
+    async fn flaky_server(
+        listener: tokio::net::TcpListener,
+        reply: fn() -> ServerMsg,
+        accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ms = MessageStream::new(stream);
+            let _hello: ClientMsg = ms.recv().await.unwrap();
+            accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ms.send(&reply()).await.unwrap();
+            if matches!(reply(), ServerMsg::Welcome { .. }) {
+                ms.send(&ServerMsg::SetOptions(Default::default()))
+                    .await
+                    .unwrap();
+                ms.send(&ServerMsg::Close(CloseReason::ServerShutdown))
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    fn fast() -> ReconnectPolicy {
+        ReconnectPolicy {
+            initial: Duration::from_millis(10),
+            max: Duration::from_millis(40),
+            stable_after: Duration::from_secs(60),
+        }
+    }
+
+    fn cfg_for(addr: std::net::SocketAddr) -> ClientConfig {
+        ClientConfig {
+            server: addr.to_string(),
+            name: "pc".into(),
+            monitors: vec![Rect::new(0, 0, 1920, 1080)],
+            detect: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnects_after_the_server_hangs_up_and_releases_input_each_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(flaky_server(
+            listener,
+            || ServerMsg::Welcome {
+                version: PROTOCOL_VERSION,
+                keepalive: Duration::from_secs(3),
+            },
+            Arc::clone(&accepted),
+        ));
+
+        let mut sink = RecordingSink::default();
+        let cfg = cfg_for(addr);
+        let run = connect_with_retry(&cfg, &mut sink, fast());
+        // It never returns for a recoverable drop; give it time to loop.
+        let _ = tokio::time::timeout(Duration::from_millis(600), run).await;
+
+        let n = accepted.load(Ordering::SeqCst);
+        assert!(n >= 3, "only {n} connection attempts");
+        assert!(sink.leaves >= 3, "input was released {} times", sink.leaves);
+    }
+
+    #[tokio::test]
+    async fn keeps_retrying_while_the_server_is_down() {
+        // Nothing listens here, so every attempt is refused.
+        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = free.local_addr().unwrap();
+        drop(free);
+
+        let cfg = cfg_for(addr);
+        let mut sink = RecordingSink::default();
+        let run = connect_with_retry(&cfg, &mut sink, fast());
+        assert!(tokio::time::timeout(Duration::from_millis(300), run)
+            .await
+            .is_err());
+        assert!(sink.leaves >= 3);
+    }
+
+    #[tokio::test]
+    async fn a_protocol_mismatch_is_not_retried() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(flaky_server(
+            listener,
+            || ServerMsg::Incompatible {
+                server_version: Version::new(9, 0),
+            },
+            Arc::clone(&accepted),
+        ));
+
+        let cfg = cfg_for(addr);
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            connect_with_retry(&cfg, RecordingSink::default(), fast()),
+        )
+        .await
+        .expect("should give up at once");
+        assert!(matches!(err, ConnectError::Incompatible(_)));
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_monitors_are_used_when_reconnecting() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        fn two() -> Option<Vec<Rect>> {
+            Some(vec![
+                Rect::new(0, 0, 1920, 1080),
+                Rect::new(1920, 0, 1280, 1024),
+            ])
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen2 = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ms = MessageStream::new(stream);
+                if let Ok(ClientMsg::Hello { screen, .. }) = ms.recv().await {
+                    seen2.store(screen.monitors.len(), Ordering::SeqCst);
+                }
+                // Hang up without a reply: the client sees a failed handshake.
+            }
+        });
+
+        let mut cfg = cfg_for(addr);
+        cfg.detect = Some(two);
+        let mut sink = RecordingSink::default();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(400),
+            connect_with_retry(&cfg, &mut sink, fast()),
+        )
+        .await;
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
     }
 }

@@ -50,6 +50,10 @@ cargo run -p geserdesk-cli -- server --config dev-config.toml -v
 cargo run -p geserdesk-cli -- client --name windows-pc --server 127.0.0.1:24810 --dry-run -v
 ```
 
+A client reconnects by itself when the link drops or the server restarts (retrying
+after 1 s, 2 s, 4 s ... up to 10 s); `--no-reconnect` exits instead. Only a
+protocol-version mismatch stops it.
+
 A client reports its monitors automatically; `--monitors 1920x1080+0+0,1280x1024+1920+0`
 overrides detection (VMs, testing).
 

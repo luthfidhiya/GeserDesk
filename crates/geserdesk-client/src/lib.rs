@@ -10,7 +10,9 @@ pub mod inject;
 pub mod net;
 
 pub use inject::{InputSink, NullSink};
-pub use net::{connect, ClientConfig, ConnectError, Connected};
+pub use net::{
+    connect, connect_with_retry, ClientConfig, ConnectError, Connected, ReconnectPolicy,
+};
 
 #[cfg(feature = "inject")]
 pub use inject::EnigoSink;

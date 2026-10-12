@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use geserdesk_client::{connect, ClientConfig, NullSink};
+use geserdesk_client::{connect, connect_with_retry, ClientConfig, NullSink, ReconnectPolicy};
 use geserdesk_proto::Rect;
 use geserdesk_server::{serve, serve_with_capture, Config};
 use tracing::info;
@@ -60,6 +60,9 @@ enum Command {
         /// Log input events instead of injecting them.
         #[arg(long)]
         dry_run: bool,
+        /// Exit when the connection drops instead of reconnecting.
+        #[arg(long)]
+        no_reconnect: bool,
         /// Override monitor detection: comma-separated `WxH+X+Y`, e.g.
         /// `1920x1080+0+0,1280x1024+1920+0`.
         #[arg(long)]
@@ -100,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
             name,
             server,
             dry_run,
+            no_reconnect,
             monitors: forced,
         } => {
             let forced = forced
@@ -134,31 +138,44 @@ async fn main() -> anyhow::Result<()> {
                 },
             };
             info!(name = %cfg.name, server = %cfg.server, "starting client");
-            run_client(cfg, dry_run).await
+            run_client(cfg, dry_run, !no_reconnect).await
         }
     }
 }
 
 #[cfg(feature = "inject")]
-async fn run_client(cfg: ClientConfig, dry_run: bool) -> anyhow::Result<()> {
+async fn run_client(cfg: ClientConfig, dry_run: bool, reconnect: bool) -> anyhow::Result<()> {
     if dry_run {
-        connect(&cfg, NullSink).await?;
+        drive(&cfg, NullSink, reconnect).await
     } else {
         let sink = geserdesk_client::EnigoSink::new().context("initialising input injection")?;
-        connect(&cfg, sink).await?;
+        drive(&cfg, sink, reconnect).await
     }
-    Ok(())
 }
 
 #[cfg(not(feature = "inject"))]
-async fn run_client(cfg: ClientConfig, dry_run: bool) -> anyhow::Result<()> {
+async fn run_client(cfg: ClientConfig, dry_run: bool, reconnect: bool) -> anyhow::Result<()> {
     if !dry_run {
         tracing::warn!(
             "built without the `inject` feature; running as if --dry-run (no real input)"
         );
     }
-    connect(&cfg, NullSink).await?;
-    Ok(())
+    drive(&cfg, NullSink, reconnect).await
+}
+
+/// Run the client once, or keep it connected for as long as it can be.
+async fn drive(
+    cfg: &ClientConfig,
+    sink: impl geserdesk_client::InputSink,
+    reconnect: bool,
+) -> anyhow::Result<()> {
+    if reconnect {
+        let fatal = connect_with_retry(cfg, sink, ReconnectPolicy::default()).await;
+        Err(fatal.into())
+    } else {
+        connect(cfg, sink).await?;
+        Ok(())
+    }
 }
 
 /// Parse `WxH+X+Y[,WxH+X+Y...]` (the geometry notation `xrandr` prints).
