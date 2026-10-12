@@ -11,6 +11,7 @@ members = [
     "crates/geserdesk-client",
     "crates/geserdesk-app",
     "apps/cli",
+    "apps/desktop/src-tauri",
 ]
 
 [workspace.package]
@@ -48,6 +49,11 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem
 sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 directories = "5"
+
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-build = "2.7"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-clipboard-manager = "2.4"
 
 [profile.release]
 lto = "thin"

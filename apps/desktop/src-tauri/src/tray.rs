@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! The system tray: shows whether GeserDesk is running, and offers Start/Stop,
+//! the window and Quit without opening the window.
+
+use geserdesk_app::Status;
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, Wry};
+use tracing::{error, info, warn};
+
+use crate::events::NAVIGATE;
+use crate::state::AppState;
+
+const IDLE: &[u8] = include_bytes!("../icons/tray-idle.png");
+const ON: &[u8] = include_bytes!("../icons/tray-on.png");
+const ERROR: &[u8] = include_bytes!("../icons/tray-error.png");
+
+const ID_OPEN: &str = "open";
+const ID_LAYOUT: &str = "layout";
+const ID_TOGGLE: &str = "toggle";
+const ID_QUIT: &str = "quit";
+
+/// Kept in app state so a status change can update the icon and the menu.
+struct Handles {
+    tray: TrayIcon<Wry>,
+    toggle: MenuItem<Wry>,
+}
+
+/// Build the tray. A desktop without one (some Linux setups) only loses the tray:
+/// the window then behaves like a normal one.
+pub fn build(app: &AppHandle) {
+    match try_build(app) {
+        Ok(handles) => {
+            app.manage(handles);
+            app.state::<AppState>().set_tray_ok(true);
+            reflect(app, &app.state::<AppState>().session.status());
+        }
+        Err(e) => warn!(error = %e, "no tray icon; closing the window will quit the app"),
+    }
+}
+
+fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
+    let open = MenuItem::with_id(app, ID_OPEN, "Buka jendela", true, None::<&str>)?;
+    let layout = MenuItem::with_id(app, ID_LAYOUT, "Pengaturan monitor", true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, ID_QUIT, "Keluar", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &layout,
+            &PredefinedMenuItem::separator(app)?,
+            &toggle,
+            &PredefinedMenuItem::separator(app)?,
+            &quit_item,
+        ],
+    )?;
+    let tray = TrayIconBuilder::with_id("main")
+        .icon(Image::from_bytes(IDLE)?)
+        .tooltip("GeserDesk")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            ID_OPEN => show_window(app),
+            ID_LAYOUT => {
+                show_window(app);
+                let _ = app.emit(NAVIGATE, "layout");
+            }
+            ID_TOGGLE => toggle_session(app),
+            ID_QUIT => quit(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(Handles { tray, toggle })
+}
+
+/// Update the icon, tooltip and Start/Stop label to match `status`.
+pub fn reflect(app: &AppHandle, status: &Status) {
+    let Some(h) = app.try_state::<Handles>() else {
+        return;
+    };
+    let (icon, running) = match status {
+        Status::Connected | Status::ServerRunning => (ON, true),
+        Status::Connecting | Status::AwaitingApproval(_) | Status::Retrying(_) => (IDLE, true),
+        Status::Stopped => (IDLE, false),
+        Status::Fatal(_) | Status::Error(_) => (ERROR, false),
+    };
+    if let Ok(image) = Image::from_bytes(icon) {
+        let _ = h.tray.set_icon(Some(image));
+    }
+    let _ = h
+        .tray
+        .set_tooltip(Some(format!("GeserDesk — {}", label(status))));
+    let _ = h.toggle.set_text(if running { "Stop" } else { "Start" });
+}
+
+fn label(status: &Status) -> String {
+    match status {
+        Status::Stopped => "berhenti".into(),
+        Status::Connecting => "menyambung…".into(),
+        Status::Connected => "tersambung".into(),
+        Status::AwaitingApproval(_) => "menunggu persetujuan di server".into(),
+        Status::Retrying(why) => format!("terputus, mencoba lagi ({why})"),
+        Status::Fatal(why) => format!("gagal: {why}"),
+        Status::ServerRunning => "server berjalan".into(),
+        Status::Error(why) => format!("kesalahan: {why}"),
+    }
+}
+
+fn toggle_session(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        if state.session.is_running() {
+            state.session.stop().await;
+        } else if let Err(e) = state.start() {
+            // Needs the person: show the window so the problem is visible.
+            error!("{e}");
+            show_window(&app);
+        }
+    });
+}
+
+pub fn show_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+fn toggle_window(app: &AppHandle) {
+    match app.get_webview_window("main") {
+        Some(w) if w.is_visible().unwrap_or(false) && w.is_focused().unwrap_or(false) => {
+            let _ = w.hide();
+        }
+        _ => show_window(app),
+    }
+}
+
+/// Quit for real: stop the client or server first so the keyboard and mouse
+/// are given back, then exit.
+pub fn quit(app: &AppHandle) {
+    if !app.state::<AppState>().begin_quit() {
+        return;
+    }
+    info!("quitting");
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        app.state::<AppState>().session.stop().await;
+        app.exit(0);
+    });
+}
