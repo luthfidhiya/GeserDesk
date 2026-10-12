@@ -5,6 +5,7 @@
 resolver = "2"
 members = [
     "crates/geserdesk-proto",
+    "crates/geserdesk-platform",
     "crates/geserdesk-server",
     "crates/geserdesk-client",
     "apps/cli",
@@ -20,6 +21,7 @@ authors = ["GeserDesk contributors"]
 
 [workspace.dependencies]
 geserdesk-proto = { path = "crates/geserdesk-proto" }
+geserdesk-platform = { path = "crates/geserdesk-platform" }
 geserdesk-server = { path = "crates/geserdesk-server" }
 geserdesk-client = { path = "crates/geserdesk-client" }
 
