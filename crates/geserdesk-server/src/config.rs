@@ -7,6 +7,7 @@
 //! ```toml
 //! [server]
 //! listen = "0.0.0.0:24810"
+//! screen = "linux-pc"   # this machine's own screen (default: the first one)
 //!
 //! [[screens]]
 //! name = "linux-pc"
@@ -32,9 +33,14 @@ use crate::layout::{Layout, LinkError, SwitchPolicy};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
+    /// The screen this server's own keyboard and mouse belong to.
+    pub local_screen: String,
     pub layout: Layout,
     pub policy: SwitchPolicy,
     pub options: geserdesk_proto::Options,
+    /// Debug aid for M3: after a client connects, drive its cursor in a square
+    /// so injection can be tested without a capture backend. Not read from TOML.
+    pub demo: bool,
 }
 
 /// Errors from loading a config.
@@ -56,6 +62,8 @@ pub enum ConfigError {
     NoScreens,
     #[error("duplicate screen name {0:?}")]
     DuplicateScreen(String),
+    #[error("[server] screen {0:?} is not one of the defined screens")]
+    UnknownLocalScreen(String),
     #[error("link refers to unknown screen: {0}")]
     UnknownScreen(#[from] LinkError),
 }
@@ -98,6 +106,12 @@ impl Config {
             names.push(s.name.clone());
         }
 
+        let local_screen = match raw.server.as_ref().and_then(|s| s.screen.clone()) {
+            Some(name) if names.contains(&name) => name,
+            Some(name) => return Err(ConfigError::UnknownLocalScreen(name)),
+            None => names[0].clone(),
+        };
+
         let mut layout = Layout::new(names);
         for (from, links) in &raw.links {
             for (edge, to) in links.edges() {
@@ -123,9 +137,11 @@ impl Config {
 
         Ok(Config {
             listen,
+            local_screen,
             layout,
             policy,
             options,
+            demo: false,
         })
     }
 }
@@ -149,6 +165,8 @@ struct RawConfig {
 #[derive(Debug, Deserialize)]
 struct ServerSection {
     listen: Option<String>,
+    /// Name of the server's own screen; defaults to the first `[[screens]]`.
+    screen: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -299,5 +317,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(e, ConfigError::ListenAddr { .. }));
+    }
+
+    #[test]
+    fn local_screen_defaults_to_first_and_can_be_set() {
+        let base = r#"
+            [[screens]]
+            name = "a"
+            [[screens]]
+            name = "b"
+        "#;
+        assert_eq!(Config::parse(base).unwrap().local_screen, "a");
+        let chosen = format!("[server]\nscreen = \"b\"\n{base}");
+        assert_eq!(Config::parse(&chosen).unwrap().local_screen, "b");
+        let bad = format!("[server]\nscreen = \"zzz\"\n{base}");
+        assert!(matches!(
+            Config::parse(&bad),
+            Err(ConfigError::UnknownLocalScreen(_))
+        ));
     }
 }
