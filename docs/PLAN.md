@@ -367,6 +367,32 @@ cargo run -p geserdesk-cli --features inject -- client --name windows-pc --serve
 # if needed (consider bumping to enigo 0.6 to drop the libxdo C dependency).
 ```
 
+### Session 2 — 2026-10-12 — M3 verified; M4 + M5 + M6 on Linux/X11
+
+| Area | Status | Verification |
+|---|---|---|
+| **M3** — `EnigoSink` injection | done on Linux | server `--demo` drove the real cursor through a square on X11 |
+| `geserdesk-platform` crate: `CaptureEvent`/`CaptureCmd`, `keymap` (evdev -> HID), X11 backend (`x11rb`, dedicated thread) | done | 12 unit tests; exercised against a live X server |
+| **M4** — grab/ungrab, blank cursor, delta-by-warp, hotkey **Ctrl+Alt+Home** (polled via `QueryKeymap`) | done | hotkey toggled there and back; grabbed keys reached the client |
+| **M5** — edge detection, proportional entry point, return through the link, multi-hop between remotes, disconnect handling | done | `router::Core` pure state machine (19 tests incl. a fake-capture -> TCP pipeline); live X11 edge crossing both ways |
+| **M6** — keyboard: HID + `ch` + modifiers, auto-repeat (XKB detectable repeat), release by remembered key | done on Linux | `a`, `Shift+a`, Enter, arrows, mouse buttons, wheel all arrived correctly |
+| `Hub` (per-client queues), `local_screen` config, real client display size via `enigo` | done | tests |
+
+Bugs found and fixed on the way:
+
+- `MessageStream::recv` used `read_exact`, which is **not cancel-safe**; losing a `select!` race could drop half a frame and desync the stream. Rewritten around a persistent buffer.
+- Ctrl-C did nothing: the accept loop never watched the shutdown signal.
+- After a grab, deltas were measured from the screen centre instead of the pointer's real position, giving a huge first jump.
+- **Ctrl+Alt+F1-F12 can't be the hotkey**: Xorg turns them into VT switches and never delivers them. Passive `XGrabKey` also got nothing under XTest here, so the hotkey is polled instead.
+
+Not done / known limits:
+
+- Windows is still client-only (capture is M7). Windows injection untested.
+- On Windows `enigo` types printable keys as Unicode, so Ctrl+letter shortcuts may not behave; a VK/scancode path is needed.
+- The hotkey's own modifiers are released on the remote but the local app that had focus never sees their release (can leave a modifier "stuck" until the next press).
+- Mouse is always sent as absolute (`MoveAbs`) positions; `relative_mouse_moves` (for games) is not honoured yet.
+- Do **not** run server (capture) and client (inject) on the same X display: the client's injected input is captured again. Use `--dry-run` for loopback.
+
 ---
 
 ## Odds of getting there (≥15 h/week, Linux + Windows only)

@@ -2,11 +2,13 @@
 # Development config: Linux PC on the left, Windows PC on its right.
 # Start the server on the Linux box:
 #   cargo run -p geserdesk-cli -- server --config dev-config.toml -v
+# Push the cursor against the right edge, or press Ctrl+Alt+Home, to switch.
 # Then the client on the Windows box:
 #   cargo run -p geserdesk-cli --features inject -- client --name windows-pc --server <LINUX-IP>:24810 -v
 
 [server]
 listen = "0.0.0.0:24810"
+screen = "linux-pc"   # this machine's own screen
 
 [[screens]]
 name = "linux-pc"

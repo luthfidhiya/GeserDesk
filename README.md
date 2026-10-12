@@ -8,15 +8,19 @@ Barrier/Synergy), with a fresh, clean wire protocol.
 
 **Targets:** Linux (X11) and Windows 11. macOS and Wayland are deferred.
 
-**Status:** early. Milestones M1 and M2 are complete and tested; M3 (input
-injection) is written but not yet exercised on real hardware.
+**Status:** early. On Linux/X11 the server captures the keyboard and mouse and
+moves them to a client by pushing the cursor against a screen edge (or
+`Ctrl+Alt+Home`). Windows is client-only so far.
 
 | Milestone | Status |
 |---|---|
 | M1 — protocol, codec, framing | ✅ done — 30 unit tests + 6 integration tests |
 | M2 — TCP + tokio, handshake, keep-alive | ✅ done — verified over loopback and end-to-end |
-| M3 — input injection via `enigo` | 🚧 code exists (`--features inject`), not yet tested |
-| M4+ — X11 capture, edge crossing, keyboard, … | ⬜ not started |
+| M3 — input injection via `enigo` (`--features inject`) | ✅ verified on Linux/X11 |
+| M4 — X11 capture + hotkey switching | ✅ done |
+| M5 — edge crossing | ✅ done |
+| M6 — full keyboard (HID, modifiers, auto-repeat) | ✅ done on Linux |
+| M7+ — Windows capture, TLS, clipboard, files, GUI | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
 in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -27,7 +31,7 @@ Requires Rust ≥ 1.75. On Linux the `inject` feature (M3) needs `libxdo-dev`.
 
 ```bash
 cargo build --workspace          # everything except real injection
-cargo test  --workspace          # 57 tests, no devices or GUI needed
+cargo test  --workspace          # no devices or GUI needed
 cargo clippy --workspace --all-targets
 cargo fmt --all --check
 
@@ -48,6 +52,15 @@ cargo run -p geserdesk-cli -- client --name windows-pc --server 127.0.0.1:24810 
 `--dry-run` logs input events instead of injecting them (useful without a
 graphical session).
 
+On Linux the server captures this machine's keyboard and mouse. Push the cursor
+against the edge linked to a connected client (see `[links]`), or press
+**Ctrl+Alt+Home**, to send input to it; push back (or press the hotkey again) to
+return. `--no-capture` runs the network side only; `--demo` makes the server
+drive a connected client's cursor in a square without capturing anything.
+
+> Don't run the capturing server and an *injecting* client on the same X
+> display — the injected input would be captured again. Use `--dry-run` there.
+
 ## Try it (Linux ↔ Windows, two machines)
 
 1. Edit `dev-config.toml`: screen names and the `[links]` arrangement.
@@ -63,7 +76,8 @@ graphical session).
 
 ```
 crates/geserdesk-proto     message types, postcard codec, length-prefixed framing
-crates/geserdesk-server    TOML config, screen layout + switch policy (pure functions), listener
+crates/geserdesk-platform  input capture: X11 backend, evdev->HID key table
+crates/geserdesk-server    TOML config, layout + switch policy, client hub, router, listener
 crates/geserdesk-client    connection + handshake, the InputSink trait + enigo backend
 apps/cli                   the `geserdesk` binary (server / client subcommands)
 ```
