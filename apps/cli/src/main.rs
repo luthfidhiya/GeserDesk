@@ -4,13 +4,20 @@
 //! ```text
 //! geserdesk server --config config.toml
 //! geserdesk client --name windows-pc --server 192.168.1.10:24810
+//! geserdesk status        # what a running daemon is doing
+//! geserdesk stop          # end it
 //! ```
+//!
+//! `server` also opens a control channel, so the desktop app (or `status` /
+//! `stop`) can attach to it; `--no-control` runs it without one.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use geserdesk_app::daemon::{DaemonOptions, Initial};
+use geserdesk_app::{BufferLayer, Endpoint, LogBuffer};
 use geserdesk_client::{
     connect, connect_with_retry, ClientConfig, ClientTls, NullSink, ReconnectPolicy,
     DEFAULT_HANDSHAKE_TIMEOUT,
@@ -20,6 +27,7 @@ use geserdesk_server::{serve, serve_with_capture, Config};
 use tracing::{info, warn};
 use tracing_subscriber::{prelude::*, EnvFilter};
 
+mod control;
 mod trust;
 
 #[derive(Parser)]
@@ -59,7 +67,14 @@ enum Command {
         /// configuration directory).
         #[arg(long)]
         identity_dir: Option<PathBuf>,
+        /// Do not open the control channel the desktop app attaches to.
+        #[arg(long)]
+        no_control: bool,
     },
+    /// Show what the running daemon is doing (exit code 1 if none runs).
+    Status,
+    /// Stop the running daemon and its session.
+    Stop,
     /// Run as a client (a machine receiving synthesized input).
     Client {
         /// This machine's screen name; must match the server config.
@@ -96,7 +111,8 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
+    let log = LogBuffer::new();
+    init_tracing(cli.verbose, &log);
 
     match cli.command {
         Command::Server {
@@ -105,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
             no_capture,
             no_tls,
             identity_dir,
+            no_control,
         } => {
             let mut cfg = Config::load(&config)
                 .with_context(|| format!("loading config from {}", config.display()))?;
@@ -118,12 +135,30 @@ async fn main() -> anyhow::Result<()> {
                 listen = %cfg.listen,
                 "starting server"
             );
-            if demo || no_capture {
-                serve(cfg).await
+            let capture = !(demo || no_capture);
+            if no_control {
+                if capture {
+                    serve_with_capture(cfg).await
+                } else {
+                    serve(cfg).await
+                }
             } else {
-                serve_with_capture(cfg).await
+                let opts = DaemonOptions {
+                    endpoint: Endpoint::default_for_user()
+                        .context("no directory for the control channel")?,
+                    started_by: "cli".into(),
+                    exit_on_stop: true,
+                    idle_timeout: None,
+                    initial: Some(Initial::Server {
+                        config: Box::new(cfg),
+                        capture,
+                    }),
+                };
+                geserdesk_app::daemon::run(opts, log).await
             }
         }
+        Command::Status => std::process::exit(control::status().await?),
+        Command::Stop => std::process::exit(control::stop().await?),
         Command::Client {
             name,
             server,
@@ -255,7 +290,7 @@ fn parse_monitors(s: &str) -> Result<Vec<Rect>, String> {
         .collect()
 }
 
-fn init_tracing(verbose: u8) {
+fn init_tracing(verbose: u8, log: &LogBuffer) {
     let default = match verbose {
         0 => "info",
         1 => "debug",
@@ -265,6 +300,7 @@ fn init_tracing(verbose: u8) {
         .unwrap_or_else(|_| EnvFilter::new(format!("geserdesk={default},geserdesk_cli={default}")));
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(BufferLayer(log.clone()))
         .with(filter)
         .init();
 }

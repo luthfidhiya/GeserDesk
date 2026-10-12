@@ -189,8 +189,8 @@ impl Session {
             let sink: Box<dyn InputSink> = if log_only {
                 Box::new(NullSink)
             } else {
-                match geserdesk_client::EnigoSink::new() {
-                    Ok(s) => Box::new(s),
+                match real_sink() {
+                    Ok(s) => s,
                     Err(e) => {
                         error!(error = %e, "cannot inject input on this machine");
                         this.set(Status::Error(format!("tidak bisa menyuntik input: {e}")));
@@ -280,6 +280,19 @@ impl Session {
         }
         self.answer_prompt(false); // a question left open would hang its thread
     }
+}
+
+/// The sink that really moves this machine's pointer and presses its keys.
+#[cfg(feature = "inject")]
+fn real_sink() -> Result<Box<dyn InputSink>, String> {
+    geserdesk_client::EnigoSink::new()
+        .map(|s| Box::new(s) as Box<dyn InputSink>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(feature = "inject"))]
+fn real_sink() -> Result<Box<dyn InputSink>, String> {
+    Err("dibangun tanpa penyuntikan input (fitur `inject`)".into())
 }
 
 impl Drop for Session {

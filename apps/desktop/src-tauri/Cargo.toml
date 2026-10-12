@@ -20,7 +20,7 @@ path = "src/main.rs"
 tauri-build = { workspace = true }
 
 [dependencies]
-geserdesk-app.workspace = true
+geserdesk-app = { workspace = true, features = ["inject"] }
 geserdesk-proto.workspace = true
 tauri = { workspace = true }
 tauri-plugin-dialog = { workspace = true }

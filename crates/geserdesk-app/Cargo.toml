@@ -9,11 +9,16 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Real input injection for clients (needs libxdo on Linux). Off for a headless CLI.
+default = []
+inject = ["geserdesk-client/inject"]
+
 [dependencies]
 geserdesk-tls.workspace = true
 geserdesk-platform.workspace = true
 geserdesk-server.workspace = true
-geserdesk-client = { workspace = true, features = ["inject"] }
+geserdesk-client.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

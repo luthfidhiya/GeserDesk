@@ -16,7 +16,7 @@ path = "src/main.rs"
 [features]
 # Forward real input injection to the client crate.
 default = []
-inject = ["geserdesk-client/inject"]
+inject = ["geserdesk-client/inject", "geserdesk-app/inject"]
 
 [dependencies]
 geserdesk-proto.workspace = true
@@ -24,6 +24,7 @@ geserdesk-tls.workspace = true
 geserdesk-platform.workspace = true
 geserdesk-server.workspace = true
 geserdesk-client.workspace = true
+geserdesk-app.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true

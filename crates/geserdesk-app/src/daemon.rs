@@ -17,7 +17,7 @@ use tracing::info;
 use crate::control::service::{wait_closed, Service};
 use crate::control::{Endpoint, StartSpec};
 use crate::log::LogBuffer;
-use crate::session::Session;
+use crate::session::{Session, Status};
 
 /// How long a session that ended on its own stays visible before the daemon exits.
 const LINGER: Duration = Duration::from_secs(1);
@@ -107,9 +107,15 @@ pub async fn run(opts: DaemonOptions, log: LogBuffer) -> anyhow::Result<()> {
         }
     }
 
+    // A session that ended by itself in failure is the daemon's failure too, so
+    // a script running `geserdesk server` sees a non-zero exit.
+    let outcome = match session.status() {
+        Status::Error(why) | Status::Fatal(why) => Err(anyhow!(why)),
+        _ => Ok(()),
+    };
     sleep(FAREWELL).await;
     let _ = serving.await;
-    Ok(())
+    outcome
 }
 
 /// Ctrl-C everywhere, and SIGTERM where there is one.

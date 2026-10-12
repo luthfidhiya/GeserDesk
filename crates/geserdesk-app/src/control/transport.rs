@@ -20,6 +20,10 @@ pub type Stream = ls::Stream;
 /// Overrides the directory the socket and token live in (tests, isolated runs).
 pub const DIR_ENV: &str = "GESERDESK_RUNTIME_DIR";
 
+/// Longest socket path a Unix `sockaddr_un` can hold on the platforms we run on.
+#[cfg(unix)]
+const MAX_SOCKET_PATH: usize = 100;
+
 /// Where a daemon listens and where controllers find it.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -96,6 +100,21 @@ impl Endpoint {
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(unix)]
+        {
+            // sun_path holds 108 bytes on Linux (104 on some BSDs), NUL included.
+            let len = self.socket_path().as_os_str().len();
+            if len > MAX_SOCKET_PATH {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the control socket path is too long ({len} bytes, at most {MAX_SOCKET_PATH}): {} \
+                         (set {DIR_ENV} to a shorter directory)",
+                        self.socket_path().display()
+                    ),
+                ));
+            }
         }
         if self.connect().await.is_ok() {
             return Err(io::Error::new(
@@ -198,6 +217,18 @@ mod tests {
         let (a, b) = (new_token().unwrap(), new_token().unwrap());
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_directory_that_makes_the_socket_path_too_long_is_explained() {
+        let long = std::env::temp_dir().join("x".repeat(120));
+        let err = Endpoint::in_dir(long).bind().await.err().expect("refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("too long") && text.contains(DIR_ENV),
+            "{text}"
+        );
     }
 
     #[test]
