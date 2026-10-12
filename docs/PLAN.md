@@ -403,6 +403,16 @@ Not done / known limits:
 
 **Needs a rebuild on both machines** (protocol 2.0 is not compatible with 1.x).
 
+### Session 4 — 2026-10-12 — M8: TLS, pinning, trust on first use
+
+- **`geserdesk-tls`**: self-signed identities (`rcgen`), SHA-256 fingerprints, TLS 1.3 only via `rustls` + `ring` (no OpenSSL, no CMake/NASM), custom verifiers that check the handshake signature in full but judge trust by fingerprint.
+- **Both directions authenticated.** Client pins the server (first contact asks; a changed certificate is fatal and never retried). Server requires a client certificate and maps fingerprint -> screen name after `Hello`; unknown or changed certificates are refused and listed for approval.
+- **Approval in the layout editor** (decided with the user): pending list with fingerprints, *Percayai* / *Abaikan*, per-screen *Cabut kepercayaan*; saved as `fingerprint = "..."` in the config. Only a pending request with the exact fingerprint shown can be approved.
+- Found on the way: the handshake had **no timeout**, so a plaintext/TLS mismatch (or a stalled peer) left both sides waiting forever. Added 10 s limits on both ends.
+- Verified with the real binaries: new client -> pending -> approved in the browser -> connects on retry; wrong server fingerprint exits with an error; plaintext client refused; terminal prompt `n`/`y`/remembered. 162 tests.
+- **Not verified:** the Windows build (`ring` needs a C compiler; cross-checking from Linux needs mingw), and Windows key-file permissions.
+- Both machines need rebuilding; a TLS client cannot talk to a `--no-tls` server or vice versa.
+
 ---
 
 ## Odds of getting there (≥15 h/week, Linux + Windows only)

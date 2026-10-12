@@ -21,7 +21,8 @@ moves them to a client by pushing the cursor against a screen edge (or
 | M5 — edge crossing | ✅ done |
 | M6 — full keyboard (HID, modifiers, auto-repeat) | ✅ done on Linux |
 | Multi-monitor detection + browser layout editor | ✅ done (Windows detection not yet run on real hardware) |
-| M7+ — Windows capture, TLS, clipboard, files, native GUI | ⬜ not started |
+| M8 — TLS 1.3, certificate pinning, trust-on-first-use | ✅ done (Windows build not yet run) |
+| M7, M9+ — Windows capture, clipboard, files, native GUI | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
 in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -84,13 +85,36 @@ drive a connected client's cursor in a square without capturing anything.
 3. On the Windows box (client):
    `cargo run -p geserdesk-cli --features inject -- client --name windows-pc --server <LINUX-IP>:24810 -v`
 
-> ⚠️ The transport is still **plain, unencrypted TCP**. TLS arrives in M8. Until
-> then, only use this on a network you trust.
+> The connection is **TLS 1.3 with mutual authentication** (see *Security* below).
+> `--no-tls` on both sides turns it off for debugging; never do that on a real network.
+
+## Security
+
+Every machine has a self-signed certificate (created on first run, kept in
+`~/.config/geserdesk/` or `%APPDATA%\geserdesk\config`, key file readable only by
+you). Nobody is trusted until a person says so, and trust is a certificate
+**fingerprint**, which you compare by eye:
+
+* **Client -> server.** On first contact the client prints the server's
+  fingerprint and asks `Trust this server? [y/N]`; compare it with the line
+  `server certificate ... SHA256:...` in the server log (or the layout editor).
+  After that the fingerprint is pinned in `known_servers.toml`, and a different
+  certificate is refused outright (never retried). For unattended setups pass
+  `--server-fingerprint SHA256:...`.
+* **Server -> client.** A new client is refused and listed under *Menunggu
+  persetujuan* in the layout editor with its fingerprint (the client prints the
+  same one at startup). Check they match and click *Percayai*; the fingerprint
+  is saved as `fingerprint = "..."` on that `[[screens]]` entry, and the client
+  gets in on its next automatic retry. A trusted name cannot be claimed by another
+  certificate, and a changed certificate is flagged as a replacement.
+* Not covered: malware on either machine, and the first contact if you do not
+  actually compare the fingerprints.
 
 ## Layout
 
 ```
 crates/geserdesk-proto     message types, postcard codec, length-prefixed framing
+crates/geserdesk-tls       TLS identities, certificate pinning, fingerprints
 crates/geserdesk-platform  input capture: X11 backend, evdev->HID key table
 crates/geserdesk-server    TOML config, layout + switch policy, client hub, router, listener
 crates/geserdesk-client    connection + handshake, the InputSink trait + enigo backend

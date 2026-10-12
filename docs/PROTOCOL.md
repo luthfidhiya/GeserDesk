@@ -11,8 +11,18 @@ the crate defines the exact types.
 
 - TCP. Default port **24810**.
 - `TCP_NODELAY` is set on both ends (input latency matters more than packing).
-- TLS is **not yet implemented** (milestone M8). Until then the connection is
-  cleartext — use only on a trusted LAN.
+- **TLS 1.3, mutually authenticated** (milestone M8). Both sides present a
+  self-signed ECDSA P-256 certificate; there are no certificate authorities.
+  - The client pins the server's certificate **fingerprint** (SHA-256 of the
+    DER certificate, written `SHA256:ab:cd:...`). With no pin yet it accepts the
+    certificate at the TLS layer and must be confirmed by a person *before any
+    application data is sent*.
+  - The server requires a client certificate, proves nothing about *who* it is
+    at the TLS layer, and decides after `Hello`: the fingerprint must be the one
+    approved for the claimed screen name, otherwise it answers `Rejected` (an
+    unknown certificate is recorded as pending approval).
+  - Handshakes must complete within 10 s (TLS, then `Hello`).
+  - `--no-tls` on both ends restores the cleartext framing below, for debugging.
 
 ## Framing
 
