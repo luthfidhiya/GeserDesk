@@ -40,6 +40,8 @@ const MAX_COORD: i32 = 1_000_000;
 
 /// Everything the editor needs to read and change.
 pub struct UiState {
+    /// `None` when the server runs without TLS.
+    pub tls: Option<Arc<crate::net::TlsContext>>,
     pub hub: Arc<Hub>,
     pub config_path: Option<PathBuf>,
     pub local: String,
@@ -59,8 +61,10 @@ impl UiState {
         local_monitors: Vec<Rect>,
         layout: Layout,
         positions: BTreeMap<String, Point>,
+        tls: Option<Arc<crate::net::TlsContext>>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            tls,
             hub,
             config_path,
             local,
@@ -151,14 +155,41 @@ fn state_json(state: &UiState) -> Value {
                 "connected": s.connected,
                 "placeholder": s.placeholder,
                 "origin": { "x": s.origin.x, "y": s.origin.y },
+                "trusted_fingerprint": state
+                    .tls
+                    .as_ref()
+                    .and_then(|t| t.trust.trusted().get(&s.name).map(|f| f.to_string())),
                 "monitors": s.monitors.iter().map(rect_json).collect::<Vec<_>>(),
             })
         })
         .collect();
+    let (tls, server_fingerprint, pending) = match &state.tls {
+        Some(t) => (
+            true,
+            Some(t.fingerprint.to_string()),
+            t.trust
+                .pending()
+                .iter()
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "fingerprint": p.fingerprint.to_string(),
+                        "addr": p.addr,
+                        "replaces": p.replaces.map(|r| r.to_string()),
+                        "age_s": p.last_seen.elapsed().as_secs(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        ),
+        None => (false, None, Vec::new()),
+    };
     json!({
         "local": state.local,
         "screens": screens,
         "config_path": state.config_path.as_ref().map(|p| p.display().to_string()),
+        "tls": tls,
+        "server_fingerprint": server_fingerprint,
+        "pending": pending,
     })
 }
 
@@ -238,10 +269,14 @@ fn intersects(a: &Rect, b: &Rect) -> bool {
     a.left() < b.right() && b.left() < a.right() && a.top() < b.bottom() && b.top() < a.bottom()
 }
 
-/// Write `x`/`y` into each matching `[[screens]]` table of the config file,
-/// keeping everything else (comments, ordering) as it was.
-pub fn write_positions(path: &Path, positions: &BTreeMap<String, Point>) -> anyhow::Result<()> {
-    use toml_edit::{value, DocumentMut};
+/// Edit each `[[screens]]` table of the config file in place, keeping
+/// everything else (comments, ordering) as it was. `edit` gets the screen's
+/// name and its table.
+fn edit_screens(
+    path: &Path,
+    mut edit: impl FnMut(&str, &mut toml_edit::Table),
+) -> anyhow::Result<()> {
+    use toml_edit::DocumentMut;
 
     let text = std::fs::read_to_string(path)?;
     let mut doc: DocumentMut = text.parse()?;
@@ -257,10 +292,7 @@ pub fn write_positions(path: &Path, positions: &BTreeMap<String, Point>) -> anyh
         else {
             continue;
         };
-        if let Some(p) = positions.get(&name) {
-            table["x"] = value(i64::from(p.x));
-            table["y"] = value(i64::from(p.y));
-        }
+        edit(&name, table);
     }
 
     // Replace atomically so a crash never leaves a half-written config.
@@ -268,6 +300,37 @@ pub fn write_positions(path: &Path, positions: &BTreeMap<String, Point>) -> anyh
     std::fs::write(&tmp, doc.to_string())?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Write `x`/`y` into each matching `[[screens]]` table of the config file.
+pub fn write_positions(path: &Path, positions: &BTreeMap<String, Point>) -> anyhow::Result<()> {
+    use toml_edit::value;
+    edit_screens(path, |name, table| {
+        if let Some(p) = positions.get(name) {
+            table["x"] = value(i64::from(p.x));
+            table["y"] = value(i64::from(p.y));
+        }
+    })
+}
+
+/// Record (or, with `None`, remove) the certificate fingerprint trusted for
+/// `screen` in the config file.
+pub fn write_fingerprint(
+    path: &Path,
+    screen: &str,
+    fingerprint: Option<&geserdesk_tls::Fingerprint>,
+) -> anyhow::Result<()> {
+    use toml_edit::value;
+    edit_screens(path, |name, table| {
+        if name == screen {
+            match fingerprint {
+                Some(fp) => table["fingerprint"] = value(fp.to_string()),
+                None => {
+                    table.remove("fingerprint");
+                }
+            }
+        }
+    })
 }
 
 // ---- HTTP ---------------------------------------------------------------------
@@ -315,6 +378,96 @@ async fn post_layout(
     Json(json!({ "ok": true, "saved": saved })).into_response()
 }
 
+#[derive(Deserialize)]
+struct TrustRequest {
+    name: String,
+    fingerprint: String,
+}
+
+#[derive(Deserialize)]
+struct RevokeRequest {
+    name: String,
+}
+
+fn bad(msg: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "ok": false, "error": msg })),
+    )
+        .into_response()
+}
+
+fn server_error(msg: String) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "ok": false, "error": msg })),
+    )
+        .into_response()
+}
+
+/// Trust a client that is waiting for approval. The request must name a
+/// pending client *and* repeat the exact fingerprint that was shown, so the
+/// page cannot be tricked into trusting something the user never saw.
+async fn post_trust(State(state): State<Arc<UiState>>, Json(req): Json<TrustRequest>) -> Response {
+    let Some(tls) = &state.tls else {
+        return bad("TLS is off on this server");
+    };
+    let Ok(fp) = req.fingerprint.parse::<geserdesk_tls::Fingerprint>() else {
+        return bad("invalid fingerprint");
+    };
+    let previous = tls.trust.trusted().get(&req.name).copied();
+    if !tls.trust.approve(&req.name, &fp) {
+        return bad("no such pending request (it may have expired; let the client retry)");
+    }
+    if let Some(path) = &state.config_path {
+        if let Err(e) = write_fingerprint(path, &req.name, Some(&fp)) {
+            // Undo, so what is trusted in memory matches what is on disk.
+            tls.trust.restore(&req.name, previous);
+            warn!(error = %e, "could not save the trusted fingerprint");
+            return server_error(format!("gagal menyimpan config: {e}"));
+        }
+    }
+    info!(name = %req.name, fingerprint = %fp, "client approved from the editor");
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// Drop a pending request without trusting it.
+async fn post_dismiss(
+    State(state): State<Arc<UiState>>,
+    Json(req): Json<TrustRequest>,
+) -> Response {
+    let Some(tls) = &state.tls else {
+        return bad("TLS is off on this server");
+    };
+    let Ok(fp) = req.fingerprint.parse::<geserdesk_tls::Fingerprint>() else {
+        return bad("invalid fingerprint");
+    };
+    tls.trust.dismiss(&req.name, &fp);
+    Json(json!({ "ok": true })).into_response()
+}
+
+/// Stop trusting a screen's certificate. A session already running is not cut,
+/// but the next connection will need approval again.
+async fn post_revoke(
+    State(state): State<Arc<UiState>>,
+    Json(req): Json<RevokeRequest>,
+) -> Response {
+    let Some(tls) = &state.tls else {
+        return bad("TLS is off on this server");
+    };
+    let Some(old) = tls.trust.revoke(&req.name) else {
+        return bad("that screen has no trusted certificate");
+    };
+    if let Some(path) = &state.config_path {
+        if let Err(e) = write_fingerprint(path, &req.name, None) {
+            tls.trust.restore(&req.name, Some(old));
+            return server_error(format!("gagal menyimpan config: {e}"));
+        }
+    }
+    info!(name = %req.name, "trust revoked from the editor");
+    Json(json!({ "ok": true })).into_response()
+}
+
 /// Reject requests whose Host header is not one we expect.
 async fn check_host(State(allowed): State<Arc<Vec<String>>>, req: Request, next: Next) -> Response {
     let host = req
@@ -351,6 +504,9 @@ fn router(state: Arc<UiState>, addr: SocketAddr) -> Router {
         .route("/", get(index))
         .route("/api/state", get(get_state))
         .route("/api/layout", post(post_layout))
+        .route("/api/trust", post(post_trust))
+        .route("/api/dismiss", post(post_dismiss))
+        .route("/api/revoke", post(post_revoke))
         .layer(middleware::from_fn_with_state(
             Arc::new(allowed),
             check_host,
@@ -392,6 +548,7 @@ mod tests {
             vec![Rect::new(0, 0, 1920, 1080)],
             layout,
             BTreeMap::new(),
+            None,
         )
     }
 
@@ -581,5 +738,91 @@ mod tests {
         assert_eq!(host_without_port("127.0.0.1:24811"), "127.0.0.1");
         assert_eq!(host_without_port("localhost"), "localhost");
         assert_eq!(host_without_port("[::1]:24811"), "[::1]");
+    }
+
+    #[tokio::test]
+    async fn trust_endpoints_approve_only_what_is_pending_and_persist_it() {
+        use geserdesk_tls::Identity;
+
+        let path = temp_file(
+            "trust",
+            "[[screens]]\nname = \"linux-pc\"\n\n[[screens]]\nname = \"win\"\n",
+        );
+        let id = Identity::generate("server").unwrap();
+        let ctx = crate::net::TlsContext::from_identity(&id, BTreeMap::new()).unwrap();
+        let st = UiState::new(
+            Hub::new(),
+            Some(path.clone()),
+            "linux-pc".into(),
+            vec![Rect::new(0, 0, 1920, 1080)],
+            Layout::new(vec!["linux-pc".into(), "win".into()]),
+            BTreeMap::new(),
+            Some(Arc::clone(&ctx)),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_on(listener, Arc::clone(&st)));
+        let host = format!("127.0.0.1:{}", addr.port());
+        let post = |route: &'static str, body: String| {
+            let host = host.clone();
+            async move {
+                http(addr, format!(
+                    "POST {route} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len())).await
+            }
+        };
+
+        let client_fp = Identity::generate("client").unwrap().fingerprint();
+        let body =
+            |fp: &geserdesk_tls::Fingerprint| format!(r#"{{"name":"win","fingerprint":"{fp}"}}"#);
+
+        // The server's own fingerprint is offered for the user to compare.
+        let state = http(
+            addr,
+            format!("GET /api/state HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"),
+        )
+        .await;
+        assert!(state.contains(&id.fingerprint().to_string()), "{state}");
+
+        // Nothing pending: approval is refused, and nothing is written.
+        let r = post("/api/trust", body(&client_fp)).await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("fingerprint"));
+
+        // A malformed fingerprint is refused.
+        let r = post(
+            "/api/trust",
+            r#"{"name":"win","fingerprint":"nope"}"#.into(),
+        )
+        .await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+
+        // Pending, but the wrong fingerprint: refused.
+        ctx.trust.note_pending("win", client_fp, "10.0.0.2:5000");
+        let other = Identity::generate("other").unwrap().fingerprint();
+        let r = post("/api/trust", body(&other)).await;
+        assert!(r.starts_with("HTTP/1.1 400"), "{r}");
+
+        // Pending with the exact fingerprint: trusted and written to the file.
+        let r = post("/api/trust", body(&client_fp)).await;
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        let cfg = crate::config::Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.trusted["win"], client_fp);
+        assert_eq!(
+            ctx.trust.check("win", &client_fp),
+            crate::trust::Verdict::Trusted
+        );
+
+        // Revoking removes it from memory and from the file.
+        let r = post("/api/revoke", r#"{"name":"win"}"#.into()).await;
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        let cfg = crate::config::Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(cfg.trusted.is_empty());
+        assert_eq!(
+            ctx.trust.check("win", &client_fp),
+            crate::trust::Verdict::Unknown
+        );
     }
 }

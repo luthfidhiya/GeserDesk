@@ -9,6 +9,7 @@
 //! listen = "0.0.0.0:24810"
 //! screen = "linux-pc"   # this machine's own screen (default: the first one)
 //! ui = "127.0.0.1:24811"  # layout editor page; "" turns it off
+//! tls = true              # default; false sends everything unencrypted
 //!
 //! [[screens]]
 //! name = "linux-pc"
@@ -48,6 +49,13 @@ pub struct Config {
     /// The file this config was loaded from, so the layout editor can save
     /// back to it.
     pub path: Option<PathBuf>,
+    /// Use TLS (the default). `[server] tls = false` or `--no-tls` turns it off.
+    pub tls: bool,
+    /// Directory holding this machine's TLS identity; `None` means the
+    /// per-user default.
+    pub identity_dir: Option<PathBuf>,
+    /// Approved client certificates: screen name -> fingerprint.
+    pub trusted: BTreeMap<String, geserdesk_tls::Fingerprint>,
     pub layout: Layout,
     pub policy: SwitchPolicy,
     pub options: geserdesk_proto::Options,
@@ -70,6 +78,11 @@ pub enum ConfigError {
     ListenAddr {
         addr: String,
         source: std::net::AddrParseError,
+    },
+    #[error("screen {screen:?}: invalid fingerprint: {source}")]
+    Fingerprint {
+        screen: String,
+        source: geserdesk_tls::ParseFingerprintError,
     },
     #[error("no screens defined")]
     NoScreens,
@@ -139,6 +152,17 @@ impl Config {
             })
             .collect();
 
+        let mut trusted = BTreeMap::new();
+        for s in &raw.screens {
+            if let Some(text) = &s.fingerprint {
+                let fp = text.parse().map_err(|source| ConfigError::Fingerprint {
+                    screen: s.name.clone(),
+                    source,
+                })?;
+                trusted.insert(s.name.clone(), fp);
+            }
+        }
+
         let ui = match raw.server.as_ref().and_then(|s| s.ui.as_deref()) {
             None => Some(default_ui()),
             Some("") => None,
@@ -177,6 +201,9 @@ impl Config {
             local_screen,
             positions,
             path: None,
+            tls: raw.server.as_ref().and_then(|s| s.tls).unwrap_or(true),
+            identity_dir: None,
+            trusted,
             layout,
             policy,
             options,
@@ -213,6 +240,8 @@ struct ServerSection {
     screen: Option<String>,
     /// Address of the layout-editor web page; `""` disables it.
     ui: Option<String>,
+    /// TLS on or off (default on).
+    tls: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +250,8 @@ struct ScreenEntry {
     /// Position on the virtual desk (see [`Config::positions`]).
     x: Option<i32>,
     y: Option<i32>,
+    /// Fingerprint of the certificate approved for this screen.
+    fingerprint: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -411,5 +442,25 @@ mod tests {
 
         let off = Config::parse("[server]\nui = \"\"\n[[screens]]\nname = \"a\"\n").unwrap();
         assert_eq!(off.ui, None);
+    }
+
+    #[test]
+    fn tls_defaults_on_and_fingerprints_are_read() {
+        let fp = geserdesk_tls::Fingerprint::of_cert(b"x");
+        let cfg = Config::parse(&format!(
+            "[[screens]]\nname = \"a\"\n[[screens]]\nname = \"b\"\nfingerprint = \"{fp}\"\n"
+        ))
+        .unwrap();
+        assert!(cfg.tls);
+        assert_eq!(cfg.trusted.len(), 1);
+        assert_eq!(cfg.trusted["b"], fp);
+
+        let off = Config::parse("[server]\ntls = false\n[[screens]]\nname = \"a\"\n").unwrap();
+        assert!(!off.tls);
+
+        assert!(matches!(
+            Config::parse("[[screens]]\nname = \"a\"\nfingerprint = \"nope\"\n"),
+            Err(ConfigError::Fingerprint { .. })
+        ));
     }
 }

@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! TCP listener, accept loop and handshake (milestone M2).
+//! TCP listener, accept loop and handshake.
 //!
-//! Transport is plain TCP for now. TLS + trust-on-first-use lands in M8; until
-//! then this must only be used on a trusted LAN.
+//! Connections are TLS 1.3 with mutual certificate authentication (M8) unless
+//! the server is started with `--no-tls`. The TLS layer proves each side owns
+//! its key; whether that key is *trusted* is decided here, after the client's
+//! `Hello` names its screen: the certificate fingerprint must be the one
+//! approved for that name (see [`crate::trust`]).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,8 +17,10 @@ use geserdesk_proto::{
     ClientMsg, CloseReason, MessageStream, ModMask, MouseEvent, Options, Rect, ScreenInfo,
     ServerMsg, Version, PROTOCOL_VERSION,
 };
+use geserdesk_tls::tokio_rustls::TlsAcceptor;
+use geserdesk_tls::{peer_fingerprint, Fingerprint, Identity};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -21,7 +28,62 @@ use crate::config::Config;
 use crate::hub::{Hub, Registration};
 use crate::layout::Layout;
 use crate::router::{self, Core};
+use crate::trust::{Trust, Verdict};
 use crate::ui;
+
+/// How long a client gets to finish the TLS handshake, and then to say `Hello`.
+/// A peer that stalls (or speaks the wrong protocol and leaves us waiting for
+/// bytes that never come) must not hold a connection forever.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What the server needs to speak TLS and judge who is on the other end.
+pub struct TlsContext {
+    acceptor: TlsAcceptor,
+    /// This server's certificate fingerprint, which clients are asked to
+    /// confirm on first contact.
+    pub fingerprint: Fingerprint,
+    pub trust: Arc<Trust>,
+}
+
+impl TlsContext {
+    /// Load (or create) this server's identity from `identity_dir` (the
+    /// per-user default if `None`).
+    pub fn load(
+        identity_dir: Option<&Path>,
+        trusted: BTreeMap<String, Fingerprint>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let dir = identity_dir
+            .map(Path::to_path_buf)
+            .or_else(geserdesk_tls::default_dir)
+            .ok_or_else(|| anyhow::anyhow!("no home directory; pass --identity-dir"))?;
+        let identity = Identity::load_or_create(&dir.join("server-identity.pem"), "server")?;
+        Self::from_identity(&identity, trusted)
+    }
+
+    pub fn from_identity(
+        identity: &Identity,
+        trusted: BTreeMap<String, Fingerprint>,
+    ) -> anyhow::Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            acceptor: TlsAcceptor::from(geserdesk_tls::server_config(identity)?),
+            fingerprint: identity.fingerprint(),
+            trust: Trust::new(trusted),
+        }))
+    }
+}
+
+/// The TLS context a config asks for: `None` (with a loud warning) if it turns
+/// TLS off.
+fn tls_for(config: &Config) -> anyhow::Result<Option<Arc<TlsContext>>> {
+    if !config.tls {
+        warn!("TLS is OFF: everything, including every keystroke, is sent unencrypted and any machine can connect");
+        return Ok(None);
+    }
+    let ctx = TlsContext::load(config.identity_dir.as_deref(), config.trusted.clone())?;
+    info!(fingerprint = %ctx.fingerprint, "server certificate (clients are asked to confirm this)");
+    Ok(Some(ctx))
+}
 
 /// How often the server probes each client, and the grace period for a reply.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
@@ -38,6 +100,8 @@ pub enum HandshakeOutcome {
         remote: Version,
     },
     UnknownScreen(String),
+    /// The client's certificate is not (yet) trusted for that screen name.
+    Untrusted(String),
     NameTaken(String),
 }
 
@@ -51,6 +115,7 @@ pub async fn server_handshake<S>(
     layout: &Layout,
     options: &Options,
     keepalive: Duration,
+    authorize: impl Fn(&str) -> Result<(), String>,
     name_taken: impl Fn(&str) -> bool,
 ) -> Result<HandshakeOutcome, HandshakeError>
 where
@@ -81,6 +146,11 @@ where
         })
         .await?;
         return Ok(HandshakeOutcome::UnknownScreen(screen.name));
+    }
+
+    if let Err(reason) = authorize(&screen.name) {
+        ms.send(&ServerMsg::Rejected { reason }).await?;
+        return Ok(HandshakeOutcome::Untrusted(screen.name));
     }
 
     if name_taken(&screen.name) {
@@ -139,7 +209,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         geserdesk_platform::monitors().unwrap_or_else(|_| vec![Rect::new(0, 0, 1920, 1080)]);
     let hub = Hub::new();
     drop(hub.take_events()); // nothing routes input here, so nobody listens
-    serve_with_hub(config, hub, local).await
+    let tls = tls_for(&config)?;
+    serve_with_hub(config, hub, local, tls).await
 }
 
 /// Like [`serve`], but also captures the local keyboard and mouse and routes
@@ -165,13 +236,15 @@ pub async fn serve_with_capture(config: Config) -> anyhow::Result<()> {
         cap_rx,
         hub_events,
     ));
-    serve_with_hub(config, hub, local).await
+    let tls = tls_for(&config)?;
+    serve_with_hub(config, hub, local, tls).await
 }
 
 async fn serve_with_hub(
     config: Config,
     hub: Arc<Hub>,
     local_monitors: Vec<Rect>,
+    tls: Option<Arc<TlsContext>>,
 ) -> anyhow::Result<()> {
     if let Some(addr) = config.ui {
         let state = ui::UiState::new(
@@ -181,6 +254,7 @@ async fn serve_with_hub(
             local_monitors,
             config.layout.clone(),
             config.positions.clone(),
+            tls.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = ui::serve(addr, state).await {
@@ -196,7 +270,7 @@ async fn serve_with_hub(
             handle.shutdown();
         }
     });
-    accept_loop_with(config, listener, hub, shutdown).await
+    accept_loop_tls(config, listener, hub, shutdown, tls).await
 }
 
 /// Bind the listener and return a handle plus the socket, without accepting yet.
@@ -215,12 +289,23 @@ pub async fn accept_loop(config: Config, listener: TcpListener) -> anyhow::Resul
     accept_loop_with(config, listener, Hub::new(), never).await
 }
 
-/// The accept loop with an explicit [`Hub`] and shutdown signal.
+/// The accept loop with an explicit [`Hub`] and shutdown signal, without TLS.
 pub async fn accept_loop_with(
     config: Config,
     listener: TcpListener,
     hub: Arc<Hub>,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    accept_loop_tls(config, listener, hub, shutdown, None).await
+}
+
+/// The accept loop, optionally wrapping every connection in TLS.
+pub async fn accept_loop_tls(
+    config: Config,
+    listener: TcpListener,
+    hub: Arc<Hub>,
     mut shutdown: watch::Receiver<bool>,
+    tls: Option<Arc<TlsContext>>,
 ) -> anyhow::Result<()> {
     let config = Arc::new(config);
 
@@ -243,8 +328,32 @@ pub async fn accept_loop_with(
 
         let config = Arc::clone(&config);
         let hub = Arc::clone(&hub);
+        let tls = tls.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(stream, config, hub).await {
+            let result = match tls {
+                None => handle_client(stream, peer, None, config, hub, None).await,
+                Some(ctx) => {
+                    let accepted = tokio::time::timeout(
+                        TLS_HANDSHAKE_TIMEOUT,
+                        ctx.acceptor.clone().accept(stream),
+                    )
+                    .await;
+                    let secured = match accepted {
+                        Ok(Ok(s)) => s,
+                        Ok(Err(e)) => {
+                            warn!(%peer, error = %e, "TLS handshake failed (is the client running with --no-tls?)");
+                            return;
+                        }
+                        Err(_) => {
+                            warn!(%peer, "TLS handshake timed out");
+                            return;
+                        }
+                    };
+                    let fp = peer_fingerprint(secured.get_ref().1.peer_certificates());
+                    handle_client(secured, peer, fp, config, hub, Some(ctx)).await
+                }
+            };
+            if let Err(e) = result {
                 warn!(%peer, error = %e, "client session ended with error");
             } else {
                 info!(%peer, "client session ended");
@@ -265,21 +374,53 @@ async fn wait_for_shutdown(rx: &mut watch::Receiver<bool>) {
     }
 }
 
-async fn handle_client(
-    stream: TcpStream,
+async fn handle_client<S>(
+    stream: S,
+    peer: SocketAddr,
+    peer_fp: Option<Fingerprint>,
     config: Arc<Config>,
     hub: Arc<Hub>,
-) -> anyhow::Result<()> {
+    tls: Option<Arc<TlsContext>>,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut ms = MessageStream::new(stream);
 
-    let outcome = server_handshake(
-        &mut ms,
-        &config.layout,
-        &config.options,
-        KEEPALIVE_INTERVAL,
-        |name| hub.contains(name),
+    // Without TLS there is nothing to authenticate. With it, the certificate
+    // must be the one approved for the screen name the client claims.
+    let authorize = |name: &str| -> Result<(), String> {
+        let Some(tls) = &tls else { return Ok(()) };
+        let Some(fp) = peer_fp else {
+            return Err("no client certificate".into());
+        };
+        let verdict = tls.trust.check(name, &fp);
+        if verdict == Verdict::Trusted {
+            return Ok(());
+        }
+        tls.trust.note_pending(name, fp, &peer.to_string());
+        warn!(%name, %peer, fingerprint = %fp, "client is not trusted yet; approve it in the layout editor after checking the fingerprint");
+        Err(match verdict {
+            Verdict::Mismatch { .. } => "this screen is registered with a different certificate; \
+                 approve the new one on the server"
+                .to_string(),
+            _ => format!("waiting for approval on the server (this client's fingerprint is {fp})"),
+        })
+    };
+
+    let outcome = tokio::time::timeout(
+        HELLO_TIMEOUT,
+        server_handshake(
+            &mut ms,
+            &config.layout,
+            &config.options,
+            KEEPALIVE_INTERVAL,
+            authorize,
+            |name| hub.contains(name),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow::anyhow!("no Hello within {HELLO_TIMEOUT:?}"))??;
 
     let screen = match outcome {
         HandshakeOutcome::Accepted { screen, version } => {
@@ -432,6 +573,7 @@ where
 mod tests {
     use super::*;
     use geserdesk_proto::geometry::{Point, Rect};
+    use tokio::net::TcpStream;
 
     fn layout() -> Layout {
         Layout::new(vec!["linux-pc".into(), "windows-pc".into()])
@@ -471,6 +613,7 @@ mod tests {
                 &layout(),
                 &Options::default(),
                 KEEPALIVE_INTERVAL,
+                |_| Ok(()),
                 |_| false,
             )
             .await
@@ -503,6 +646,7 @@ mod tests {
                 &layout(),
                 &Options::default(),
                 KEEPALIVE_INTERVAL,
+                |_| Ok(()),
                 |_| false,
             )
             .await
@@ -534,6 +678,7 @@ mod tests {
                 &layout(),
                 &Options::default(),
                 KEEPALIVE_INTERVAL,
+                |_| Ok(()),
                 |_| false,
             )
             .await
@@ -565,6 +710,7 @@ mod tests {
                 &layout(),
                 &Options::default(),
                 KEEPALIVE_INTERVAL,
+                |_| Ok(()),
                 |name| name == "linux-pc",
             )
             .await
@@ -678,5 +824,140 @@ mod tests {
             }
         }
         assert_eq!(moves, 800);
+    }
+
+    // ---- TLS ----------------------------------------------------------------
+
+    mod tls {
+        use super::*;
+        use geserdesk_tls::tokio_rustls::TlsConnector;
+        use geserdesk_tls::{client_config, rustls::pki_types::ServerName};
+
+        struct Rig {
+            addr: SocketAddr,
+            server_fp: Fingerprint,
+            ctx: Arc<TlsContext>,
+        }
+
+        async fn rig(trusted: BTreeMap<String, Fingerprint>) -> Rig {
+            let config = Config::parse(
+                r#"
+                [server]
+                listen = "127.0.0.1:0"
+                [[screens]]
+                name = "linux-pc"
+                [[screens]]
+                name = "win"
+            "#,
+            )
+            .unwrap();
+            let id = Identity::generate("server").unwrap();
+            let ctx = TlsContext::from_identity(&id, trusted).unwrap();
+            let (_h, listener) = bind(&config).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (_, never) = watch::channel(false);
+            tokio::spawn(accept_loop_tls(
+                config,
+                listener,
+                Hub::new(),
+                never,
+                Some(Arc::clone(&ctx)),
+            ));
+            Rig {
+                addr,
+                server_fp: id.fingerprint(),
+                ctx,
+            }
+        }
+
+        /// Connect as `client_id`, pinning the real server, and say Hello as `name`.
+        async fn hello_as(rig: &Rig, client_id: &Identity, name: &str) -> ServerMsg {
+            let (cfg, _) = client_config(client_id, Some(rig.server_fp)).unwrap();
+            let tcp = TcpStream::connect(rig.addr).await.unwrap();
+            let tls = TlsConnector::from(cfg)
+                .connect(ServerName::try_from("geserdesk").unwrap(), tcp)
+                .await
+                .unwrap();
+            let mut ms = MessageStream::new(tls);
+            ms.send(&ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+                screen: client_screen(name),
+            })
+            .await
+            .unwrap();
+            ms.recv::<ServerMsg>().await.unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_trusted_certificate_gets_in() {
+            let client = Identity::generate("c").unwrap();
+            let rig = rig([("win".to_string(), client.fingerprint())].into()).await;
+            let reply = hello_as(&rig, &client, "win").await;
+            assert!(matches!(reply, ServerMsg::Welcome { .. }), "{reply:?}");
+        }
+
+        #[tokio::test]
+        async fn an_unknown_certificate_is_refused_listed_and_admitted_after_approval() {
+            let client = Identity::generate("c").unwrap();
+            let rig = rig(BTreeMap::new()).await;
+
+            let reply = hello_as(&rig, &client, "win").await;
+            match &reply {
+                ServerMsg::Rejected { reason } => {
+                    assert!(reason.contains("approval"), "{reason}");
+                    assert!(reason.contains(&client.fingerprint().to_string()));
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+            let pending = rig.ctx.trust.pending();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].name, "win");
+            assert_eq!(pending[0].fingerprint, client.fingerprint());
+
+            assert!(rig.ctx.trust.approve("win", &client.fingerprint()));
+            let reply = hello_as(&rig, &client, "win").await;
+            assert!(matches!(reply, ServerMsg::Welcome { .. }), "{reply:?}");
+        }
+
+        #[tokio::test]
+        async fn a_trusted_certificate_cannot_claim_another_screens_name() {
+            let win = Identity::generate("win").unwrap();
+            let rig = rig([("win".to_string(), win.fingerprint())].into()).await;
+            // `win`'s certificate asks to be `linux-pc`, which has no approval.
+            let reply = hello_as(&rig, &win, "linux-pc").await;
+            assert!(matches!(reply, ServerMsg::Rejected { .. }), "{reply:?}");
+        }
+
+        #[tokio::test]
+        async fn a_changed_certificate_for_a_trusted_name_is_refused_and_flagged() {
+            let old = Identity::generate("old").unwrap();
+            let new = Identity::generate("new").unwrap();
+            let rig = rig([("win".to_string(), old.fingerprint())].into()).await;
+
+            let reply = hello_as(&rig, &new, "win").await;
+            match reply {
+                ServerMsg::Rejected { reason } => assert!(reason.contains("different"), "{reason}"),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+            let p = &rig.ctx.trust.pending()[0];
+            assert_eq!(p.replaces, Some(old.fingerprint()));
+        }
+
+        #[tokio::test]
+        async fn a_plaintext_client_never_gets_a_reply() {
+            let rig = rig(BTreeMap::new()).await;
+            let mut ms = MessageStream::new(TcpStream::connect(rig.addr).await.unwrap());
+            let _ = ms
+                .send(&ClientMsg::Hello {
+                    version: PROTOCOL_VERSION,
+                    screen: client_screen("win"),
+                })
+                .await;
+            // The server hangs up (or sends TLS alert bytes that do not decode
+            // as a message); either way no Welcome arrives.
+            let got = tokio::time::timeout(Duration::from_secs(3), ms.recv::<ServerMsg>()).await;
+            assert!(!matches!(got, Ok(Ok(ServerMsg::Welcome { .. }))));
+            assert!(rig.ctx.trust.pending().is_empty());
+        }
     }
 }

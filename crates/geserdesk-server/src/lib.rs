@@ -16,6 +16,7 @@ pub mod hub;
 pub mod layout;
 pub mod net;
 pub mod router;
+pub mod trust;
 pub mod ui;
 
 pub use config::{Config, ConfigError};

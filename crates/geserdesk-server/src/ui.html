@@ -59,6 +59,17 @@
   button:disabled { opacity: .45; cursor: not-allowed; }
   #msg { min-height: 1.4em; font-size: 13.5px; }
   #msg.ok { color: var(--ok); } #msg.err { color: var(--bad); } #msg.info { color: var(--muted); }
+  .banner { margin: 12px 16px 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--bad); color: var(--bad); font-size: 13.5px; }
+  .fp { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; color: var(--ink); }
+  .pend { padding: 10px; border: 1px solid var(--warn); border-radius: 8px; margin: 6px; }
+  .pend h3 { margin: 0 0 4px; font-size: 15px; }
+  .pend .why { font-size: 12.5px; color: var(--muted); margin: 4px 0 8px; }
+  .pend .why.alert { color: var(--bad); font-weight: 600; }
+  .pend .btns { margin-top: 8px; }
+  .card h2 { margin: 0; padding: 10px 12px 2px; font-size: 14px; }
+  .card .note { padding: 0 12px 8px; font-size: 12.5px; color: var(--muted); }
+  .tag.ok { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+  .linkbtn { border: none; background: none; color: var(--muted); padding: 0 4px; font-size: 12px; text-decoration: underline; cursor: pointer; }
   kbd { background: var(--grid); border-radius: 4px; padding: 0 5px; font-size: 12px; }
 </style>
 </head>
@@ -67,6 +78,7 @@
   <h1>GeserDesk · Atur Layar</h1>
   <span class="sub" id="cfg"></span>
 </header>
+<div class="banner" id="notls" hidden>TLS mati di server ini: semua ketikan dikirim tanpa enkripsi dan komputer mana pun bisa menyambung. Hanya untuk debugging.</div>
 <main>
   <section class="card" id="stage">
     <svg id="svg" role="img" aria-label="Susunan layar"></svg>
@@ -75,7 +87,17 @@
       Kursor hanya bisa pindah di bagian tepi yang benar-benar bersentuhan.</div>
   </section>
   <aside>
+    <div class="card" id="pending" hidden>
+      <h2>Menunggu persetujuan</h2>
+      <div class="note">Cocokkan sidik jari dengan yang tampil di komputer itu sebelum mempercayainya.</div>
+      <div id="pendlist"></div>
+    </div>
     <div class="card list" id="list"></div>
+    <div class="card" id="serverfp" hidden>
+      <h2>Sidik jari server ini</h2>
+      <div class="note">Client menampilkan angka ini saat pertama menyambung. Pastikan sama.</div>
+      <div class="fp" id="serverfpval" style="padding: 0 12px 12px"></div>
+    </div>
     <div class="card actions">
       <div class="btns">
         <button class="primary" id="save">Simpan &amp; terapkan</button>
@@ -116,6 +138,45 @@ function html(tag, props, ...kids) {
 }
 function color(i) { return `var(${COLORS[i % COLORS.length]})`; }
 function say(text, kind) { const m = $("msg"); m.textContent = text; m.className = kind || "info"; }
+
+async function api(path, body) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+let pendKey = "";
+function renderTrust() {
+  $("notls").hidden = state.tls;
+  $("serverfp").hidden = !state.tls;
+  if (state.server_fingerprint) $("serverfpval").textContent = state.server_fingerprint;
+  const pend = state.pending || [];
+  $("pending").hidden = pend.length === 0;
+  const key = JSON.stringify(pend.map((p) => [p.name, p.fingerprint]));
+  if (key === pendKey) return;   // unchanged: keep the DOM (and any hover/focus) as is
+  pendKey = key;
+  const box = $("pendlist");
+  box.replaceChildren();
+  for (const p of pend) {
+    const why = p.replaces
+      ? html("div", { class: "why alert" }, `Sertifikat BERBEDA dari yang dipercaya sebelumnya untuk "${p.name}". Hanya setujui kalau Anda memang mengganti/menginstal ulang komputer itu.`)
+      : html("div", { class: "why" }, `Meminta tersambung sebagai "${p.name}" dari ${p.addr}.`);
+    const trust = html("button", { class: "primary" }, "Percayai");
+    trust.onclick = async () => {
+      try { await api("/api/trust", { name: p.name, fingerprint: p.fingerprint }); say(`"${p.name}" dipercaya dan disimpan ke config.`, "ok"); await load(); }
+      catch (e) { say("Gagal: " + e.message, "err"); }
+    };
+    const skip = html("button", {}, "Abaikan");
+    skip.onclick = async () => {
+      try { await api("/api/dismiss", { name: p.name, fingerprint: p.fingerprint }); await load(); }
+      catch (e) { say("Gagal: " + e.message, "err"); }
+    };
+    box.append(html("div", { class: "pend" },
+      html("h3", {}, p.name), why,
+      html("div", { class: "fp" }, p.fingerprint),
+      html("div", { class: "btns" }, trust, skip)));
+  }
+}
 
 // ---- geometry ----------------------------------------------------------------
 function monitorsOf(s) { return s.monitors; }
@@ -221,10 +282,23 @@ function render() {
   });
 
   renderList(bad);
+  renderTrust();
   $("save").disabled = bad.size > 0 || !dirty;
   $("revert").disabled = !dirty;
   if (bad.size) { say("Ada layar yang saling menimpa (merah). Geser agar tidak bertumpuk.", "err"); overlapShown = true; }
   else if (overlapShown) { say("", "info"); overlapShown = false; }
+}
+
+function revokeLine(s) {
+  const b = html("button", { class: "linkbtn" }, "Cabut kepercayaan");
+  let armed = false;
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    if (!armed) { armed = true; b.textContent = "Yakin? Klik lagi untuk mencabut"; setTimeout(() => { armed = false; b.textContent = "Cabut kepercayaan"; }, 4000); return; }
+    try { await api("/api/revoke", { name: s.name }); say(`Kepercayaan untuk "${s.name}" dicabut. Sesi yang sedang berjalan tidak diputus.`, "info"); await load(); }
+    catch (err) { say("Gagal: " + err.message, "err"); }
+  };
+  return html("div", { class: "meta" }, b);
 }
 
 function neighbourLine(name) {
@@ -251,9 +325,11 @@ function renderList(bad) {
         Object.assign(html("span", { class: "chip" }), { style: `background:${color(i)}` }),
         document.createTextNode(s.name),
         s.local ? html("span", { class: "tag" }, "server") : document.createTextNode(""),
+        s.trusted_fingerprint ? html("span", { class: "tag ok", title: s.trusted_fingerprint }, "terpercaya") : document.createTextNode(""),
         Object.assign(html("span", { class: "dot" + (s.connected ? " on" : ""), title: s.connected ? "terhubung" : "tidak terhubung" }), {})),
       html("div", { class: "meta" }, (s.connected ? "Terhubung · " : "Tidak terhubung · ") + meta),
       neighbourLine(s.name),
+      ...(s.trusted_fingerprint ? [revokeLine(s)] : []),
       html("div", { class: "xy" }, mk("x"), mk("y")));
     row.onclick = (e) => { if (e.target.tagName !== "INPUT") { selected = s.name; render(); } };
     list.append(row);
@@ -328,7 +404,7 @@ $("auto").onclick = () => {
 };
 
 load().catch((e) => say("Gagal memuat: " + e.message, "err"));
-setInterval(() => { if (!drag) load().catch(() => {}); }, 2000);
+setInterval(() => { if (!drag && document.activeElement?.tagName !== "INPUT") load().catch(() => {}); }, 2000);
 </script>
 </body>
 </html>
