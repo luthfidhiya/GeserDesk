@@ -33,8 +33,9 @@ pub enum CodecError {
 pub struct MessageStream<S> {
     inner: S,
     max_frame: usize,
-    /// Reused across `recv` calls to avoid reallocating.
-    scratch: Vec<u8>,
+    /// Bytes read from the stream but not yet consumed as a whole frame. Kept
+    /// across calls so that `recv` is cancel-safe (see [`MessageStream::recv`]).
+    rbuf: Vec<u8>,
 }
 
 impl<S> MessageStream<S> {
@@ -42,7 +43,7 @@ impl<S> MessageStream<S> {
         Self {
             inner,
             max_frame: DEFAULT_MAX_FRAME,
-            scratch: Vec::new(),
+            rbuf: Vec::new(),
         }
     }
 
@@ -82,42 +83,44 @@ impl<S: AsyncRead + AsyncWrite + Unpin> MessageStream<S> {
     /// Read one frame and decode it as `T`.
     ///
     /// Returns [`CodecError::Closed`] on a clean EOF at a frame boundary.
+    ///
+    /// **Cancel-safe:** partially received bytes live in the stream, not in the
+    /// future, so dropping this future (e.g. losing a `tokio::select!` race)
+    /// never loses or corrupts data.
     pub async fn recv<T: DeserializeOwned>(&mut self) -> Result<T, CodecError> {
-        let mut len_buf = [0u8; 4];
-        match self.inner.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(CodecError::Closed)
+        loop {
+            if self.rbuf.len() >= 4 {
+                let len =
+                    u32::from_le_bytes([self.rbuf[0], self.rbuf[1], self.rbuf[2], self.rbuf[3]])
+                        as usize;
+                if len > self.max_frame {
+                    return Err(CodecError::FrameTooLarge {
+                        size: len,
+                        max: self.max_frame,
+                    });
+                }
+                if self.rbuf.len() >= 4 + len {
+                    let msg =
+                        postcard::from_bytes(&self.rbuf[4..4 + len]).map_err(CodecError::Decode);
+                    self.rbuf.drain(..4 + len);
+                    return msg;
+                }
             }
-            Err(e) => return Err(CodecError::Io(e)),
-        }
 
-        let len = u32::from_le_bytes(len_buf) as usize;
-        if len > self.max_frame {
-            return Err(CodecError::FrameTooLarge {
-                size: len,
-                max: self.max_frame,
-            });
-        }
-
-        self.scratch.clear();
-        self.scratch.resize(len, 0);
-        self.inner
-            .read_exact(&mut self.scratch)
-            .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            self.rbuf.reserve(4096);
+            let n = self.inner.read_buf(&mut self.rbuf).await?;
+            if n == 0 {
+                return Err(if self.rbuf.is_empty() {
+                    CodecError::Closed
+                } else {
                     // A truncated frame is a protocol error, not a clean close.
                     CodecError::Io(std::io::Error::new(
                         std::io::ErrorKind::UnexpectedEof,
                         "connection closed mid-frame",
                     ))
-                } else {
-                    CodecError::Io(e)
-                }
-            })?;
-
-        postcard::from_bytes(&self.scratch).map_err(CodecError::Decode)
+                });
+            }
+        }
     }
 }
 
