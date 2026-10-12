@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "geserdesk-tls"
+description = "TLS 1.3 identities, certificate pinning and trust-on-first-use for GeserDesk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+sha2.workspace = true
+directories.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
