@@ -109,6 +109,25 @@ mod enigo_sink {
                 .map_err(|e| anyhow::anyhow!("reading display size: {e}"))
         }
 
+        /// Move to an absolute position in desktop coordinates. On Windows
+        /// this spans every monitor (enigo only maps the primary one, so a
+        /// monitor above or left of it was unreachable).
+        fn move_to(&mut self, x: i32, y: i32) -> Result<(), enigo::InputError> {
+            #[cfg(windows)]
+            if win::move_virtual(x, y) {
+                return Ok(());
+            }
+            self.enigo.move_mouse(x, y, Coordinate::Abs)
+        }
+
+        fn move_by(&mut self, dx: i32, dy: i32) -> Result<(), enigo::InputError> {
+            #[cfg(windows)]
+            if let Some((x, y)) = win::cursor_pos() {
+                return self.move_to(x + dx, y + dy);
+            }
+            self.enigo.move_mouse(dx, dy, Coordinate::Rel)
+        }
+
         fn inject(&mut self, key: Key, dir: Direction) {
             if let Err(e) = self.enigo.key(key, dir) {
                 tracing::warn!(error = %e, ?key, "key injection failed");
@@ -118,7 +137,7 @@ mod enigo_sink {
 
     impl InputSink for EnigoSink {
         fn enter(&mut self, at: Point) {
-            if let Err(e) = self.enigo.move_mouse(at.x, at.y, Coordinate::Abs) {
+            if let Err(e) = self.move_to(at.x, at.y) {
                 tracing::warn!(error = %e, "move_mouse on enter failed");
             }
         }
@@ -161,8 +180,8 @@ mod enigo_sink {
 
         fn mouse(&mut self, ev: MouseEvent) {
             let r = match ev {
-                MouseEvent::MoveAbs { x, y } => self.enigo.move_mouse(x, y, Coordinate::Abs),
-                MouseEvent::MoveRel { dx, dy } => self.enigo.move_mouse(dx, dy, Coordinate::Rel),
+                MouseEvent::MoveAbs { x, y } => self.move_to(x, y),
+                MouseEvent::MoveRel { dx, dy } => self.move_by(dx, dy),
                 MouseEvent::Button { button, down } => {
                     let code = encode_button(button);
                     if down {
@@ -193,6 +212,71 @@ mod enigo_sink {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "mouse injection failed");
             }
+        }
+    }
+
+    #[cfg(windows)]
+    mod win {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
+            MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        };
+
+        pub fn cursor_pos() -> Option<(i32, i32)> {
+            let mut p = POINT { x: 0, y: 0 };
+            (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+        }
+
+        fn send(dx: i32, dy: i32, flags: u32) -> bool {
+            let input = INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx,
+                        dy,
+                        mouseData: 0,
+                        dwFlags: MOUSEEVENTF_MOVE | flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            };
+            unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) == 1 }
+        }
+
+        /// Absolute move over the whole virtual desktop, clamped to it.
+        /// Returns false if the desktop size is unavailable or the injection
+        /// failed.
+        pub fn move_virtual(x: i32, y: i32) -> bool {
+            let (vx, vy, w, h) = unsafe {
+                (
+                    GetSystemMetrics(SM_XVIRTUALSCREEN),
+                    GetSystemMetrics(SM_YVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                )
+            };
+            if w < 2 || h < 2 {
+                return false;
+            }
+            let (cx, cy) = ((x - vx).clamp(0, w - 1), (y - vy).clamp(0, h - 1));
+            let abs = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+            // Microsoft's mapping: ceil(px * 65536 / size).
+            let norm =
+                |p: i32, size: i32| ((p as i64 * 65536 + size as i64 - 1) / size as i64) as i32;
+            if cx == w - 1 {
+                // Windows silently drops an absolute move onto the last pixel
+                // column, so the cursor would stop one short of the right
+                // edge. Go next to it, then push into the edge: relative
+                // moves are clamped there.
+                return send(norm(cx - 1, w), norm(cy, h), abs) && send(8, 0, 0);
+            }
+            send(norm(cx, w), norm(cy, h), abs)
         }
     }
 

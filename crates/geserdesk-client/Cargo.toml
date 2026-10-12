@@ -23,6 +23,9 @@ thiserror.workspace = true
 tracing.workspace = true
 enigo = { version = "0.3", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 geserdesk-server.workspace = true
