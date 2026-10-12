@@ -3,6 +3,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type {
+  DaemonInfo,
   DeskSnapshot,
   Draft,
   LogLine,
@@ -16,9 +17,14 @@ export const ipc = {
   loadSettings: () => invoke<Settings>('load_settings'),
   saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
   sessionStatus: () => invoke<Status>('session_status'),
+  /** `null` while no daemon is running. */
+  daemonInfo: () => invoke<DaemonInfo | null>('daemon_info'),
   /** Saves `settings`, then starts the client or server they select. */
   start: (settings: Settings) => invoke<void>('start_session', { settings }),
+  /** Stop the session; the daemon that ran it leaves with it. */
   stop: () => invoke<void>('stop_session'),
+  /** Stop the session and end the daemon, whoever started it. */
+  shutdownDaemon: () => invoke<void>('shutdown_daemon'),
   ownFingerprint: (mode: Mode) => invoke<string | null>('own_fingerprint', { mode }),
   createDefaultConfig: (path: string) => invoke<void>('create_default_config', { path }),
   configExists: (path: string) => invoke<boolean>('config_exists', { path }),
@@ -50,6 +56,7 @@ export const EVENTS = {
   status: 'session://status',
   log: 'log://line',
   prompt: 'trust://prompt',
+  daemon: 'daemon://info',
   navigate: 'ui://navigate',
 } as const
 

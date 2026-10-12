@@ -17,7 +17,9 @@ export default function App() {
   const session = useSession()
   const [tab, setTab] = useState<Tab>('control')
   const [busy, setBusy] = useState(false)
-  const isServer = settings?.mode === 'server'
+  // A running session decides the mode: the daemon may have been started from the CLI.
+  const mode = session.running && session.daemon?.mode ? session.daemon.mode : settings?.mode
+  const isServer = mode === 'server'
   const { desk, refresh } = useDesk(session.running && isServer, busy)
   useTheme(settings?.theme)
 
@@ -28,6 +30,7 @@ export default function App() {
 
   // A client has no monitor settings, so it only ever shows its configuration.
   const shownTab: Tab = isServer ? tab : 'control'
+  const shown = mode && mode !== settings.mode ? { ...settings, mode } : settings
 
   return (
     <TooltipProvider>
@@ -35,7 +38,7 @@ export default function App() {
         <header className="flex flex-wrap items-center gap-4">
           <h1 className="text-lg font-semibold">GeserDesk</h1>
           <Tabs
-            value={settings.mode}
+            value={mode}
             onValueChange={(m) => {
               session.setProblem(null)
               setTab('control')
@@ -75,7 +78,8 @@ export default function App() {
         <main className="min-h-0 flex-1">
           {shownTab === 'control' ? (
             <ControlView
-              settings={settings}
+              settings={shown}
+              daemon={session.daemon}
               onChange={update}
               status={session.status}
               running={session.running}
@@ -83,6 +87,7 @@ export default function App() {
               setProblem={session.setProblem}
               onStart={() => void session.start(settings)}
               onStop={() => void session.stop()}
+              onShutdownDaemon={() => void session.shutdownDaemon()}
             />
           ) : (
             <LayoutView desk={desk} running={session.running} refresh={refresh} onBusy={setBusy} />

@@ -34,6 +34,19 @@ export type Status =
   | { kind: 'server_running' }
   | { kind: 'error'; detail: string }
 
+/** The daemon the app is attached to (the process that owns the session). */
+export interface DaemonInfo {
+  protocol: number
+  app_version: string
+  pid: number
+  /** The kind of session running now, if any. */
+  mode: Mode | null
+  /** Who started it: `cli` or `app`. */
+  started_by: string
+  /** False when it speaks another protocol: it can only be read and ended. */
+  compatible: boolean
+}
+
 export interface TrustPrompt {
   server: string
   fingerprint: string
