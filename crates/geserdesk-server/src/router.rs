@@ -329,6 +329,18 @@ impl Core {
             let o = self.origin(&screen);
             let desk = Point::new(moved.x + o.x, moved.y + o.y);
             if let Some((next, q)) = self.locate(desk, &screen) {
+                // The move that crosses the edge is never sent as a position,
+                // so after a fast flick the client's cursor would be left
+                // wherever it last was. Put it on the edge it is leaving
+                // through first.
+                let edge = nearest_point(moved, &mons);
+                let to_edge = Action::Send {
+                    to: screen.clone(),
+                    msg: ServerMsg::Mouse(MouseEvent::MoveAbs {
+                        x: edge.x,
+                        y: edge.y,
+                    }),
+                };
                 if next == self.local {
                     let jump = self.policy.jump_zone.max(1);
                     let lm = self
@@ -337,12 +349,17 @@ impl Core {
                         .copied()
                         .find(|m| m.contains(q))
                         .unwrap_or(self.local_monitors[0]);
-                    return self.go_local(&screen, inset_clamp(q, &lm, jump + 1));
+                    let mut actions = vec![to_edge];
+                    actions.extend(self.go_local(&screen, inset_clamp(q, &lm, jump + 1)));
+                    return actions;
                 }
-                let mut actions = vec![Action::Send {
-                    to: screen,
-                    msg: ServerMsg::Leave,
-                }];
+                let mut actions = vec![
+                    to_edge,
+                    Action::Send {
+                        to: screen,
+                        msg: ServerMsg::Leave,
+                    },
+                ];
                 actions.extend(self.enter_from_remote(next, q));
                 return actions;
             }
@@ -771,7 +788,12 @@ mod tests {
         c.handle(CaptureEvent::Pointer(Point::new(1919, 540)), 0);
         // Barely past the edge: placed just inside so it does not re-trigger.
         let a = c.handle(CaptureEvent::Motion { dx: -1, dy: 0 }, 1);
-        assert!(matches!(sends(&a)[0], ("win", ServerMsg::Leave)));
+        let s = sends(&a);
+        assert!(matches!(
+            s[0],
+            ("win", ServerMsg::Mouse(MouseEvent::MoveAbs { x: 0, .. }))
+        ));
+        assert!(matches!(s[1], ("win", ServerMsg::Leave)));
         match a.last().unwrap() {
             Action::Capture(CaptureCmd::Ungrab { warp }) => {
                 assert_eq!(*warp, Point::new(1920 - 1 - 2, 540));
@@ -782,6 +804,28 @@ mod tests {
         assert!(c
             .handle(CaptureEvent::Pointer(Point::new(1917, 540)), 2)
             .is_empty());
+    }
+
+    #[test]
+    fn a_fast_flick_out_leaves_the_client_cursor_on_the_edge_it_crossed() {
+        let mut c = core();
+        c.handle(CaptureEvent::Pointer(Point::new(1919, 540)), 0);
+        // Move right into the client, well away from its left edge...
+        c.handle(CaptureEvent::Motion { dx: 400, dy: 20 }, 1);
+        // ...then flick back out in a single large step.
+        let a = c.handle(CaptureEvent::Motion { dx: -900, dy: 30 }, 2);
+        let s = sends(&a);
+        // The client's cursor is first put on its left edge, at the height it
+        // left at, and only then told the cursor has gone.
+        assert!(matches!(
+            s[0],
+            (
+                "win",
+                ServerMsg::Mouse(MouseEvent::MoveAbs { x: 0, y: 590 })
+            )
+        ));
+        assert!(matches!(s[1], ("win", ServerMsg::Leave)));
+        assert_eq!(c.active_remote(), None);
     }
 
     #[test]
@@ -824,9 +868,13 @@ mod tests {
         // win spans desk x 1920..4480; mac starts at 4480.
         let a = c.handle(CaptureEvent::Motion { dx: 2600, dy: 0 }, 1);
         let s = sends(&a);
-        assert!(matches!(s[0], ("win", ServerMsg::Leave)));
         assert!(matches!(
-            s[1],
+            s[0],
+            ("win", ServerMsg::Mouse(MouseEvent::MoveAbs { x: 2559, .. }))
+        ));
+        assert!(matches!(s[1], ("win", ServerMsg::Leave)));
+        assert!(matches!(
+            s[2],
             ("mac", ServerMsg::Enter { x: 40, y: 540, .. })
         ));
         assert!(!a.iter().any(|x| matches!(x, Action::Capture(_))));
