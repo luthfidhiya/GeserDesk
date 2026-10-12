@@ -21,15 +21,15 @@ use geserdesk_tls::tokio_rustls::TlsAcceptor;
 use geserdesk_tls::{peer_fingerprint, Fingerprint, Identity};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tracing::{info, warn};
 
+use crate::admin::DeskState;
 use crate::config::Config;
 use crate::hub::{Hub, Registration};
 use crate::layout::Layout;
 use crate::router::{self, Core};
 use crate::trust::{Trust, Verdict};
-use crate::ui;
 
 /// How long a client gets to finish the TLS handshake, and then to say `Hello`.
 /// A peer that stalls (or speaks the wrong protocol and leaves us waiting for
@@ -196,58 +196,107 @@ impl ServerHandle {
         let _ = self.shutdown.send(true);
     }
 
-    fn subscribe(&self) -> watch::Receiver<bool> {
+    /// A receiver that turns `true` when [`shutdown`](Self::shutdown) is called.
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.shutdown.subscribe()
     }
 }
 
-/// Bind and serve until Ctrl-C (or a [`ServerHandle::shutdown`]). Network only:
-/// no local input is captured, so nothing is ever sent to clients unless
-/// `config.demo` is set. See [`serve_with_capture`].
+/// Bind and serve until Ctrl-C. Network only: no local input is captured, so
+/// nothing is ever sent to clients unless `config.demo` is set. See
+/// [`serve_with_capture`].
 pub async fn serve(config: Config) -> anyhow::Result<()> {
-    let local =
-        geserdesk_platform::monitors().unwrap_or_else(|_| vec![Rect::new(0, 0, 1920, 1080)]);
-    let hub = Hub::new();
-    drop(hub.take_events()); // nothing routes input here, so nobody listens
-    let tls = tls_for(&config)?;
-    serve_with_hub(config, hub, local, tls).await
+    run_server(config, false, ctrl_c_shutdown()).await
 }
 
 /// Like [`serve`], but also captures the local keyboard and mouse and routes
 /// them to the screen the cursor is on (M4-M6).
 pub async fn serve_with_capture(config: Config) -> anyhow::Result<()> {
-    let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel();
-    let capture = geserdesk_platform::start(cap_tx)?;
+    run_server(config, true, ctrl_c_shutdown()).await
+}
+
+/// A shutdown signal that fires on Ctrl-C.
+fn ctrl_c_shutdown() -> watch::Receiver<bool> {
+    let (tx, rx) = watch::channel(false);
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            info!("shutdown requested");
+            let _ = tx.send(true);
+        }
+    });
+    rx
+}
+
+/// Run the server until `shutdown` turns `true`, then stop cleanly: every
+/// client session is closed and the keyboard and mouse grab is released. This
+/// is what a front end calls (the CLI wraps it in [`serve`] /
+/// [`serve_with_capture`]).
+pub async fn run_server(
+    config: Config,
+    capture: bool,
+    shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    run_server_with(config, capture, shutdown, None).await
+}
+
+/// Like [`run_server`], and hands the running server's [`DeskState`] to
+/// `ready` once the listener is up, so a front end can read and change the
+/// layout and the trusted computers while it runs.
+pub async fn run_server_with(
+    config: Config,
+    capture: bool,
+    shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<Arc<DeskState>>>,
+) -> anyhow::Result<()> {
     let hub = Hub::new();
-    let hub_events = hub.take_events().expect("a fresh hub has its event stream");
-    let local = geserdesk_platform::monitors().unwrap_or_else(|_| vec![capture.bounds()]);
-    info!(monitors = local.len(), "local monitors detected");
-    let core = Core::new(
-        config.layout.clone(),
-        config.policy,
-        config.local_screen.clone(),
-        local.clone(),
-        config.positions.clone(),
-    );
-    tokio::spawn(router::run(
-        core,
-        Arc::clone(&hub),
-        capture,
-        cap_rx,
-        hub_events,
-    ));
-    let tls = tls_for(&config)?;
-    serve_with_hub(config, hub, local, tls).await
+    let mut background = Vec::new();
+
+    let local = if capture {
+        let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel();
+        let capture = geserdesk_platform::start(cap_tx)?;
+        let hub_events = hub.take_events().expect("a fresh hub has its event stream");
+        let local = geserdesk_platform::monitors().unwrap_or_else(|_| vec![capture.bounds()]);
+        info!(monitors = local.len(), "local monitors detected");
+        let core = Core::new(
+            config.layout.clone(),
+            config.policy,
+            config.local_screen.clone(),
+            local.clone(),
+            config.positions.clone(),
+        );
+        // Aborting this task drops the capture handle, which makes the capture
+        // thread release the grab and exit.
+        background.push(tokio::spawn(router::run(
+            core,
+            Arc::clone(&hub),
+            capture,
+            cap_rx,
+            hub_events,
+        )));
+        local
+    } else {
+        drop(hub.take_events()); // nothing routes input here, so nobody listens
+        geserdesk_platform::monitors().unwrap_or_else(|_| vec![Rect::new(0, 0, 1920, 1080)])
+    };
+
+    let result = serve_with_hub(config, hub, local, shutdown, ready).await;
+    for task in background {
+        task.abort();
+    }
+    result
 }
 
 async fn serve_with_hub(
     config: Config,
     hub: Arc<Hub>,
     local_monitors: Vec<Rect>,
-    tls: Option<Arc<TlsContext>>,
+    shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<Arc<DeskState>>>,
 ) -> anyhow::Result<()> {
-    if let Some(addr) = config.ui {
-        let state = ui::UiState::new(
+    let tls = tls_for(&config)?;
+    let (_handle, listener) = bind(&config).await?;
+    if let Some(ready) = ready {
+        let desk = DeskState::new(
             Arc::clone(&hub),
             config.path.clone(),
             config.local_screen.clone(),
@@ -256,20 +305,8 @@ async fn serve_with_hub(
             config.positions.clone(),
             tls.clone(),
         );
-        tokio::spawn(async move {
-            if let Err(e) = ui::serve(addr, state).await {
-                warn!(%addr, error = %e, "layout editor could not start");
-            }
-        });
+        let _ = ready.send(desk); // the front end may have stopped waiting
     }
-    let (handle, listener) = bind(&config).await?;
-    let shutdown = handle.subscribe();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            info!("shutdown requested");
-            handle.shutdown();
-        }
-    });
     accept_loop_tls(config, listener, hub, shutdown, tls).await
 }
 
@@ -308,6 +345,9 @@ pub async fn accept_loop_tls(
     tls: Option<Arc<TlsContext>>,
 ) -> anyhow::Result<()> {
     let config = Arc::new(config);
+    // Every connection runs in this set so that stopping the server can close
+    // them all instead of leaving sessions behind.
+    let mut sessions = tokio::task::JoinSet::new();
 
     loop {
         let (stream, peer) = tokio::select! {
@@ -318,8 +358,11 @@ pub async fn accept_loop_tls(
                     continue;
                 }
             },
+            // Reap finished sessions so the set does not grow forever.
+            Some(_) = sessions.join_next(), if !sessions.is_empty() => continue,
             _ = wait_for_shutdown(&mut shutdown) => {
-                info!("accept loop stopping");
+                info!("server stopping");
+                sessions.abort_all();
                 return Ok(());
             }
         };
@@ -329,7 +372,7 @@ pub async fn accept_loop_tls(
         let config = Arc::clone(&config);
         let hub = Arc::clone(&hub);
         let tls = tls.clone();
-        tokio::spawn(async move {
+        sessions.spawn(async move {
             let result = match tls {
                 None => handle_client(stream, peer, None, config, hub, None).await,
                 Some(ctx) => {
@@ -959,5 +1002,64 @@ mod tests {
             assert!(!matches!(got, Ok(Ok(ServerMsg::Welcome { .. }))));
             assert!(rig.ctx.trust.pending().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn run_server_stops_cleanly_and_closes_its_sessions() {
+        // A free port to hand to the config.
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let config = Config::parse(&format!(
+            r#"
+            [server]
+            listen = "127.0.0.1:{port}"
+            ui = ""
+            tls = false
+            [[screens]]
+            name = "linux-pc"
+        "#
+        ))
+        .unwrap();
+
+        let (stop, shutdown) = watch::channel(false);
+        let server = tokio::spawn(run_server(config, false, shutdown));
+
+        // Wait for it to listen, then connect a client and finish the handshake.
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut ms = MessageStream::new(stream.expect("server never listened"));
+        ms.send(&ClientMsg::Hello {
+            version: PROTOCOL_VERSION,
+            screen: client_screen("linux-pc"),
+        })
+        .await
+        .unwrap();
+        assert!(matches!(
+            ms.recv::<ServerMsg>().await.unwrap(),
+            ServerMsg::Welcome { .. }
+        ));
+
+        stop.send(true).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .expect("run_server did not stop")
+            .unwrap();
+        assert!(result.is_ok());
+
+        // The session was closed with the server: reading ends instead of
+        // blocking forever.
+        let end = tokio::time::timeout(Duration::from_secs(3), async {
+            // SetOptions / keep-alive may still be queued; then it ends.
+            while ms.recv::<ServerMsg>().await.is_ok() {}
+        })
+        .await;
+        assert!(end.is_ok(), "the client session was left open");
     }
 }

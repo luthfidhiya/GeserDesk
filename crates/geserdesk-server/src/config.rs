@@ -8,7 +8,6 @@
 //! [server]
 //! listen = "0.0.0.0:24810"
 //! screen = "linux-pc"   # this machine's own screen (default: the first one)
-//! ui = "127.0.0.1:24811"  # layout editor page; "" turns it off
 //! tls = true              # default; false sends everything unencrypted
 //!
 //! [[screens]]
@@ -38,8 +37,6 @@ use crate::layout::{Layout, LinkError, SwitchPolicy};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
-    /// Where the layout-editor web page listens; `None` disables it.
-    pub ui: Option<SocketAddr>,
     /// The screen this server's own keyboard and mouse belong to.
     pub local_screen: String,
     /// Where each machine sits on the shared virtual desk (top-left corner of
@@ -163,14 +160,11 @@ impl Config {
             }
         }
 
-        let ui = match raw.server.as_ref().and_then(|s| s.ui.as_deref()) {
-            None => Some(default_ui()),
-            Some("") => None,
-            Some(addr) => Some(addr.parse().map_err(|source| ConfigError::ListenAddr {
-                addr: addr.to_string(),
-                source,
-            })?),
-        };
+        if raw.server.as_ref().is_some_and(|s| s.ui.is_some()) {
+            tracing::warn!(
+                "`[server] ui` is ignored: the screen layout is now edited in the GeserDesk app"
+            );
+        }
 
         let mut layout = Layout::new(names);
         for (from, links) in &raw.links {
@@ -197,7 +191,6 @@ impl Config {
 
         Ok(Config {
             listen,
-            ui,
             local_screen,
             positions,
             path: None,
@@ -210,11 +203,6 @@ impl Config {
             demo: false,
         })
     }
-}
-
-/// The layout editor is local-only by default: it can rewrite the config file.
-fn default_ui() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], 24811))
 }
 
 fn default_listen() -> SocketAddr {
@@ -238,7 +226,8 @@ struct ServerSection {
     listen: Option<String>,
     /// Name of the server's own screen; defaults to the first `[[screens]]`.
     screen: Option<String>,
-    /// Address of the layout-editor web page; `""` disables it.
+    /// Old address of the layout-editor web page, which no longer exists.
+    /// Only read so a leftover setting can be reported.
     ui: Option<String>,
     /// TLS on or off (default on).
     tls: Option<bool>,
@@ -418,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn positions_and_ui_are_parsed() {
+    fn positions_are_parsed_and_an_old_ui_key_is_ignored() {
         let cfg = Config::parse(
             r#"
             [server]
@@ -432,16 +421,11 @@ mod tests {
         "#,
         )
         .unwrap();
-        assert_eq!(cfg.ui, Some("127.0.0.1:9999".parse().unwrap()));
         assert_eq!(cfg.positions.len(), 1);
         assert_eq!(cfg.positions["b"], Point::new(1920, -200));
 
         let default = Config::parse("[[screens]]\nname = \"a\"\n").unwrap();
-        assert_eq!(default.ui, Some("127.0.0.1:24811".parse().unwrap()));
         assert!(default.positions.is_empty());
-
-        let off = Config::parse("[server]\nui = \"\"\n[[screens]]\nname = \"a\"\n").unwrap();
-        assert_eq!(off.ui, None);
     }
 
     #[test]

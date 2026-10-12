@@ -51,9 +51,6 @@ enum Command {
         /// Network only: do not capture this machine's keyboard and mouse.
         #[arg(long)]
         no_capture: bool,
-        /// Do not start the layout-editor web page.
-        #[arg(long)]
-        no_ui: bool,
         /// Send everything unencrypted and let any machine connect. For
         /// debugging only.
         #[arg(long)]
@@ -106,16 +103,12 @@ async fn main() -> anyhow::Result<()> {
             config,
             demo,
             no_capture,
-            no_ui,
             no_tls,
             identity_dir,
         } => {
             let mut cfg = Config::load(&config)
                 .with_context(|| format!("loading config from {}", config.display()))?;
             cfg.demo = demo;
-            if no_ui {
-                cfg.ui = None;
-            }
             if no_tls {
                 cfg.tls = false;
             }
