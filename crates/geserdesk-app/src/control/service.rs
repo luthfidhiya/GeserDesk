@@ -101,54 +101,60 @@ impl Service {
             }
         });
 
-        if self.greet(&mut recv, &out).await {
-            self.converse(&mut recv, &out).await;
+        if let Some(limited) = self.greet(&mut recv, &out).await {
+            self.converse(&mut recv, &out, limited).await;
         }
         drop(out);
         let _ = writer.await;
     }
 
-    /// The first message must be a valid `Hello`.
-    async fn greet<R>(&self, recv: &mut R, out: &mpsc::UnboundedSender<ToController>) -> bool
+    /// The first message must be a valid `Hello`. Returns whether the controller
+    /// is limited to `Info` and `Shutdown` because its protocol is not ours.
+    async fn greet<R>(
+        &self,
+        recv: &mut R,
+        out: &mpsc::UnboundedSender<ToController>,
+    ) -> Option<bool>
     where
         R: tokio::io::AsyncBufRead + Unpin,
     {
         let first = match timeout(HELLO_TIMEOUT, read_line(recv)).await {
             Ok(Ok(Some(line))) => line,
-            _ => return false,
+            _ => return None,
         };
         let Ok(Request { id, cmd }) = serde_json::from_str::<Request>(&first) else {
-            return false;
+            return None;
         };
         let refuse = |why: &str| {
             let _ = out.send(ToController::Response {
                 id,
                 result: Err(why.to_string()),
             });
-            false
+            None
         };
         match cmd {
             Command::Hello { protocol, token } => {
                 if !same_token(&token, &self.token) {
                     return refuse("token salah");
                 }
-                if protocol != PROTOCOL {
-                    return refuse(&format!(
-                        "versi protokol beda (daemon {PROTOCOL}, pengendali {protocol}): hentikan daemon lama"
-                    ));
-                }
+                // A controller of another version may still read who we are and
+                // end us, so an old daemon is never stuck holding the keyboard.
                 let _ = out.send(ToController::Response {
                     id,
                     result: Ok(Reply::Info(self.info())),
                 });
-                true
+                Some(protocol != PROTOCOL)
             }
             _ => refuse("Hello harus dikirim lebih dulu"),
         }
     }
 
-    async fn converse<R>(&self, recv: &mut R, out: &mpsc::UnboundedSender<ToController>)
-    where
+    async fn converse<R>(
+        &self,
+        recv: &mut R,
+        out: &mpsc::UnboundedSender<ToController>,
+        limited: bool,
+    ) where
         R: tokio::io::AsyncBufRead + Unpin,
     {
         let mut subs: Option<Subscriptions> = None;
@@ -159,7 +165,11 @@ impl Service {
                     let Ok(Some(line)) = line else { break };
                     let message = match serde_json::from_str::<Request>(&line) {
                         Ok(Request { id, cmd }) => {
-                            let result = self.dispatch(cmd, &mut subs).await;
+                            let result = if limited && !matches!(cmd, Command::Info | Command::Shutdown) {
+                                Err("versi protokol beda: hanya Info dan Shutdown yang diizinkan".to_string())
+                            } else {
+                                self.dispatch(cmd, &mut subs).await
+                            };
                             ToController::Response { id, result }
                         }
                         Err(e) => ToController::Response { id: 0, result: Err(format!("pesan tidak dikenal: {e}")) },

@@ -111,7 +111,7 @@ async fn a_controller_attaches_and_sees_the_daemon() {
 }
 
 #[tokio::test]
-async fn a_wrong_token_or_protocol_or_missing_hello_is_refused() {
+async fn a_wrong_token_or_a_missing_hello_is_refused() {
     let dir = scratch("refuse");
     let (endpoint, _daemon) = start_daemon(&dir, false).await;
 
@@ -121,17 +121,57 @@ async fn a_wrong_token_or_protocol_or_missing_hello_is_refused() {
     };
     assert!(refusal(raw(&endpoint, bad_token).await).contains("token"));
 
-    let token = endpoint.read_token().unwrap();
-    let old = Command::Hello {
-        protocol: PROTOCOL + 1,
-        token,
-    };
-    assert!(refusal(raw(&endpoint, old).await).contains("protokol"));
-
     assert!(refusal(raw(&endpoint, Command::Stop).await).contains("Hello"));
 
     // None of that stopped the daemon from serving a proper controller.
     assert!(Remote::connect(&endpoint).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_controller_of_another_protocol_can_only_read_info_and_shut_down() {
+    let dir = scratch("version");
+    let (endpoint, daemon) = start_daemon(&dir, false).await;
+    let token = endpoint.read_token().unwrap();
+
+    // Over a raw connection: Hello is accepted, then everything but Info/Shutdown is not.
+    let stream = endpoint.connect().await.unwrap();
+    let (recv, mut send) = stream.split();
+    let mut recv = BufReader::new(recv);
+    let say = |id, cmd| encode(&Request { id, cmd });
+    send.write_all(
+        say(
+            1,
+            Command::Hello {
+                protocol: PROTOCOL + 1,
+                token,
+            },
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let hello = read_line(&mut recv).await.unwrap().unwrap();
+    assert!(hello.contains("\"protocol\":1"), "{hello}");
+    send.write_all(say(2, Command::Status).as_bytes())
+        .await
+        .unwrap();
+    let refused = read_line(&mut recv).await.unwrap().unwrap();
+    assert!(refused.contains("versi protokol beda"), "{refused}");
+    send.write_all(say(3, Command::Info).as_bytes())
+        .await
+        .unwrap();
+    let info = read_line(&mut recv).await.unwrap().unwrap();
+    assert!(info.contains("\"pid\""), "{info}");
+    send.write_all(say(4, Command::Shutdown).as_bytes())
+        .await
+        .unwrap();
+    let _ = read_line(&mut recv).await.unwrap();
+
+    timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("the old daemon was ended")
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

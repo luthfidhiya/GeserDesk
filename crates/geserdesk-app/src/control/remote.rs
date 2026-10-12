@@ -141,6 +141,12 @@ impl Remote {
         &self.inner.info
     }
 
+    /// Whether the daemon speaks our protocol. If not, only `refresh_info` and
+    /// `shutdown` work: enough to end an old daemon.
+    pub fn compatible(&self) -> bool {
+        self.inner.info.protocol == PROTOCOL
+    }
+
     /// Events pushed after [`subscribe`](Self::subscribe).
     pub fn events(&self) -> broadcast::Receiver<Event> {
         self.inner.events.subscribe()
