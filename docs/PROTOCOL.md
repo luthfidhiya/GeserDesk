@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # GeserDesk Wire Protocol
 
-Version 1.0. This is a new protocol; it does **not** interoperate with Input
+Version 2.0. This is a new protocol; it does **not** interoperate with Input
 Leap / Barrier / Synergy.
 
 Source of truth: `crates/geserdesk-proto`. This document describes the shape;
@@ -40,7 +40,7 @@ Every message is one length-prefixed frame:
 | `Version` | `{ major: u16, minor: u16 }` |
 | `Point` | `{ x: i32, y: i32 }` (absolute screen coordinates) |
 | `Rect` | `{ x: i32, y: i32, w: i32, h: i32 }`, half-open |
-| `ScreenInfo` | `{ name: String, bounds: Rect, cursor: Point }` |
+| `ScreenInfo` | `{ name: String, bounds: Rect, monitors: Vec<Rect>, cursor: Point }` — `bounds` is the union of `monitors`, all in the machine's own desktop coordinates (primary at the origin; secondary monitors may be negative). A client re-sends it via `ScreenChanged` when its monitors change. |
 | `ModMask` | `u32` bitmask: shift 0x1, control 0x2, alt 0x4, meta 0x8, super 0x10, altgr 0x20, capslock 0x1000, numlock 0x2000 |
 | `KeyAction` | `Down` \| `Up` \| `Repeat(u16)` |
 | `KeyEvent` | `{ hid: u16, ch: Option<char>, mods: ModMask, action: KeyAction }` |
@@ -126,3 +126,9 @@ which the server closes the connection.
 client stores the latest `seq` and echoes it in `ClipboardGrab` / `ClipboardData`
 so the server can order clipboard ownership across screens (the same role as
 Input Leap's `kMsgCEnter` sequence number).
+
+## Changes
+
+- **2.0** — `ScreenInfo` gained `monitors`. The wire format is positional
+  (postcard), so this is a major bump: a 1.x peer is answered with
+  `Incompatible` instead of misreading the handshake.

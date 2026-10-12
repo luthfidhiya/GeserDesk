@@ -3,6 +3,7 @@
 # Start the server on the Linux box:
 #   cargo run -p geserdesk-cli -- server --config dev-config.toml -v
 # Push the cursor against the right edge, or press Ctrl+Alt+Home, to switch.
+# Arrange the screens visually at http://127.0.0.1:24811/ (saves x/y below).
 # Then the client on the Windows box:
 #   cargo run -p geserdesk-cli --features inject -- client --name windows-pc --server <LINUX-IP>:24810 -v
 

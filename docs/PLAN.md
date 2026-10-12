@@ -393,6 +393,16 @@ Not done / known limits:
 - Mouse is always sent as absolute (`MoveAbs`) positions; `relative_mouse_moves` (for games) is not honoured yet.
 - Do **not** run server (capture) and client (inject) on the same X display: the client's injected input is captured again. Use `--dry-run` for loopback.
 
+### Session 3 — 2026-10-12 — monitor detection and the layout editor
+
+- **Protocol 2.0:** `ScreenInfo.monitors`; clients detect monitors (X11 RandR; Windows `EnumDisplayMonitors`, **compiles but never run on Windows**) and re-report on change.
+- **Virtual desk** (`desk.rs`): each machine has an origin; monitors that touch are neighbours, so offsets work. `[links]` still place unpositioned screens. The router (`router.rs`) was rewritten on this model: entry points follow the real geometry, multi-monitor machines work, dead stretches of edge don't switch.
+- **Layout editor** (`ui.rs` + `ui.html`): axum on `127.0.0.1:24811`; drag/snap/arrow-nudge, overlap check, saves live and into the config with `toml_edit` (comments kept). Guarded by a Host-header check and JSON-only POST.
+- Verified in a real browser: drag, snap, save, config rewritten, server picked it up. 123 tests green.
+- Windows client needs the DPI-aware call (`init_process`) so reported sizes match real pixels.
+
+**Needs a rebuild on both machines** (protocol 2.0 is not compatible with 1.x).
+
 ---
 
 ## Odds of getting there (≥15 h/week, Linux + Windows only)

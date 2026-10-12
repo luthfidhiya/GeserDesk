@@ -20,7 +20,8 @@ moves them to a client by pushing the cursor against a screen edge (or
 | M4 — X11 capture + hotkey switching | ✅ done |
 | M5 — edge crossing | ✅ done |
 | M6 — full keyboard (HID, modifiers, auto-repeat) | ✅ done on Linux |
-| M7+ — Windows capture, TLS, clipboard, files, GUI | ⬜ not started |
+| Multi-monitor detection + browser layout editor | ✅ done (Windows detection not yet run on real hardware) |
+| M7+ — Windows capture, TLS, clipboard, files, native GUI | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
 in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -49,8 +50,18 @@ cargo run -p geserdesk-cli -- server --config dev-config.toml -v
 cargo run -p geserdesk-cli -- client --name windows-pc --server 127.0.0.1:24810 --dry-run -v
 ```
 
+A client reports its monitors automatically; `--monitors 1920x1080+0+0,1280x1024+1920+0`
+overrides detection (VMs, testing).
+
 `--dry-run` logs input events instead of injecting them (useful without a
 graphical session).
+
+**Arranging screens:** with the server running, open <http://127.0.0.1:24811/> in a
+browser. Every machine appears with its real monitors (clients report them when
+they connect); drag them where they sit on your desk, offsets included. Edges
+snap together, and *Save* applies the layout immediately and writes `x`/`y` into
+the config file. The page only listens on loopback (`[server] ui = ""` or
+`--no-ui` turns it off). Old `[links]` configs still work.
 
 On Linux the server captures this machine's keyboard and mouse. Push the cursor
 against the edge linked to a connected client (see `[links]`), or press
