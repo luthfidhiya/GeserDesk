@@ -12,13 +12,13 @@ use geserdesk_client::{
 };
 use geserdesk_server::{Config, DeskState};
 use geserdesk_tls::Identity;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::settings::{config_dir, with_default_port, ClientSettings, ServerSettings};
+use crate::settings::{config_dir, with_default_port, ClientSettings, Mode, ServerSettings};
 use crate::trust::{PromptSlot, PromptTrust, TrustPrompt};
 
 /// How long a server gets to close its sessions and release the keyboard and
@@ -26,7 +26,7 @@ use crate::trust::{PromptSlot, PromptTrust, TrustPrompt};
 const STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// The overall state a front end shows.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
 pub enum Status {
     Stopped,
@@ -124,6 +124,17 @@ impl Session {
         running.is_some()
     }
 
+    /// Which kind of session is up, if any.
+    pub fn mode(&self) -> Option<Mode> {
+        if !self.is_running() {
+            return None;
+        }
+        self.running.lock().unwrap().as_ref().map(|r| match r {
+            Running::Client(_) => Mode::Client,
+            Running::Server { .. } => Mode::Server,
+        })
+    }
+
     /// The running server's desk, once it is listening.
     pub fn desk(&self) -> Option<Arc<DeskState>> {
         self.desk.lock().unwrap().clone()
@@ -200,19 +211,31 @@ impl Session {
     }
 
     pub fn start_server(self: &Arc<Self>, s: &ServerSettings) -> Result<(), String> {
-        if self.is_running() {
-            return Err("Sudah berjalan. Hentikan dulu.".into());
-        }
         let path = PathBuf::from(s.config.trim());
         let config = Config::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         info!(config = %path.display(), "starting server");
+        self.start_server_config(config, true)
+    }
+
+    /// Start a server from an already prepared `config` (the CLI applies its
+    /// flags to it first). With `capture` off nothing local is captured, so
+    /// nothing is routed: the network side only.
+    pub fn start_server_config(
+        self: &Arc<Self>,
+        config: Config,
+        capture: bool,
+    ) -> Result<(), String> {
+        if self.is_running() {
+            return Err("Sudah berjalan. Hentikan dulu.".into());
+        }
         self.set(Status::ServerRunning);
 
         let (stop, shutdown) = watch::channel(false);
         let (ready_tx, ready_rx) = oneshot::channel();
         let this = Arc::clone(self);
         let task = self.rt.spawn(async move {
-            match geserdesk_server::run_server_with(config, true, shutdown, Some(ready_tx)).await {
+            match geserdesk_server::run_server_with(config, capture, shutdown, Some(ready_tx)).await
+            {
                 Ok(()) => info!("server stopped"),
                 Err(e) => {
                     error!(error = %e, "server stopped with an error");

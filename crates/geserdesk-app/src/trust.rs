@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use geserdesk_client::{KnownServers, ServerTrust};
 use geserdesk_tls::Fingerprint;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -16,7 +16,7 @@ use tracing::{info, warn};
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A server fingerprint waiting for the person to accept or refuse it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustPrompt {
     pub server: String,
     pub fingerprint: String,

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use geserdesk_proto::{Point, Rect};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::desk::{effective_origins, DEFAULT_SIZE};
@@ -38,7 +38,7 @@ pub struct DeskState {
 }
 
 /// One machine on the desk.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenView {
     pub name: String,
     pub local: bool,
@@ -51,7 +51,7 @@ pub struct ScreenView {
 }
 
 /// A client that connected but is not trusted yet.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingView {
     pub name: String,
     pub fingerprint: String,
@@ -62,7 +62,7 @@ pub struct PendingView {
 }
 
 /// A consistent picture of the desk for one refresh of the screen.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeskSnapshot {
     pub local: String,
     pub screens: Vec<ScreenView>,

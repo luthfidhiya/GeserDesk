@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
@@ -14,16 +14,21 @@ use tracing_subscriber::layer::{Context, Layer};
 /// The most lines kept; older ones fall off the front.
 const MAX_LINES: usize = 3000;
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogLine {
     pub time: String,
-    #[serde(serialize_with = "level_name")]
+    #[serde(serialize_with = "level_name", deserialize_with = "level_from_name")]
     pub level: Level,
     pub text: String,
 }
 
 fn level_name<S: Serializer>(level: &Level, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(level.as_str())
+}
+
+fn level_from_name<'de, D: Deserializer<'de>>(d: D) -> Result<Level, D::Error> {
+    let name = String::deserialize(d)?;
+    name.parse().map_err(serde::de::Error::custom)
 }
 
 /// Shared, cheaply clonable buffer of log lines.
