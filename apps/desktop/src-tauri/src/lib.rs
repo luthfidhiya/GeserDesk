@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The GeserDesk desktop app: a Tauri window and tray over `geserdesk-app`.
-//! Nothing here decides how GeserDesk works; it only carries calls and events
-//! between the web page and that crate.
+//! The GeserDesk desktop app: a Tauri window and tray that control a daemon.
+//! The daemon (this program run with `--daemon`, or `geserdesk server`) owns the
+//! session; this side only attaches to it, shows it and sends it commands, so
+//! closing the window never stops anything.
 
 mod commands;
 mod events;
+mod link;
 mod state;
 mod tray;
 
-use geserdesk_app::{BufferLayer, LogBuffer, Session};
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{Manager, WindowEvent};
 use tracing::info;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
@@ -17,26 +18,26 @@ use tracing_subscriber::EnvFilter;
 use crate::state::AppState;
 
 pub fn run() {
-    let log = LogBuffer::new();
     tracing_subscriber::registry()
         .with(EnvFilter::new("geserdesk=debug"))
-        .with(BufferLayer(log.clone()))
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .init();
 
-    let session = Session::new(tauri::async_runtime::handle().inner().clone());
-    let app = tauri::Builder::default()
+    tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(AppState::new(session, log))
+        .manage(AppState::new())
         .setup(|app| {
-            events::forward(app.handle());
+            link::start(app.handle());
             tray::build(app.handle());
             // `--start` begins as soon as the window opens, with the saved settings.
             if std::env::args().any(|a| a == "--start") {
-                if let Err(e) = app.state::<AppState>().start() {
-                    tracing::error!("{e}");
-                }
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = handle.state::<AppState>().start().await {
+                        tracing::error!("{e}");
+                    }
+                });
             }
             Ok(())
         })
@@ -52,8 +53,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::session::session_status,
+            commands::session::daemon_info,
             commands::session::start_session,
             commands::session::stop_session,
+            commands::session::shutdown_daemon,
             commands::session::own_fingerprint,
             commands::settings::load_settings,
             commands::settings::save_settings,
@@ -69,16 +72,6 @@ pub fn run() {
             commands::log::log_snapshot,
             commands::log::clear_log,
         ])
-        .build(tauri::generate_context!())
-        .expect("building the GeserDesk app");
-
-    app.run(|handle, event| {
-        // However the app is asked to close, give the keyboard and mouse back first.
-        if let RunEvent::ExitRequested { api, .. } = event {
-            if !handle.state::<AppState>().is_quitting() {
-                api.prevent_exit();
-                tray::quit(handle);
-            }
-        }
-    });
+        .run(tauri::generate_context!())
+        .expect("running the GeserDesk app");
 }

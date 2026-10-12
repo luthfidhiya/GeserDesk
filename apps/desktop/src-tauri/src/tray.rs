@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The system tray: shows whether GeserDesk is running, and offers Start/Stop,
-//! the window and Quit without opening the window.
+//! the window and Quit without opening the window. Starting and stopping go
+//! through the daemon, like everything else in the app.
 
 use geserdesk_app::Status;
 use tauri::image::Image;
@@ -20,6 +21,7 @@ const ID_OPEN: &str = "open";
 const ID_LAYOUT: &str = "layout";
 const ID_TOGGLE: &str = "toggle";
 const ID_QUIT: &str = "quit";
+const ID_QUIT_STOP: &str = "quit_stop";
 
 /// Kept in app state so a status change can update the icon and the menu.
 struct Handles {
@@ -34,7 +36,7 @@ pub fn build(app: &AppHandle) {
         Ok(handles) => {
             app.manage(handles);
             app.state::<AppState>().set_tray_ok(true);
-            reflect(app, &app.state::<AppState>().session.status());
+            reflect(app, &app.state::<AppState>().status());
         }
         Err(e) => warn!(error = %e, "no tray icon; closing the window will quit the app"),
     }
@@ -44,7 +46,15 @@ fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
     let open = MenuItem::with_id(app, ID_OPEN, "Buka jendela", true, None::<&str>)?;
     let layout = MenuItem::with_id(app, ID_LAYOUT, "Pengaturan monitor", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, ID_QUIT, "Keluar", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(
+        app,
+        ID_QUIT,
+        "Keluar (sesi tetap jalan)",
+        true,
+        None::<&str>,
+    )?;
+    let quit_stop =
+        MenuItem::with_id(app, ID_QUIT_STOP, "Hentikan dan keluar", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -54,6 +64,7 @@ fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
             &toggle,
             &PredefinedMenuItem::separator(app)?,
             &quit_item,
+            &quit_stop,
         ],
     )?;
     let tray = TrayIconBuilder::with_id("main")
@@ -68,7 +79,8 @@ fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
                 let _ = app.emit(NAVIGATE, "layout");
             }
             ID_TOGGLE => toggle_session(app),
-            ID_QUIT => quit(app),
+            ID_QUIT => quit(app, false),
+            ID_QUIT_STOP => quit(app, true),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -122,9 +134,12 @@ fn toggle_session(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if state.session.is_running() {
-            state.session.stop().await;
-        } else if let Err(e) = state.start() {
+        let result = if state.is_active() {
+            state.stop().await
+        } else {
+            state.start().await
+        };
+        if let Err(e) = result {
             // Needs the person: show the window so the problem is visible.
             error!("{e}");
             show_window(&app);
@@ -149,16 +164,15 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
-/// Quit for real: stop the client or server first so the keyboard and mouse
-/// are given back, then exit.
-pub fn quit(app: &AppHandle) {
-    if !app.state::<AppState>().begin_quit() {
-        return;
-    }
-    info!("quitting");
+/// Close the app. The session lives in the daemon, so it keeps running unless
+/// `stop_session` asks for it to end too.
+pub fn quit(app: &AppHandle, stop_session: bool) {
+    info!(stop_session, "quitting");
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        app.state::<AppState>().session.stop().await;
+        if stop_session {
+            app.state::<AppState>().shutdown_daemon().await;
+        }
         app.exit(0);
     });
 }
