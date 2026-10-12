@@ -61,6 +61,9 @@ cargo run -p geserdesk-cli -- server --config dev-config.toml -v
 cargo run -p geserdesk-cli -- client --name windows-pc --server 127.0.0.1:24810 --dry-run -v
 ```
 
+`geserdesk status` and `geserdesk stop` talk to a running server (see *Daemon and
+controllers*).
+
 A client reconnects by itself when the link drops or the server restarts (retrying
 after 1 s, 2 s, 4 s ... up to 10 s); `--no-reconnect` exits instead. Only a
 protocol-version mismatch stops it.
@@ -106,9 +109,15 @@ pnpm -C apps/desktop tauri dev          # run it
 pnpm -C apps/desktop tauri build        # installable package
 ```
 
-One window for everything: pick **Client** or **Server** on the *Kontrol* tab, fill
-in the settings, **Start / Stop**, and watch the status line and the live **log**
-(tick *Rinci* for debug lines; *Salin* copies the log).
+One window for everything: pick **Client** or **Server** at the top, fill in the
+settings on *Konfigurasi*, **Start / Stop**, and watch the status line and the live
+**log** (tick *Rinci* for debug lines; *Salin* copies the log).
+
+The window is a **controller**: the client or server runs in a separate **daemon**
+that the app starts (this same program with `--daemon`, no window) and attaches to.
+Closing the window therefore stops nothing, and the app also attaches to a server
+that was started from the CLI (`geserdesk server ...`) or before the window was
+opened. See *Daemon and controllers* below.
 
 * **Client:** enter the server address and this computer's screen name, press
   Start. The first time, a dialog shows the server's fingerprint with
@@ -117,15 +126,46 @@ in the settings, **Start / Stop**, and watch the status line and the live **log*
   approve the computer.
 * **Server:** pick the config file (the app can create a starting one), press
   Start. The *Pengaturan monitor* tab then arranges the screens and approves or revokes
-  computers (a badge shows how many are waiting). Stop (or quitting) closes every
-  session and gives the keyboard and mouse back.
+  computers (a badge shows how many are waiting). Stop ends the session, and the
+  daemon with it, giving the keyboard and mouse back.
 * **Tray:** the icon shows whether GeserDesk is running (grey idle, green up, red
-  failed) and its menu starts/stops, opens the window or the layout tab, and quits.
-  Closing the window hides it to the tray; *Keluar* in the tray menu really quits
-  (switch this off with *Tutup jendela = sembunyikan ke tray*). Without a tray
-  (GNOME needs the *AppIndicator* extension) closing the window quits instead.
+  failed) and its menu starts/stops, opens the window or the monitor tab, and quits.
+  Closing the window hides it to the tray (switch this off with *Tutup jendela =
+  sembunyikan ke tray*). *Keluar* closes only the app and leaves the session running;
+  *Hentikan dan keluar* ends the session too. Without a tray (GNOME needs the
+  *AppIndicator* extension) closing the window quits the app, still not the session.
 * Settings are remembered in `gui.toml` next to the identity files.
 * `--start` begins as soon as the app opens: `pnpm -C apps/desktop tauri dev -- -- --start`.
+* `GESERDESK_NO_CAPTURE=1` keeps a server started from the app from capturing this
+  machine's keyboard and mouse (for trying the app out).
+
+## Daemon and controllers
+
+```
+ app (window, tray) ─┐
+ geserdesk status    ├── local socket + token ──►  daemon: owns the session
+ geserdesk stop      ┘     (JSON, one line each)     (network, TLS, capture, injection)
+```
+
+* `geserdesk server --config ...` **is** a daemon: the same server as always, plus a
+  control channel. `--no-control` turns the channel off.
+* The app starts a daemon itself when you press Start and none is running. It lives
+  as long as its session: Stop (or a failure) ends it. A daemon nobody gives work to
+  leaves after 30 s.
+* Only one daemon per user. Press Start in the app while `geserdesk server` is
+  running and the app attaches to it instead of fighting for port 24810.
+* `geserdesk status` shows the daemon, its session and the screens (exit code 1 when
+  there is none); `geserdesk stop` ends it.
+* Ctrl-C and SIGTERM stop the session first, so the keyboard and mouse are given back.
+* The channel is a Unix socket in `$XDG_RUNTIME_DIR/geserdesk/` (0600, directory 0700)
+  or a named pipe on Windows, plus a random token in `control.token` that only you can
+  read; a controller must present it. `GESERDESK_RUNTIME_DIR` moves the directory
+  (isolated runs, tests). A socket path longer than about 100 bytes is refused.
+* A controller of another protocol version may only read `Info` and send `Shutdown`,
+  so an old daemon can always be ended after an upgrade; the app offers a button.
+* `geserdesk client` is not part of this yet: its extra flags do not map onto the
+  channel, so the app cannot attach to a client started from the CLI.
+* The app's daemon writes its output to `daemon.log` next to the identity files.
 
 ## Security
 
@@ -159,15 +199,16 @@ crates/geserdesk-server    TOML config, layout + switch policy, client hub, rout
                            admin (what a front end reads and changes while it runs)
 crates/geserdesk-client    connection + handshake, the InputSink trait + enigo backend
 crates/geserdesk-app       application layer, no GUI toolkit: run client/server, status,
-                           settings, log, the "trust this server?" question
-apps/cli                   the `geserdesk` binary (server / client subcommands)
+                           settings, log, the "trust this server?" question, and the daemon
+                           with its control channel (control/, daemon.rs)
+apps/cli                   the `geserdesk` binary (server / client / status / stop)
 apps/desktop               the app: React + Tailwind + shadcn/ui page (src/) over a thin
                            Tauri shell (src-tauri/: commands, events, tray)
 ```
 
 Dependencies only point down the list: the core crates know nothing about windows,
 `geserdesk-app` knows nothing about Tauri, and the Tauri shell only carries calls
-and events between the page and `geserdesk-app`.
+and events between the page and the daemon (through `geserdesk-app`'s `Remote`).
 
 ## License
 
