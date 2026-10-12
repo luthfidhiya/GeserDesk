@@ -11,11 +11,15 @@
 //!   thread);
 //! * [`CaptureCmd`]s flow in through [`CaptureHandle::send`].
 //!
-//! Backends: X11 (`x11` module, Linux). Windows arrives in M7.
+//! Backends: X11 (`x11` module, Linux). Windows capture arrives in M7.
+//!
+//! [`monitors::monitors`] lists the machine's monitors on both platforms; the
+//! client reports them to the server so the layout can be arranged exactly.
 
 use geserdesk_proto::{Button, KeyEvent, Point, Rect};
 
 pub mod keymap;
+pub mod monitors;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
@@ -108,3 +112,5 @@ pub fn start(
 ) -> Result<CaptureHandle, CaptureError> {
     Err(CaptureError::Unsupported)
 }
+
+pub use monitors::{init_process, monitors};

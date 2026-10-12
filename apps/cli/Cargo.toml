@@ -20,6 +20,7 @@ inject = ["geserdesk-client/inject"]
 
 [dependencies]
 geserdesk-proto.workspace = true
+geserdesk-platform.workspace = true
 geserdesk-server.workspace = true
 geserdesk-client.workspace = true
 tokio.workspace = true

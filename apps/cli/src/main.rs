@@ -45,6 +45,9 @@ enum Command {
         /// Network only: do not capture this machine's keyboard and mouse.
         #[arg(long)]
         no_capture: bool,
+        /// Do not start the layout-editor web page.
+        #[arg(long)]
+        no_ui: bool,
     },
     /// Run as a client (a machine receiving synthesized input).
     Client {
@@ -57,6 +60,10 @@ enum Command {
         /// Log input events instead of injecting them.
         #[arg(long)]
         dry_run: bool,
+        /// Override monitor detection: comma-separated `WxH+X+Y`, e.g.
+        /// `1920x1080+0+0,1280x1024+1920+0`.
+        #[arg(long)]
+        monitors: Option<String>,
     },
 }
 
@@ -70,10 +77,14 @@ async fn main() -> anyhow::Result<()> {
             config,
             demo,
             no_capture,
+            no_ui,
         } => {
             let mut cfg = Config::load(&config)
                 .with_context(|| format!("loading config from {}", config.display()))?;
             cfg.demo = demo;
+            if no_ui {
+                cfg.ui = None;
+            }
             info!(
                 screens = cfg.layout.screens().len(),
                 listen = %cfg.listen,
@@ -89,12 +100,38 @@ async fn main() -> anyhow::Result<()> {
             name,
             server,
             dry_run,
+            monitors: forced,
         } => {
+            let forced = forced
+                .as_deref()
+                .map(parse_monitors)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("--monitors: {e}"))?;
+            geserdesk_platform::init_process();
+            let monitors = match forced
+                .clone()
+                .map(Ok)
+                .unwrap_or_else(geserdesk_platform::monitors)
+            {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not detect monitors; reporting a 1920x1080 placeholder");
+                    Vec::new()
+                }
+            };
+            for (i, m) in monitors.iter().enumerate() {
+                info!(index = i, x = m.x, y = m.y, w = m.w, h = m.h, "monitor");
+            }
             let cfg = ClientConfig {
                 server,
                 name,
-                // Replaced by the real display size when injecting.
-                bounds: Rect::new(0, 0, 1920, 1080),
+                monitors,
+                // A forced list is not re-detected.
+                detect: if forced.is_some() {
+                    None
+                } else {
+                    Some(|| geserdesk_platform::monitors().ok())
+                },
             };
             info!(name = %cfg.name, server = %cfg.server, "starting client");
             run_client(cfg, dry_run).await
@@ -103,14 +140,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "inject")]
-async fn run_client(mut cfg: ClientConfig, dry_run: bool) -> anyhow::Result<()> {
+async fn run_client(cfg: ClientConfig, dry_run: bool) -> anyhow::Result<()> {
     if dry_run {
         connect(&cfg, NullSink).await?;
     } else {
         let sink = geserdesk_client::EnigoSink::new().context("initialising input injection")?;
-        let (w, h) = sink.display_size().context("reading the display size")?;
-        cfg.bounds = Rect::new(0, 0, w, h);
-        info!(width = w, height = h, "using the real display size");
         connect(&cfg, sink).await?;
     }
     Ok(())
@@ -127,6 +161,24 @@ async fn run_client(cfg: ClientConfig, dry_run: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse `WxH+X+Y[,WxH+X+Y...]` (the geometry notation `xrandr` prints).
+fn parse_monitors(s: &str) -> Result<Vec<Rect>, String> {
+    s.split(',')
+        .map(|part| {
+            let bad = || format!("expected WxH+X+Y, got {part:?}");
+            let (size, pos) = part.trim().split_once('+').ok_or_else(bad)?;
+            let (w, h) = size.split_once('x').ok_or_else(bad)?;
+            let (x, y) = pos.split_once('+').ok_or_else(bad)?;
+            let n = |v: &str| v.parse::<i32>().map_err(|_| bad());
+            let r = Rect::new(n(x)?, n(y)?, n(w)?, n(h)?);
+            if r.w <= 0 || r.h <= 0 {
+                return Err(bad());
+            }
+            Ok(r)
+        })
+        .collect()
+}
+
 fn init_tracing(verbose: u8) {
     let default = match verbose {
         0 => "info",
@@ -139,4 +191,20 @@ fn init_tracing(verbose: u8) {
         .with(tracing_subscriber::fmt::layer().with_target(false))
         .with(filter)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_xrandr_style_geometry() {
+        assert_eq!(
+            parse_monitors("1920x1080+0+0,1280x1024+1920+0").unwrap(),
+            vec![Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1280, 1024)]
+        );
+        assert!(parse_monitors("1920x1080").is_err());
+        assert!(parse_monitors("0x1080+0+0").is_err());
+        assert!(parse_monitors("axb+0+0").is_err());
+    }
 }

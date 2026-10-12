@@ -136,6 +136,7 @@ mod tests {
         ScreenInfo {
             name: "laptop".into(),
             bounds: Rect::new(0, 0, 1920, 1080),
+            monitors: vec![Rect::new(0, 0, 1920, 1080)],
             cursor: Point::new(10, 10),
         }
     }

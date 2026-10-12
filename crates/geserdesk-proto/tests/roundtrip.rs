@@ -14,6 +14,7 @@ fn screen() -> ScreenInfo {
     ScreenInfo {
         name: "screen-with-a-fairly-long-name".into(),
         bounds: Rect::new(-1920, 0, 1920, 1080),
+        monitors: vec![Rect::new(-1920, 0, 1920, 1080)],
         cursor: Point::new(-5, 1079),
     }
 }

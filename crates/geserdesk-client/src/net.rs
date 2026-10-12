@@ -21,18 +21,52 @@ pub struct ClientConfig {
     pub server: String,
     /// This machine's screen name; must match the server config.
     pub name: String,
-    /// Full desktop bounds. Until the platform layer lands (M4) the CLI passes
-    /// a sensible placeholder.
-    pub bounds: Rect,
+    /// This machine's monitors at connect time. Empty is allowed (a 1920x1080
+    /// placeholder is reported), which is what a headless `--dry-run` uses.
+    pub monitors: Vec<Rect>,
+    /// How to re-read the monitor list while connected. When it returns a list
+    /// different from the last one reported, the server is told. `None` turns
+    /// the check off.
+    pub detect: Option<fn() -> Option<Vec<Rect>>>,
 }
 
 impl ClientConfig {
     fn screen_info(&self) -> ScreenInfo {
-        ScreenInfo {
-            name: self.name.clone(),
-            bounds: self.bounds,
-            cursor: self.bounds.center(),
+        let c = Rect::union_all(&self.monitors).map_or(Point::new(0, 0), |r| r.center());
+        ScreenInfo::from_monitors(self.name.clone(), self.monitors.clone(), c)
+    }
+}
+
+/// How often a connected client re-reads its monitor list.
+const MONITOR_POLL: Duration = Duration::from_secs(5);
+
+/// Tracks the last monitor list reported to the server.
+struct MonitorWatch {
+    name: String,
+    detect: Option<fn() -> Option<Vec<Rect>>>,
+    reported: Vec<Rect>,
+}
+
+impl MonitorWatch {
+    /// A `ScreenChanged` to send if the monitors changed since last time.
+    async fn check(&mut self) -> Option<ClientMsg> {
+        let detect = self.detect?;
+        // Enumerating monitors talks to the OS; keep it off the async threads.
+        let now = tokio::task::spawn_blocking(detect).await.ok().flatten()?;
+        if now.is_empty() || now == self.reported {
+            return None;
         }
+        info!(
+            monitors = now.len(),
+            "monitor arrangement changed; telling the server"
+        );
+        self.reported = now.clone();
+        let c = Rect::union_all(&now).map_or(Point::new(0, 0), |r| r.center());
+        Some(ClientMsg::ScreenChanged(ScreenInfo::from_monitors(
+            self.name.clone(),
+            now,
+            c,
+        )))
     }
 }
 
@@ -115,34 +149,55 @@ pub async fn connect(config: &ClientConfig, mut sink: impl InputSink) -> Result<
         "connected"
     );
 
-    session_loop(&mut ms, &mut sink, connected.keepalive).await
+    let mut watch = MonitorWatch {
+        name: config.name.clone(),
+        detect: config.detect,
+        reported: screen.monitors.clone(),
+    };
+    session_loop(&mut ms, &mut sink, connected.keepalive, &mut watch).await
 }
 
 async fn session_loop<S>(
     ms: &mut MessageStream<S>,
     sink: &mut impl InputSink,
     keepalive: Duration,
+    watch: &mut MonitorWatch,
 ) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     // If we hear nothing for this long, assume the link is dead.
     let silence_timeout = keepalive.saturating_mul(3).max(Duration::from_secs(5));
+    let mut last_heard = tokio::time::Instant::now();
+    let mut monitor_tick = tokio::time::interval(MONITOR_POLL);
+    monitor_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    monitor_tick.tick().await; // the first tick is immediate; nothing changed yet
 
     loop {
-        let next = tokio::time::timeout(silence_timeout, ms.recv::<ServerMsg>()).await;
-        let msg = match next {
-            Err(_elapsed) => {
-                warn!("no message from server within {silence_timeout:?}; disconnecting");
-                return Ok(());
+        // The deadline is measured from the last message, not from each loop
+        // pass, so the periodic monitor check cannot postpone it.
+        let remaining = silence_timeout.saturating_sub(last_heard.elapsed());
+        let msg = tokio::select! {
+            _ = monitor_tick.tick() => {
+                if let Some(changed) = watch.check().await {
+                    ms.send(&changed).await?;
+                }
+                continue;
             }
-            Ok(Err(geserdesk_proto::CodecError::Closed)) => {
-                info!("server closed the connection");
-                return Ok(());
-            }
-            Ok(Err(e)) => return Err(e.into()),
-            Ok(Ok(msg)) => msg,
+            next = tokio::time::timeout(remaining, ms.recv::<ServerMsg>()) => match next {
+                Err(_elapsed) => {
+                    warn!("no message from server within {silence_timeout:?}; disconnecting");
+                    return Ok(());
+                }
+                Ok(Err(geserdesk_proto::CodecError::Closed)) => {
+                    info!("server closed the connection");
+                    return Ok(());
+                }
+                Ok(Err(e)) => return Err(e.into()),
+                Ok(Ok(msg)) => msg,
+            },
         };
+        last_heard = tokio::time::Instant::now();
 
         match msg {
             ServerMsg::KeepAlive => {
@@ -169,10 +224,20 @@ mod tests {
     use crate::inject::RecordingSink;
     use geserdesk_proto::{CloseReason, KeyAction, KeyEvent, ModMask, MouseEvent};
 
+    /// A watch that never reports anything.
+    fn off() -> MonitorWatch {
+        MonitorWatch {
+            name: String::new(),
+            detect: None,
+            reported: Vec::new(),
+        }
+    }
+
     fn screen(name: &str) -> ScreenInfo {
         ScreenInfo {
             name: name.into(),
             bounds: Rect::new(0, 0, 1920, 1080),
+            monitors: vec![Rect::new(0, 0, 1920, 1080)],
             cursor: Point::new(0, 0),
         }
     }
@@ -268,7 +333,7 @@ mod tests {
                 .unwrap();
         });
 
-        session_loop(&mut client, &mut sink, Duration::from_secs(3))
+        session_loop(&mut client, &mut sink, Duration::from_secs(3), &mut off())
             .await
             .unwrap();
         server_task.await.unwrap();
@@ -298,7 +363,8 @@ mod tests {
         let cfg = ClientConfig {
             server: addr.to_string(),
             name: "windows-pc".into(),
-            bounds: Rect::new(0, 0, 2560, 1440),
+            monitors: vec![Rect::new(0, 0, 2560, 1440)],
+            detect: None,
         };
 
         // Run the client briefly; it should handshake and answer a keep-alive.
@@ -306,5 +372,43 @@ mod tests {
         let run = tokio::spawn(async move { connect(&cfg, sink).await });
         tokio::time::sleep(Duration::from_millis(500)).await;
         run.abort();
+    }
+
+    #[tokio::test]
+    async fn monitor_watch_reports_only_real_changes() {
+        fn same() -> Option<Vec<Rect>> {
+            Some(vec![Rect::new(0, 0, 1920, 1080)])
+        }
+        fn changed() -> Option<Vec<Rect>> {
+            Some(vec![
+                Rect::new(0, 0, 1920, 1080),
+                Rect::new(1920, 0, 1280, 1024),
+            ])
+        }
+        fn failing() -> Option<Vec<Rect>> {
+            None
+        }
+
+        let reported = vec![Rect::new(0, 0, 1920, 1080)];
+        let mut w = MonitorWatch {
+            name: "pc".into(),
+            detect: Some(same),
+            reported: reported.clone(),
+        };
+        assert!(w.check().await.is_none());
+
+        w.detect = Some(failing);
+        assert!(w.check().await.is_none());
+
+        w.detect = Some(changed);
+        match w.check().await {
+            Some(ClientMsg::ScreenChanged(info)) => {
+                assert_eq!(info.monitors.len(), 2);
+                assert_eq!(info.bounds, Rect::new(0, 0, 3200, 1080));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // Reported once; the same list again is not news.
+        assert!(w.check().await.is_none());
     }
 }

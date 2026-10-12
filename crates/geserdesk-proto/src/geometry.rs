@@ -47,6 +47,21 @@ impl Rect {
         Point::new(self.x + self.w / 2, self.y + self.h / 2)
     }
 
+    /// The smallest rectangle containing every rectangle in `rects`, or `None`
+    /// if the slice is empty.
+    pub fn union_all(rects: &[Rect]) -> Option<Rect> {
+        let first = rects.first()?;
+        let (mut l, mut t, mut r, mut b) =
+            (first.left(), first.top(), first.right(), first.bottom());
+        for rc in &rects[1..] {
+            l = l.min(rc.left());
+            t = t.min(rc.top());
+            r = r.max(rc.right());
+            b = b.max(rc.bottom());
+        }
+        Some(Rect::new(l, t, r - l, b - t))
+    }
+
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.left() && p.x < self.right() && p.y >= self.top() && p.y < self.bottom()
     }
@@ -129,8 +144,30 @@ pub struct ScreenInfo {
     pub name: String,
     /// Full desktop bounds (union of all monitors on that machine).
     pub bounds: Rect,
+    /// Every monitor of that machine, in the same coordinate space as
+    /// `bounds`. Never empty for a real client; a peer that cannot enumerate
+    /// monitors sends a single entry equal to `bounds`.
+    pub monitors: Vec<Rect>,
     /// Cursor position at the time the info was captured.
     pub cursor: Point,
+}
+
+impl ScreenInfo {
+    /// Build from a monitor list; `bounds` is derived as their union. An empty
+    /// list yields a placeholder 1920x1080 monitor so the result is always
+    /// usable.
+    pub fn from_monitors(name: impl Into<String>, mut monitors: Vec<Rect>, cursor: Point) -> Self {
+        if monitors.is_empty() {
+            monitors.push(Rect::new(0, 0, 1920, 1080));
+        }
+        let bounds = Rect::union_all(&monitors).expect("monitors is non-empty");
+        Self {
+            name: name.into(),
+            bounds,
+            monitors,
+            cursor,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,5 +212,24 @@ mod tests {
     fn edge_opposite() {
         assert_eq!(Edge::Left.opposite(), Edge::Right);
         assert_eq!(Edge::Bottom.opposite(), Edge::Top);
+    }
+
+    #[test]
+    fn union_covers_all_rects() {
+        let u = Rect::union_all(&[Rect::new(0, 0, 1920, 1080), Rect::new(1920, 200, 1280, 720)]);
+        assert_eq!(u, Some(Rect::new(0, 0, 3200, 1080)));
+        assert_eq!(Rect::union_all(&[]), None);
+    }
+
+    #[test]
+    fn from_monitors_derives_bounds_and_never_empty() {
+        let s = ScreenInfo::from_monitors(
+            "a",
+            vec![Rect::new(-1280, 0, 1280, 1024), Rect::new(0, 0, 1920, 1080)],
+            Point::new(0, 0),
+        );
+        assert_eq!(s.bounds, Rect::new(-1280, 0, 3200, 1080));
+        let empty = ScreenInfo::from_monitors("b", vec![], Point::new(0, 0));
+        assert_eq!(empty.monitors.len(), 1);
     }
 }
