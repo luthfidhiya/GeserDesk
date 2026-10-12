@@ -12,7 +12,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use geserdesk_client::{connect, ClientConfig, NullSink};
 use geserdesk_proto::Rect;
-use geserdesk_server::{serve, Config};
+use geserdesk_server::{serve, serve_with_capture, Config};
 use tracing::info;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -38,6 +38,13 @@ enum Command {
         /// Path to the TOML configuration file.
         #[arg(short, long)]
         config: PathBuf,
+        /// Once a client connects, drive its cursor in a square (tests injection).
+        /// Implies --no-capture.
+        #[arg(long)]
+        demo: bool,
+        /// Network only: do not capture this machine's keyboard and mouse.
+        #[arg(long)]
+        no_capture: bool,
     },
     /// Run as a client (a machine receiving synthesized input).
     Client {
@@ -59,15 +66,24 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(cli.verbose);
 
     match cli.command {
-        Command::Server { config } => {
-            let cfg = Config::load(&config)
+        Command::Server {
+            config,
+            demo,
+            no_capture,
+        } => {
+            let mut cfg = Config::load(&config)
                 .with_context(|| format!("loading config from {}", config.display()))?;
+            cfg.demo = demo;
             info!(
                 screens = cfg.layout.screens().len(),
                 listen = %cfg.listen,
                 "starting server"
             );
-            serve(cfg).await
+            if demo || no_capture {
+                serve(cfg).await
+            } else {
+                serve_with_capture(cfg).await
+            }
         }
         Command::Client {
             name,
@@ -77,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
             let cfg = ClientConfig {
                 server,
                 name,
-                // Real bounds come from the platform layer in M4.
+                // Replaced by the real display size when injecting.
                 bounds: Rect::new(0, 0, 1920, 1080),
             };
             info!(name = %cfg.name, server = %cfg.server, "starting client");
@@ -87,11 +103,14 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(feature = "inject")]
-async fn run_client(cfg: ClientConfig, dry_run: bool) -> anyhow::Result<()> {
+async fn run_client(mut cfg: ClientConfig, dry_run: bool) -> anyhow::Result<()> {
     if dry_run {
         connect(&cfg, NullSink).await?;
     } else {
         let sink = geserdesk_client::EnigoSink::new().context("initialising input injection")?;
+        let (w, h) = sink.display_size().context("reading the display size")?;
+        cfg.bounds = Rect::new(0, 0, w, h);
+        info!(width = w, height = h, "using the real display size");
         connect(&cfg, sink).await?;
     }
     Ok(())
