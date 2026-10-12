@@ -73,18 +73,21 @@ pub use enigo_sink::EnigoSink;
 #[cfg(feature = "inject")]
 mod enigo_sink {
     use super::*;
-    use enigo::{Axis, Button as EBtn, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+    use enigo::{
+        Axis, Button as EBtn, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
+    };
     use geserdesk_proto::Button;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     /// Real OS input injection.
     ///
-    /// Tracks which keys/buttons it has pressed so [`leave`](InputSink::leave)
-    /// and drop can release them -- the same "release by physical key" concern
-    /// that motivates carrying the HID code in [`KeyEvent`].
+    /// Remembers the exact [`Key`] it pressed for every physical key (by HID
+    /// code), so a release -- including the forced release on
+    /// [`leave`](InputSink::leave) -- always lifts the same key that went down,
+    /// even if the character it produced has since changed.
     pub struct EnigoSink {
         enigo: Enigo,
-        held_keys: HashSet<u16>,
+        held_keys: HashMap<u16, Key>,
         held_buttons: HashSet<u8>,
     }
 
@@ -94,23 +97,21 @@ mod enigo_sink {
                 .map_err(|e| anyhow::anyhow!("initialising enigo: {e}"))?;
             Ok(Self {
                 enigo,
-                held_keys: HashSet::new(),
+                held_keys: HashMap::new(),
                 held_buttons: HashSet::new(),
             })
         }
 
-        fn press_key(&mut self, ev: &KeyEvent, dir: Direction) {
-            // M3: character-based path only. The HID->keysym path that makes
-            // mismatched layouts work is M6.
-            let key = match ev.ch {
-                Some(c) => enigo::Key::Unicode(c),
-                None => {
-                    tracing::warn!(hid = ev.hid, "no character for key; HID mapping is M6");
-                    return;
-                }
-            };
+        /// Size of the main display, for the `Hello` handshake.
+        pub fn display_size(&self) -> anyhow::Result<(i32, i32)> {
+            self.enigo
+                .main_display()
+                .map_err(|e| anyhow::anyhow!("reading display size: {e}"))
+        }
+
+        fn inject(&mut self, key: Key, dir: Direction) {
             if let Err(e) = self.enigo.key(key, dir) {
-                tracing::warn!(error = %e, "key injection failed");
+                tracing::warn!(error = %e, ?key, "key injection failed");
             }
         }
     }
@@ -123,15 +124,11 @@ mod enigo_sink {
         }
 
         fn leave(&mut self) {
-            let keys: Vec<u16> = self.held_keys.drain().collect();
-            for hid in keys {
-                let ev = KeyEvent {
-                    hid,
-                    ch: None,
-                    mods: geserdesk_proto::ModMask::empty(),
-                    action: KeyAction::Up,
-                };
-                self.press_key(&ev, Direction::Release);
+            // Release in reverse order of insertion is not tracked; modifiers
+            // and normal keys are independent for the OS, so any order works.
+            let keys: Vec<Key> = self.held_keys.drain().map(|(_, k)| k).collect();
+            for key in keys {
+                self.inject(key, Direction::Release);
             }
             let buttons: Vec<u8> = self.held_buttons.drain().collect();
             for b in buttons {
@@ -143,15 +140,22 @@ mod enigo_sink {
 
         fn key(&mut self, ev: &KeyEvent) {
             match ev.action {
-                KeyAction::Down => {
-                    self.held_keys.insert(ev.hid);
-                    self.press_key(ev, Direction::Press);
+                KeyAction::Down | KeyAction::Repeat(_) => {
+                    let Some(key) = key_for(ev) else {
+                        tracing::warn!(hid = ev.hid, "no way to type this key; ignored");
+                        return;
+                    };
+                    // A repeat re-presses the key that is already down.
+                    let key = *self.held_keys.entry(ev.hid).or_insert(key);
+                    self.inject(key, Direction::Press);
                 }
                 KeyAction::Up => {
-                    self.held_keys.remove(&ev.hid);
-                    self.press_key(ev, Direction::Release);
+                    // Release what we pressed; a key we never saw go down
+                    // (e.g. the hotkey's own modifiers) is simply ignored.
+                    if let Some(key) = self.held_keys.remove(&ev.hid) {
+                        self.inject(key, Direction::Release);
+                    }
                 }
-                KeyAction::Repeat(_) => self.press_key(ev, Direction::Press),
             }
         }
 
@@ -178,10 +182,10 @@ mod enigo_sink {
                 MouseEvent::Wheel { dx, dy } => {
                     let mut r = Ok(());
                     if dx != 0 {
-                        r = self.enigo.scroll(dx / 120, Axis::Horizontal);
+                        r = self.enigo.scroll(notches(dx), Axis::Horizontal);
                     }
                     if dy != 0 && r.is_ok() {
-                        r = self.enigo.scroll(-dy / 120, Axis::Vertical);
+                        r = self.enigo.scroll(-notches(dy), Axis::Vertical);
                     }
                     r
                 }
@@ -196,6 +200,79 @@ mod enigo_sink {
         fn drop(&mut self) {
             self.leave();
         }
+    }
+
+    /// Wheel deltas are 120 per notch; round away from zero so a small delta
+    /// (a smooth-scrolling touchpad) still scrolls by one.
+    fn notches(delta: i32) -> i32 {
+        match delta {
+            0 => 0,
+            d if d.abs() < 120 => d.signum(),
+            d => d / 120,
+        }
+    }
+
+    /// Choose how to type a key: named keys by HID code, printable keys by the
+    /// character the server's layout produced.
+    pub(super) fn key_for(ev: &KeyEvent) -> Option<Key> {
+        named_key(ev.hid).or_else(|| ev.ch.map(Key::Unicode))
+    }
+
+    /// Non-printable keys, identified purely by HID usage so they work under any
+    /// keyboard layout.
+    pub(super) fn named_key(hid: u16) -> Option<Key> {
+        Some(match hid {
+            0x28 | 0x58 => Key::Return,
+            0x29 => Key::Escape,
+            0x2A => Key::Backspace,
+            0x2B => Key::Tab,
+            0x2C => Key::Space,
+            0x39 => Key::CapsLock,
+            0x3A..=0x45 => [
+                Key::F1,
+                Key::F2,
+                Key::F3,
+                Key::F4,
+                Key::F5,
+                Key::F6,
+                Key::F7,
+                Key::F8,
+                Key::F9,
+                Key::F10,
+                Key::F11,
+                Key::F12,
+            ][usize::from(hid - 0x3A)],
+            0x46 => Key::PrintScr,
+            0x48 => Key::Pause,
+            0x49 => Key::Insert,
+            0x4A => Key::Home,
+            0x4B => Key::PageUp,
+            0x4C => Key::Delete,
+            0x4D => Key::End,
+            0x4E => Key::PageDown,
+            0x4F => Key::RightArrow,
+            0x50 => Key::LeftArrow,
+            0x51 => Key::DownArrow,
+            0x52 => Key::UpArrow,
+            0x53 => Key::Numlock,
+            0x68..=0x6F => [
+                Key::F13,
+                Key::F14,
+                Key::F15,
+                Key::F16,
+                Key::F17,
+                Key::F18,
+                Key::F19,
+                Key::F20,
+            ][usize::from(hid - 0x68)],
+            0xE0 => Key::LControl,
+            0xE1 => Key::LShift,
+            0xE2 | 0xE6 => Key::Alt,
+            0xE3 | 0xE7 => Key::Meta,
+            0xE4 => Key::RControl,
+            0xE5 => Key::RShift,
+            _ => return None,
+        })
     }
 
     fn map_button(b: Button) -> EBtn {
@@ -228,6 +305,49 @@ mod enigo_sink {
             3 => Button::Back,
             4 => Button::Forward,
             n => Button::Extra(n.saturating_sub(10)),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use geserdesk_proto::ModMask;
+
+        fn ev(hid: u16, ch: Option<char>) -> KeyEvent {
+            KeyEvent {
+                hid,
+                ch,
+                mods: ModMask::empty(),
+                action: KeyAction::Down,
+            }
+        }
+
+        #[test]
+        fn named_keys_ignore_the_character() {
+            assert_eq!(key_for(&ev(0x28, None)), Some(Key::Return));
+            assert_eq!(key_for(&ev(0x52, None)), Some(Key::UpArrow));
+            assert_eq!(key_for(&ev(0x3A, None)), Some(Key::F1));
+            assert_eq!(key_for(&ev(0x45, None)), Some(Key::F12));
+            assert_eq!(key_for(&ev(0xE1, None)), Some(Key::LShift));
+        }
+
+        #[test]
+        fn printable_keys_use_the_server_character() {
+            assert_eq!(key_for(&ev(0x04, Some('a'))), Some(Key::Unicode('a')));
+            assert_eq!(key_for(&ev(0x04, Some('A'))), Some(Key::Unicode('A')));
+        }
+
+        #[test]
+        fn unknown_key_without_character_is_untypable() {
+            assert_eq!(key_for(&ev(0x04, None)), None);
+        }
+
+        #[test]
+        fn small_wheel_deltas_still_scroll() {
+            assert_eq!(notches(0), 0);
+            assert_eq!(notches(30), 1);
+            assert_eq!(notches(-30), -1);
+            assert_eq!(notches(240), 2);
         }
     }
 }
