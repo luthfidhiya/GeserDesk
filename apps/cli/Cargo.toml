@@ -20,11 +20,13 @@ inject = ["geserdesk-client/inject"]
 
 [dependencies]
 geserdesk-proto.workspace = true
+geserdesk-tls.workspace = true
 geserdesk-platform.workspace = true
 geserdesk-server.workspace = true
 geserdesk-client.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

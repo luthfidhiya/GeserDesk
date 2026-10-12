@@ -1,18 +1,54 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Connect to a GeserDesk server and run the client session.
 //!
-//! Plain TCP for now (TLS is M8). On a trusted LAN only.
+//! The connection is TLS 1.3 with mutual certificate authentication unless TLS
+//! is switched off. The client *pins* the server's certificate fingerprint; on
+//! first contact it asks (via [`ServerTrust`]) before sending anything.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use geserdesk_proto::{
     ClientMsg, MessageStream, Point, Rect, ScreenInfo, ServerMsg, Version, PROTOCOL_VERSION,
 };
+use geserdesk_tls::rustls::pki_types::ServerName;
+use geserdesk_tls::tokio_rustls::TlsConnector;
+use geserdesk_tls::{client_config, peer_fingerprint, Fingerprint, Identity};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
 use crate::inject::InputSink;
+
+/// Which server certificates this client trusts. Implemented by the
+/// application (a file of pinned servers plus a prompt).
+pub trait ServerTrust: Send + Sync {
+    /// The fingerprint pinned for `server` (`host:port`), if it has been
+    /// trusted before.
+    fn pinned(&self, server: &str) -> Option<Fingerprint>;
+
+    /// `server` presented `fingerprint` and nothing is pinned for it yet. Ask
+    /// whoever is at the keyboard and, if they agree, remember it. Returning
+    /// `false` abandons the connection before anything is sent. May block (it
+    /// runs off the async threads).
+    fn confirm_new(&self, server: &str, fingerprint: &Fingerprint) -> bool;
+}
+
+/// This client's TLS identity and how it decides to trust a server.
+#[derive(Clone)]
+pub struct ClientTls {
+    pub identity: Arc<Identity>,
+    pub trust: Arc<dyn ServerTrust>,
+}
+
+impl std::fmt::Debug for ClientTls {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print key material.
+        f.debug_struct("ClientTls")
+            .field("fingerprint", &self.identity.fingerprint())
+            .finish_non_exhaustive()
+    }
+}
 
 /// What the client needs to know to connect.
 #[derive(Debug, Clone)]
@@ -28,7 +64,17 @@ pub struct ClientConfig {
     /// different from the last one reported, the server is told. `None` turns
     /// the check off.
     pub detect: Option<fn() -> Option<Vec<Rect>>>,
+    /// TLS settings. `None` connects in plaintext (`--no-tls`), which anyone on
+    /// the network can read and impersonate.
+    pub tls: Option<ClientTls>,
+    /// How long the TLS and `Hello` handshakes may take before the attempt is
+    /// abandoned (and retried). A peer that never answers must not hold the
+    /// client forever.
+    pub handshake_timeout: Duration,
 }
+
+/// The default for [`ClientConfig::handshake_timeout`].
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl ClientConfig {
     fn screen_info(&self) -> ScreenInfo {
@@ -94,6 +140,22 @@ pub enum ConnectError {
     Rejected(String),
     #[error("server sent {0:?} instead of a handshake reply")]
     Unexpected(&'static str),
+    #[error("TLS: {0}")]
+    Tls(String),
+    #[error("the server did not complete the handshake in time")]
+    HandshakeTimeout,
+    #[error(
+        "the server's certificate changed: expected {expected} but {server} presented {seen}. \
+         This could be an impostor. If the server was deliberately reinstalled, remove its \
+         entry from the known-servers file and try again."
+    )]
+    ServerChanged {
+        server: String,
+        expected: Fingerprint,
+        seen: Fingerprint,
+    },
+    #[error("the server's certificate ({0}) was not trusted")]
+    ServerNotTrusted(Fingerprint),
 }
 
 /// Perform the client half of the handshake over an established stream: send
@@ -151,10 +213,16 @@ impl Default for ReconnectPolicy {
 }
 
 impl ConnectError {
-    /// Whether trying again could ever help. Only a protocol mismatch cannot:
-    /// the two programs need to be updated, not retried.
+    /// Whether trying again could ever help. A protocol mismatch needs the
+    /// programs updated; a changed or refused server certificate needs a
+    /// person to look. None of them is fixed by retrying.
     fn is_fatal(&self) -> bool {
-        matches!(self, ConnectError::Incompatible(_))
+        matches!(
+            self,
+            ConnectError::Incompatible(_)
+                | ConnectError::ServerChanged { .. }
+                | ConnectError::ServerNotTrusted(_)
+        )
     }
 }
 
@@ -204,7 +272,7 @@ pub async fn connect_with_retry(
 
 /// Connect, handshake, and run the session loop until the server closes or the
 /// connection drops.
-pub async fn connect(config: &ClientConfig, mut sink: impl InputSink) -> Result<(), ConnectError> {
+pub async fn connect(config: &ClientConfig, sink: impl InputSink) -> Result<(), ConnectError> {
     let stream =
         TcpStream::connect(&config.server)
             .await
@@ -213,10 +281,70 @@ pub async fn connect(config: &ClientConfig, mut sink: impl InputSink) -> Result<
                 source,
             })?;
     let _ = stream.set_nodelay(true);
-    let mut ms = MessageStream::new(stream);
 
+    let Some(tls) = &config.tls else {
+        warn!("connecting WITHOUT encryption or server verification (--no-tls)");
+        return run(MessageStream::new(stream), config, sink).await;
+    };
+
+    // Pin the server we know; for one we do not, accept the certificate at the
+    // TLS layer and ask before a single application byte is sent.
+    let pinned = tls.trust.pinned(&config.server);
+    let (cfg, observed) =
+        client_config(&tls.identity, pinned).map_err(|e| ConnectError::Tls(e.to_string()))?;
+    let name = ServerName::try_from(geserdesk_tls::SERVER_NAME).expect("a valid DNS name");
+    let handshake = tokio::time::timeout(
+        config.handshake_timeout,
+        TlsConnector::from(cfg).connect(name, stream),
+    )
+    .await
+    .map_err(|_| ConnectError::HandshakeTimeout)?;
+    let secured = match handshake {
+        Ok(s) => s,
+        Err(e) => {
+            let seen = *observed.lock().unwrap();
+            return Err(match (pinned, seen) {
+                (Some(expected), Some(seen)) if expected != seen => ConnectError::ServerChanged {
+                    server: config.server.clone(),
+                    expected,
+                    seen,
+                },
+                _ => ConnectError::Tls(e.to_string()),
+            });
+        }
+    };
+    let seen = peer_fingerprint(secured.get_ref().1.peer_certificates())
+        .ok_or_else(|| ConnectError::Tls("the server sent no certificate".into()))?;
+
+    if pinned.is_none() {
+        let trust = Arc::clone(&tls.trust);
+        let server = config.server.clone();
+        let accepted = tokio::task::spawn_blocking(move || trust.confirm_new(&server, &seen))
+            .await
+            .unwrap_or(false);
+        if !accepted {
+            return Err(ConnectError::ServerNotTrusted(seen));
+        }
+        info!(fingerprint = %seen, "server trusted");
+    }
+    run(MessageStream::new(secured), config, sink).await
+}
+
+/// The handshake and session over an established (and, normally, secured)
+/// stream.
+async fn run<S>(
+    mut ms: MessageStream<S>,
+    config: &ClientConfig,
+    mut sink: impl InputSink,
+) -> Result<(), ConnectError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let screen = config.screen_info();
-    let connected = client_handshake(&mut ms, &screen).await?;
+    let connected =
+        tokio::time::timeout(config.handshake_timeout, client_handshake(&mut ms, &screen))
+            .await
+            .map_err(|_| ConnectError::HandshakeTimeout)??;
     info!(
         version = %connected.version,
         keepalive_s = connected.keepalive.as_secs(),
@@ -439,6 +567,8 @@ mod tests {
             name: "windows-pc".into(),
             monitors: vec![Rect::new(0, 0, 2560, 1440)],
             detect: None,
+            tls: None,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         };
 
         // Run the client briefly; it should handshake and answer a keep-alive.
@@ -523,6 +653,8 @@ mod tests {
             name: "pc".into(),
             monitors: vec![Rect::new(0, 0, 1920, 1080)],
             detect: None,
+            tls: None,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         }
     }
 
@@ -632,5 +764,223 @@ mod tests {
         )
         .await;
         assert_eq!(seen.load(Ordering::SeqCst), 2);
+    }
+
+    // ---- TLS ----------------------------------------------------------------
+
+    mod tls {
+        use super::*;
+        use geserdesk_server::net::{accept_loop_tls, bind, TlsContext};
+        use geserdesk_server::{Config, Hub};
+        use std::collections::{BTreeMap, HashMap};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+
+        struct TestTrust {
+            pinned: Mutex<HashMap<String, Fingerprint>>,
+            accept: bool,
+            asked: AtomicUsize,
+        }
+
+        impl TestTrust {
+            fn new(accept: bool) -> Arc<Self> {
+                Arc::new(Self {
+                    pinned: Mutex::new(HashMap::new()),
+                    accept,
+                    asked: AtomicUsize::new(0),
+                })
+            }
+        }
+
+        impl ServerTrust for TestTrust {
+            fn pinned(&self, server: &str) -> Option<Fingerprint> {
+                self.pinned.lock().unwrap().get(server).copied()
+            }
+            fn confirm_new(&self, server: &str, fp: &Fingerprint) -> bool {
+                self.asked.fetch_add(1, Ordering::SeqCst);
+                if self.accept {
+                    self.pinned.lock().unwrap().insert(server.to_string(), *fp);
+                }
+                self.accept
+            }
+        }
+
+        struct Rig {
+            addr: std::net::SocketAddr,
+            hub: Arc<Hub>,
+            ctx: Arc<TlsContext>,
+            server_fp: Fingerprint,
+        }
+
+        async fn rig() -> Rig {
+            let config =
+                Config::parse("[server]\nlisten = \"127.0.0.1:0\"\n[[screens]]\nname = \"win\"\n")
+                    .unwrap();
+            let id = Identity::generate("server").unwrap();
+            let ctx = TlsContext::from_identity(&id, BTreeMap::new()).unwrap();
+            let hub = Hub::new();
+            let (_h, listener) = bind(&config).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (_, never) = tokio::sync::watch::channel(false);
+            tokio::spawn(accept_loop_tls(
+                config,
+                listener,
+                Arc::clone(&hub),
+                never,
+                Some(Arc::clone(&ctx)),
+            ));
+            Rig {
+                addr,
+                hub,
+                ctx,
+                server_fp: id.fingerprint(),
+            }
+        }
+
+        fn cfg(rig: &Rig, id: &Arc<Identity>, trust: Arc<TestTrust>) -> ClientConfig {
+            ClientConfig {
+                server: rig.addr.to_string(),
+                name: "win".into(),
+                monitors: vec![Rect::new(0, 0, 1920, 1080)],
+                detect: None,
+                tls: Some(ClientTls {
+                    identity: Arc::clone(id),
+                    trust,
+                }),
+                handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            }
+        }
+
+        #[tokio::test]
+        async fn first_contact_is_confirmed_then_the_client_waits_for_approval_and_gets_in() {
+            let rig = rig().await;
+            let id = Arc::new(Identity::generate("client").unwrap());
+            let trust = TestTrust::new(true);
+            let config = cfg(&rig, &id, Arc::clone(&trust));
+
+            // Unknown server: the user is asked once, and the server is pinned.
+            let first = connect(&config, RecordingSink::default()).await;
+            match first {
+                Err(ConnectError::Rejected(reason)) => {
+                    assert!(reason.contains("approval"), "{reason}")
+                }
+                other => panic!("expected a refusal awaiting approval, got {other:?}"),
+            }
+            assert_eq!(trust.asked.load(Ordering::SeqCst), 1);
+            assert_eq!(trust.pinned(&rig.addr.to_string()), Some(rig.server_fp));
+
+            // The person at the server approves the fingerprint they were shown.
+            assert!(rig.ctx.trust.approve("win", &id.fingerprint()));
+
+            // Now it connects; the user is not asked again.
+            let run = tokio::spawn({
+                let config = config.clone();
+                async move { connect(&config, RecordingSink::default()).await }
+            });
+            let mut registered = false;
+            for _ in 0..50 {
+                if rig.hub.contains("win") {
+                    registered = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            run.abort();
+            assert!(registered, "the approved client never registered");
+            assert_eq!(trust.asked.load(Ordering::SeqCst), 1);
+        }
+
+        #[tokio::test]
+        async fn declining_the_first_contact_sends_nothing() {
+            let rig = rig().await;
+            let id = Arc::new(Identity::generate("client").unwrap());
+            let trust = TestTrust::new(false);
+            let err = connect(
+                &cfg(&rig, &id, Arc::clone(&trust)),
+                RecordingSink::default(),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, ConnectError::ServerNotTrusted(fp) if fp == rig.server_fp));
+            assert_eq!(trust.asked.load(Ordering::SeqCst), 1);
+            // The server never saw a Hello, so there is nothing pending.
+            assert!(rig.ctx.trust.pending().is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_server_whose_certificate_changed_is_refused_and_never_retried() {
+            let rig = rig().await;
+            let id = Arc::new(Identity::generate("client").unwrap());
+            let trust = TestTrust::new(true);
+            // We pinned a different certificate for this address earlier.
+            let old = Identity::generate("old-server").unwrap().fingerprint();
+            trust
+                .pinned
+                .lock()
+                .unwrap()
+                .insert(rig.addr.to_string(), old);
+            let config = cfg(&rig, &id, Arc::clone(&trust));
+
+            let err = connect(&config, RecordingSink::default())
+                .await
+                .unwrap_err();
+            match err {
+                ConnectError::ServerChanged { expected, seen, .. } => {
+                    assert_eq!(expected, old);
+                    assert_eq!(seen, rig.server_fp);
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+            assert_eq!(
+                trust.asked.load(Ordering::SeqCst),
+                0,
+                "must not ask: it is not a new server"
+            );
+
+            // The retry loop gives up at once instead of hammering an impostor.
+            let fatal = tokio::time::timeout(
+                Duration::from_secs(2),
+                connect_with_retry(&config, RecordingSink::default(), fast()),
+            )
+            .await
+            .expect("should stop retrying");
+            assert!(matches!(fatal, ConnectError::ServerChanged { .. }));
+        }
+
+        #[tokio::test]
+        async fn a_tls_client_cannot_talk_to_a_plaintext_server() {
+            let config =
+                Config::parse("[server]\nlisten = \"127.0.0.1:0\"\n[[screens]]\nname = \"win\"\n")
+                    .unwrap();
+            let (_h, listener) = bind(&config).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(geserdesk_server::net::accept_loop(config, listener));
+
+            let id = Arc::new(Identity::generate("client").unwrap());
+            let client_cfg = ClientConfig {
+                server: addr.to_string(),
+                name: "win".into(),
+                monitors: vec![Rect::new(0, 0, 1920, 1080)],
+                detect: None,
+                tls: Some(ClientTls {
+                    identity: id,
+                    trust: TestTrust::new(true),
+                }),
+                // The plaintext server waits for a frame the TLS hello never
+                // completes, so only the timeout ends this.
+                handshake_timeout: Duration::from_millis(300),
+            };
+            let err = tokio::time::timeout(
+                Duration::from_secs(5),
+                connect(&client_cfg, RecordingSink::default()),
+            )
+            .await
+            .expect("must fail promptly")
+            .unwrap_err();
+            assert!(
+                matches!(err, ConnectError::HandshakeTimeout | ConnectError::Tls(_)),
+                "{err:?}"
+            );
+        }
     }
 }

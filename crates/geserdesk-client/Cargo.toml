@@ -17,6 +17,7 @@ inject = ["dep:enigo"]
 
 [dependencies]
 geserdesk-proto.workspace = true
+geserdesk-tls.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

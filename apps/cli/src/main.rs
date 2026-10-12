@@ -7,14 +7,20 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use geserdesk_client::{connect, connect_with_retry, ClientConfig, NullSink, ReconnectPolicy};
+use geserdesk_client::{
+    connect, connect_with_retry, ClientConfig, ClientTls, NullSink, ReconnectPolicy,
+    DEFAULT_HANDSHAKE_TIMEOUT,
+};
 use geserdesk_proto::Rect;
 use geserdesk_server::{serve, serve_with_capture, Config};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::{prelude::*, EnvFilter};
+
+mod trust;
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +54,14 @@ enum Command {
         /// Do not start the layout-editor web page.
         #[arg(long)]
         no_ui: bool,
+        /// Send everything unencrypted and let any machine connect. For
+        /// debugging only.
+        #[arg(long)]
+        no_tls: bool,
+        /// Directory for this machine's TLS identity (default: the per-user
+        /// configuration directory).
+        #[arg(long)]
+        identity_dir: Option<PathBuf>,
     },
     /// Run as a client (a machine receiving synthesized input).
     Client {
@@ -63,6 +77,18 @@ enum Command {
         /// Exit when the connection drops instead of reconnecting.
         #[arg(long)]
         no_reconnect: bool,
+        /// Connect without encryption or server verification. For debugging
+        /// only; the server must be started with --no-tls too.
+        #[arg(long)]
+        no_tls: bool,
+        /// Directory for this machine's TLS identity and known servers
+        /// (default: the per-user configuration directory).
+        #[arg(long)]
+        identity_dir: Option<PathBuf>,
+        /// Trust the server with this certificate fingerprint without asking
+        /// (for unattended setups). Check it on the server first.
+        #[arg(long)]
+        server_fingerprint: Option<String>,
         /// Override monitor detection: comma-separated `WxH+X+Y`, e.g.
         /// `1920x1080+0+0,1280x1024+1920+0`.
         #[arg(long)]
@@ -81,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
             demo,
             no_capture,
             no_ui,
+            no_tls,
+            identity_dir,
         } => {
             let mut cfg = Config::load(&config)
                 .with_context(|| format!("loading config from {}", config.display()))?;
@@ -88,6 +116,10 @@ async fn main() -> anyhow::Result<()> {
             if no_ui {
                 cfg.ui = None;
             }
+            if no_tls {
+                cfg.tls = false;
+            }
+            cfg.identity_dir = identity_dir;
             info!(
                 screens = cfg.layout.screens().len(),
                 listen = %cfg.listen,
@@ -104,6 +136,9 @@ async fn main() -> anyhow::Result<()> {
             server,
             dry_run,
             no_reconnect,
+            no_tls,
+            identity_dir,
+            server_fingerprint,
             monitors: forced,
         } => {
             let forced = forced
@@ -126,10 +161,41 @@ async fn main() -> anyhow::Result<()> {
             for (i, m) in monitors.iter().enumerate() {
                 info!(index = i, x = m.x, y = m.y, w = m.w, h = m.h, "monitor");
             }
+            let tls = if no_tls {
+                warn!("TLS is OFF: this connection is neither encrypted nor verified");
+                None
+            } else {
+                let dir = identity_dir
+                    .or_else(geserdesk_tls::default_dir)
+                    .context("no home directory; pass --identity-dir")?;
+                let identity = geserdesk_tls::Identity::load_or_create(
+                    &dir.join("client-identity.pem"),
+                    &name,
+                )
+                .context("loading this client's TLS identity")?;
+                info!(
+                    fingerprint = %identity.fingerprint(),
+                    "this client's certificate (the server shows this when asking to approve it)"
+                );
+                let forced = server_fingerprint
+                    .as_deref()
+                    .map(str::parse)
+                    .transpose()
+                    .context("--server-fingerprint")?;
+                Some(ClientTls {
+                    identity: Arc::new(identity),
+                    trust: Arc::new(trust::FileTrust::new(
+                        dir.join("known_servers.toml"),
+                        forced,
+                    )),
+                })
+            };
             let cfg = ClientConfig {
                 server,
                 name,
                 monitors,
+                tls,
+                handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 // A forced list is not re-detected.
                 detect: if forced.is_some() {
                     None

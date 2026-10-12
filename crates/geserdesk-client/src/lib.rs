@@ -11,7 +11,8 @@ pub mod net;
 
 pub use inject::{InputSink, NullSink};
 pub use net::{
-    connect, connect_with_retry, ClientConfig, ConnectError, Connected, ReconnectPolicy,
+    connect, connect_with_retry, ClientConfig, ClientTls, ConnectError, Connected, ReconnectPolicy,
+    ServerTrust, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 
 #[cfg(feature = "inject")]
