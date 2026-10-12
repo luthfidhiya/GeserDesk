@@ -9,6 +9,7 @@ members = [
     "crates/geserdesk-tls",
     "crates/geserdesk-server",
     "crates/geserdesk-client",
+    "crates/geserdesk-app",
     "apps/cli",
 ]
 
@@ -26,6 +27,7 @@ geserdesk-platform = { path = "crates/geserdesk-platform" }
 geserdesk-tls = { path = "crates/geserdesk-tls" }
 geserdesk-server = { path = "crates/geserdesk-server" }
 geserdesk-client = { path = "crates/geserdesk-client" }
+geserdesk-app = { path = "crates/geserdesk-app" }
 
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
@@ -44,6 +46,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 directories = "5"
 
 [profile.release]
