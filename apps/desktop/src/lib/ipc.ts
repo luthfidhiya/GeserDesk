@@ -1,0 +1,59 @@
+// The only file that talks to the Rust shell. Everything else uses these.
+
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import type {
+  DeskSnapshot,
+  Draft,
+  LogLine,
+  Mode,
+  Settings,
+  Status,
+  TrustPrompt,
+} from '@/types'
+
+export const ipc = {
+  loadSettings: () => invoke<Settings>('load_settings'),
+  saveSettings: (settings: Settings) => invoke<void>('save_settings', { settings }),
+  sessionStatus: () => invoke<Status>('session_status'),
+  /** Saves `settings`, then starts the client or server they select. */
+  start: (settings: Settings) => invoke<void>('start_session', { settings }),
+  stop: () => invoke<void>('stop_session'),
+  ownFingerprint: (mode: Mode) => invoke<string | null>('own_fingerprint', { mode }),
+  createDefaultConfig: (path: string) => invoke<void>('create_default_config', { path }),
+  configExists: (path: string) => invoke<boolean>('config_exists', { path }),
+
+  /** `null` while no server is running. */
+  deskState: () => invoke<DeskSnapshot | null>('desk_state'),
+  /** Resolves to whether the layout was written to the config file. */
+  saveLayout: (positions: Draft) => invoke<boolean>('save_layout', { positions }),
+  approveClient: (name: string, fingerprint: string) =>
+    invoke<void>('approve_client', { name, fingerprint }),
+  dismissClient: (name: string, fingerprint: string) =>
+    invoke<void>('dismiss_client', { name, fingerprint }),
+  revokeClient: (name: string) => invoke<void>('revoke_client', { name }),
+
+  currentPrompt: () => invoke<TrustPrompt | null>('current_server_prompt'),
+  answerPrompt: (trust: boolean) => invoke<void>('answer_server_prompt', { trust }),
+
+  logSnapshot: () => invoke<LogLine[]>('log_snapshot'),
+  clearLog: () => invoke<void>('clear_log'),
+}
+
+/** Subscribe to a shell event; returns the function that unsubscribes. */
+export function on<T>(event: string, handler: (payload: T) => void): () => void {
+  const un = listen<T>(event, (e) => handler(e.payload))
+  return () => void un.then((f) => f())
+}
+
+export const EVENTS = {
+  status: 'session://status',
+  log: 'log://line',
+  prompt: 'trust://prompt',
+  navigate: 'ui://navigate',
+} as const
+
+/** Error text from a rejected command (the shell rejects with a string). */
+export function errorText(e: unknown): string {
+  return typeof e === 'string' ? e : e instanceof Error ? e.message : String(e)
+}
