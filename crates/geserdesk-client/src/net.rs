@@ -556,10 +556,9 @@ mod tests {
 
     #[tokio::test]
     async fn keeps_retrying_while_the_server_is_down() {
-        // Nothing listens here, so every attempt is refused.
-        let free = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = free.local_addr().unwrap();
-        drop(free);
+        // Port 0 is never connectable, and every OS rejects it at once. (A
+        // closed port is not an option: Windows takes ~2 s to refuse one.)
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
 
         let cfg = cfg_for(addr);
         let mut sink = RecordingSink::default();
