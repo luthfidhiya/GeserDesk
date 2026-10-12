@@ -6,26 +6,28 @@
 //! session task and makes "send this message to screen X" a cheap, non-async
 //! call.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use geserdesk_proto::{Rect, ServerMsg};
+use geserdesk_proto::{Point, Rect, ServerMsg};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// Connection changes the router needs to know about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HubEvent {
-    /// A client connected (or reported new screen bounds).
+    /// A client connected (or reported a new monitor arrangement).
     Connected {
         name: String,
-        bounds: Rect,
+        monitors: Vec<Rect>,
     },
     Disconnected(String),
+    /// The layout editor moved machines on the virtual desk.
+    Positions(BTreeMap<String, Point>),
 }
 
 struct Entry {
     tx: UnboundedSender<ServerMsg>,
-    bounds: Rect,
+    monitors: Vec<Rect>,
 }
 
 pub struct Hub {
@@ -55,18 +57,24 @@ impl Hub {
 
     /// Register a client under `name`. Returns `None` if the name is taken.
     /// Dropping the returned [`Registration`] unregisters it.
-    pub fn register(self: &Arc<Self>, name: &str, bounds: Rect) -> Option<Registration> {
+    pub fn register(self: &Arc<Self>, name: &str, monitors: Vec<Rect>) -> Option<Registration> {
         let (tx, rx) = unbounded_channel();
         {
             let mut clients = self.clients.lock().unwrap();
             if clients.contains_key(name) {
                 return None;
             }
-            clients.insert(name.to_string(), Entry { tx, bounds });
+            clients.insert(
+                name.to_string(),
+                Entry {
+                    tx,
+                    monitors: monitors.clone(),
+                },
+            );
         }
         let _ = self.events.send(HubEvent::Connected {
             name: name.to_string(),
-            bounds,
+            monitors,
         });
         Some(Registration {
             hub: Arc::clone(self),
@@ -83,11 +91,11 @@ impl Hub {
         }
     }
 
-    /// Update a client's screen bounds (it resized).
-    pub fn set_bounds(&self, name: &str, bounds: Rect) {
+    /// Update a client's monitor list (it was re-plugged or re-arranged).
+    pub fn set_monitors(&self, name: &str, monitors: Vec<Rect>) {
         let changed = match self.clients.lock().unwrap().get_mut(name) {
-            Some(entry) if entry.bounds != bounds => {
-                entry.bounds = bounds;
+            Some(entry) if entry.monitors != monitors => {
+                entry.monitors = monitors.clone();
                 true
             }
             _ => false,
@@ -95,9 +103,24 @@ impl Hub {
         if changed {
             let _ = self.events.send(HubEvent::Connected {
                 name: name.to_string(),
-                bounds,
+                monitors,
             });
         }
+    }
+
+    /// The monitors of every connected client.
+    pub fn snapshot(&self) -> HashMap<String, Vec<Rect>> {
+        self.clients
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, e)| (n.clone(), e.monitors.clone()))
+            .collect()
+    }
+
+    /// Tell the router that machines moved on the virtual desk.
+    pub fn apply_positions(&self, positions: BTreeMap<String, Point>) {
+        let _ = self.events.send(HubEvent::Positions(positions));
     }
 
     fn unregister(&self, name: &str) {
@@ -133,13 +156,15 @@ impl Drop for Registration {
 mod tests {
     use super::*;
 
-    const R: Rect = Rect::new(0, 0, 100, 100);
+    fn mons() -> Vec<Rect> {
+        vec![Rect::new(0, 0, 100, 100)]
+    }
 
     #[tokio::test]
     async fn register_send_and_unregister() {
         let hub = Hub::new();
         let mut events = hub.take_events().unwrap();
-        let mut reg = hub.register("a", R).unwrap();
+        let mut reg = hub.register("a", mons()).unwrap();
 
         assert!(hub.contains("a"));
         assert!(hub.send("a", ServerMsg::Leave));
@@ -161,21 +186,24 @@ mod tests {
     #[tokio::test]
     async fn duplicate_name_is_refused() {
         let hub = Hub::new();
-        let _first = hub.register("a", R).unwrap();
-        assert!(hub.register("a", R).is_none());
+        let _first = hub.register("a", mons()).unwrap();
+        assert!(hub.register("a", mons()).is_none());
     }
 
     #[tokio::test]
-    async fn set_bounds_notifies_only_on_change() {
+    async fn set_monitors_notifies_only_on_change() {
         let hub = Hub::new();
         let mut events = hub.take_events().unwrap();
-        let _reg = hub.register("a", R).unwrap();
+        let _reg = hub.register("a", mons()).unwrap();
         events.recv().await.unwrap();
 
-        hub.set_bounds("a", R);
-        hub.set_bounds("a", Rect::new(0, 0, 200, 100));
+        hub.set_monitors("a", mons());
+        hub.set_monitors(
+            "a",
+            vec![Rect::new(0, 0, 200, 100), Rect::new(200, 0, 100, 100)],
+        );
         match events.recv().await {
-            Some(HubEvent::Connected { bounds, .. }) => assert_eq!(bounds.w, 200),
+            Some(HubEvent::Connected { monitors, .. }) => assert_eq!(monitors.len(), 2),
             other => panic!("unexpected {other:?}"),
         }
     }

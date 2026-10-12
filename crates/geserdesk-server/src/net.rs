@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use geserdesk_proto::{
-    ClientMsg, CloseReason, MessageStream, ModMask, MouseEvent, Options, ScreenInfo, ServerMsg,
-    Version, PROTOCOL_VERSION,
+    ClientMsg, CloseReason, MessageStream, ModMask, MouseEvent, Options, Rect, ScreenInfo,
+    ServerMsg, Version, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::hub::{Hub, Registration};
 use crate::layout::Layout;
 use crate::router::{self, Core};
+use crate::ui;
 
 /// How often the server probes each client, and the grace period for a reply.
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(3);
@@ -134,7 +135,11 @@ impl ServerHandle {
 /// no local input is captured, so nothing is ever sent to clients unless
 /// `config.demo` is set. See [`serve_with_capture`].
 pub async fn serve(config: Config) -> anyhow::Result<()> {
-    serve_with_hub(config, Hub::new()).await
+    let local =
+        geserdesk_platform::monitors().unwrap_or_else(|_| vec![Rect::new(0, 0, 1920, 1080)]);
+    let hub = Hub::new();
+    drop(hub.take_events()); // nothing routes input here, so nobody listens
+    serve_with_hub(config, hub, local).await
 }
 
 /// Like [`serve`], but also captures the local keyboard and mouse and routes
@@ -144,11 +149,14 @@ pub async fn serve_with_capture(config: Config) -> anyhow::Result<()> {
     let capture = geserdesk_platform::start(cap_tx)?;
     let hub = Hub::new();
     let hub_events = hub.take_events().expect("a fresh hub has its event stream");
+    let local = geserdesk_platform::monitors().unwrap_or_else(|_| vec![capture.bounds()]);
+    info!(monitors = local.len(), "local monitors detected");
     let core = Core::new(
         config.layout.clone(),
         config.policy,
         config.local_screen.clone(),
-        capture.bounds(),
+        local.clone(),
+        config.positions.clone(),
     );
     tokio::spawn(router::run(
         core,
@@ -157,10 +165,29 @@ pub async fn serve_with_capture(config: Config) -> anyhow::Result<()> {
         cap_rx,
         hub_events,
     ));
-    serve_with_hub(config, hub).await
+    serve_with_hub(config, hub, local).await
 }
 
-async fn serve_with_hub(config: Config, hub: Arc<Hub>) -> anyhow::Result<()> {
+async fn serve_with_hub(
+    config: Config,
+    hub: Arc<Hub>,
+    local_monitors: Vec<Rect>,
+) -> anyhow::Result<()> {
+    if let Some(addr) = config.ui {
+        let state = ui::UiState::new(
+            Arc::clone(&hub),
+            config.path.clone(),
+            config.local_screen.clone(),
+            local_monitors,
+            config.layout.clone(),
+            config.positions.clone(),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = ui::serve(addr, state).await {
+                warn!(%addr, error = %e, "layout editor could not start");
+            }
+        });
+    }
     let (handle, listener) = bind(&config).await?;
     let shutdown = handle.subscribe();
     tokio::spawn(async move {
@@ -266,7 +293,7 @@ async fn handle_client(
     };
 
     // Claim the name for the lifetime of this session.
-    let Some(mut registration) = hub.register(&screen.name, screen.bounds) else {
+    let Some(mut registration) = hub.register(&screen.name, sanitize_monitors(&screen)) else {
         return Ok(());
     };
 
@@ -280,6 +307,39 @@ async fn handle_client(
         .await
         .ok();
     result
+}
+
+/// The most monitors one machine may report.
+const MAX_MONITORS: usize = 32;
+
+/// The monitors a client reported, made safe to use: absurd or empty
+/// rectangles are dropped, the count is capped, and a client that sent none
+/// (or only nonsense) is treated as one monitor covering its `bounds`.
+fn sanitize_monitors(screen: &ScreenInfo) -> Vec<Rect> {
+    const LIMIT: i32 = 1_000_000;
+    let sane = |r: &Rect| {
+        r.w > 0
+            && r.h > 0
+            && r.w <= LIMIT
+            && r.h <= LIMIT
+            && r.x.abs() <= LIMIT
+            && r.y.abs() <= LIMIT
+    };
+    let mut list: Vec<Rect> = screen
+        .monitors
+        .iter()
+        .copied()
+        .filter(sane)
+        .take(MAX_MONITORS)
+        .collect();
+    if list.is_empty() {
+        list.push(if sane(&screen.bounds) {
+            screen.bounds
+        } else {
+            Rect::new(0, 0, 1920, 1080)
+        });
+    }
+    list
 }
 
 /// Interval between demo events.
@@ -351,7 +411,9 @@ where
                         missed = 0;
                     }
                     Ok(ClientMsg::ScreenChanged(info)) => {
-                        registration.hub().set_bounds(registration.name(), info.bounds);
+                        registration
+                            .hub()
+                            .set_monitors(registration.name(), sanitize_monitors(&info));
                         missed = 0;
                     }
                     Ok(other) => {
@@ -379,6 +441,7 @@ mod tests {
         ScreenInfo {
             name: name.into(),
             bounds: Rect::new(0, 0, 1920, 1080),
+            monitors: vec![Rect::new(0, 0, 1920, 1080)],
             cursor: Point::new(0, 0),
         }
     }

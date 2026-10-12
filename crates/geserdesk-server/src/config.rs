@@ -8,6 +8,7 @@
 //! [server]
 //! listen = "0.0.0.0:24810"
 //! screen = "linux-pc"   # this machine's own screen (default: the first one)
+//! ui = "127.0.0.1:24811"  # layout editor page; "" turns it off
 //!
 //! [[screens]]
 //! name = "linux-pc"
@@ -24,8 +25,11 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use geserdesk_proto::Point;
 
 use crate::layout::{Layout, LinkError, SwitchPolicy};
 
@@ -33,8 +37,17 @@ use crate::layout::{Layout, LinkError, SwitchPolicy};
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
+    /// Where the layout-editor web page listens; `None` disables it.
+    pub ui: Option<SocketAddr>,
     /// The screen this server's own keyboard and mouse belong to.
     pub local_screen: String,
+    /// Where each machine sits on the shared virtual desk (top-left corner of
+    /// its monitors' coordinate space). Screens without an entry are placed
+    /// automatically, following `[links]` where present.
+    pub positions: BTreeMap<String, Point>,
+    /// The file this config was loaded from, so the layout editor can save
+    /// back to it.
+    pub path: Option<PathBuf>,
     pub layout: Layout,
     pub policy: SwitchPolicy,
     pub options: geserdesk_proto::Options,
@@ -76,7 +89,9 @@ impl Config {
             path: path.display().to_string(),
             source,
         })?;
-        Self::parse(&text)
+        let mut cfg = Self::parse(&text)?;
+        cfg.path = Some(path.to_path_buf());
+        Ok(cfg)
     }
 
     /// Parse and validate a config from TOML text.
@@ -112,6 +127,27 @@ impl Config {
             None => names[0].clone(),
         };
 
+        let positions: BTreeMap<String, Point> = raw
+            .screens
+            .iter()
+            .filter(|s| s.x.is_some() || s.y.is_some())
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    Point::new(s.x.unwrap_or(0), s.y.unwrap_or(0)),
+                )
+            })
+            .collect();
+
+        let ui = match raw.server.as_ref().and_then(|s| s.ui.as_deref()) {
+            None => Some(default_ui()),
+            Some("") => None,
+            Some(addr) => Some(addr.parse().map_err(|source| ConfigError::ListenAddr {
+                addr: addr.to_string(),
+                source,
+            })?),
+        };
+
         let mut layout = Layout::new(names);
         for (from, links) in &raw.links {
             for (edge, to) in links.edges() {
@@ -137,13 +173,21 @@ impl Config {
 
         Ok(Config {
             listen,
+            ui,
             local_screen,
+            positions,
+            path: None,
             layout,
             policy,
             options,
             demo: false,
         })
     }
+}
+
+/// The layout editor is local-only by default: it can rewrite the config file.
+fn default_ui() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 24811))
 }
 
 fn default_listen() -> SocketAddr {
@@ -167,11 +211,16 @@ struct ServerSection {
     listen: Option<String>,
     /// Name of the server's own screen; defaults to the first `[[screens]]`.
     screen: Option<String>,
+    /// Address of the layout-editor web page; `""` disables it.
+    ui: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ScreenEntry {
     name: String,
+    /// Position on the virtual desk (see [`Config::positions`]).
+    x: Option<i32>,
+    y: Option<i32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -335,5 +384,32 @@ mod tests {
             Config::parse(&bad),
             Err(ConfigError::UnknownLocalScreen(_))
         ));
+    }
+
+    #[test]
+    fn positions_and_ui_are_parsed() {
+        let cfg = Config::parse(
+            r#"
+            [server]
+            ui = "127.0.0.1:9999"
+            [[screens]]
+            name = "a"
+            [[screens]]
+            name = "b"
+            x = 1920
+            y = -200
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ui, Some("127.0.0.1:9999".parse().unwrap()));
+        assert_eq!(cfg.positions.len(), 1);
+        assert_eq!(cfg.positions["b"], Point::new(1920, -200));
+
+        let default = Config::parse("[[screens]]\nname = \"a\"\n").unwrap();
+        assert_eq!(default.ui, Some("127.0.0.1:24811".parse().unwrap()));
+        assert!(default.positions.is_empty());
+
+        let off = Config::parse("[server]\nui = \"\"\n[[screens]]\nname = \"a\"\n").unwrap();
+        assert_eq!(off.ui, None);
     }
 }
