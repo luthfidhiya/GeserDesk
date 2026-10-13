@@ -11,7 +11,7 @@ authors.workspace = true
 
 [dependencies]
 geserdesk-proto.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 thiserror.workspace = true
 tracing.workspace = true
 # Wayland needs its own backend (M13).

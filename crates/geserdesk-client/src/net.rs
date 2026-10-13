@@ -5,11 +5,13 @@
 //! is switched off. The client *pins* the server's certificate fingerprint; on
 //! first contact it asks (via [`ServerTrust`]) before sending anything.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use geserdesk_clipboard::files::FileOwner;
 use geserdesk_clipboard::{effective_max, outbound, Inbound, SharedClipboard, POLL_INTERVAL};
-use geserdesk_proto::clipboard::ClipboardId;
+use geserdesk_proto::clipboard::{ClipboardId, FileManifest, FileReadError, FileReadResult};
 use geserdesk_proto::{
     ClientMsg, MessageStream, Options, Point, Rect, ScreenInfo, ServerMsg, Version,
     PROTOCOL_VERSION,
@@ -21,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
+use crate::files::{self, FileChannel, FileChannelRx};
 use crate::inject::InputSink;
 
 /// Which server certificates this client trusts. Implemented by the
@@ -442,7 +445,8 @@ where
         detect: config.detect,
         reported: screen.monitors.clone(),
     };
-    let mut clip = ClientClipboard::new(config.clipboard.clone(), connected.options);
+    let (channel, mut file_rx) = FileChannel::new();
+    let mut clip = ClientClipboard::new(config.clipboard.clone(), connected.options, channel);
     clip.prime().await;
     session_loop(
         &mut ms,
@@ -450,52 +454,122 @@ where
         connected.keepalive,
         &mut watch,
         &mut clip,
+        &mut file_rx,
     )
     .await
 }
 
 /// The clipboard side of one connection: what to push, and how to take a push.
+///
+/// Files are handled apart from text/HTML/pictures: a copy of files only ever
+/// announces names and sizes through the same grab/data messages, and that
+/// announcement is echoed back to whoever pushed it (unlike everything else),
+/// which is the only way *this* client learns the `seq` the server assigned to
+/// its own files once they are pushed (see [`data`](Self::data)). The bytes
+/// are pulled later, by [`crate::files`], when the cursor actually arrives.
 struct ClientClipboard {
     sync: SharedClipboard,
     options: Options,
     inbound: Inbound,
     /// Numbers this client's pushes, so a peer can tell their chunks apart.
     seq: u64,
+    files_owner: Arc<FileOwner>,
+    file_channel: FileChannel,
+    /// What this machine copied and pushed, until the echo confirms its `seq`.
+    pending_own_files: Option<(FileManifest, Vec<PathBuf>)>,
+    /// The most recent *remote* files announcement (the server's own desktop,
+    /// or another client, relayed) worth pulling when the cursor arrives here.
+    remote_files: Option<(u64, FileManifest)>,
+    last_pulled_seq: Option<u64>,
 }
 
 impl ClientClipboard {
-    fn new(sync: SharedClipboard, options: Options) -> Self {
+    fn new(sync: SharedClipboard, options: Options, file_channel: FileChannel) -> Self {
         Self {
             sync,
             options,
             inbound: Inbound::new(),
             seq: 0,
+            files_owner: Arc::new(FileOwner::new()),
+            file_channel,
+            pending_own_files: None,
+            remote_files: None,
+            last_pulled_seq: None,
         }
     }
 
     /// A connection that shares nothing.
     #[cfg(test)]
-    fn off() -> Self {
-        Self::new(None, Options::default())
+    fn off(file_channel: FileChannel) -> Self {
+        Self::new(None, Options::default(), file_channel)
     }
 
     fn active(&self) -> bool {
         self.sync.is_some() && self.options.clipboard_sharing
     }
 
+    fn files_active(&self) -> bool {
+        self.sync.is_some() && self.options.clipboard_files
+    }
+
     fn max_bytes(&self) -> u64 {
         effective_max(self.options.clipboard_max_bytes)
     }
 
+    fn files_max_bytes(&self) -> u64 {
+        geserdesk_clipboard::effective_files_max(self.options.clipboard_files_max_bytes)
+    }
+
     /// What is on the clipboard now is not something to push.
     async fn prime(&self) {
-        if let (Some(sync), true) = (&self.sync, self.options.clipboard_sharing) {
-            sync.prime().await;
+        if let Some(sync) = &self.sync {
+            if self.options.clipboard_sharing {
+                sync.prime().await;
+            }
+            if self.options.clipboard_files {
+                sync.prime_files().await;
+            }
         }
     }
 
-    /// The messages that push a copy made on this machine since the last look.
+    /// The messages that push a copy made on this machine since the last look
+    /// (files or data, whichever changed).
     async fn changed(&mut self) -> Vec<ClientMsg> {
+        if self.files_active() && self.pending_own_files.is_none() {
+            // Not pushing again while a previous push's `seq` is still
+            // unconfirmed: that `seq` is learned only from the echo, and a
+            // second push in flight at once would make it ambiguous which
+            // echo belongs to which.
+            if let Some(roots) = self.sync.as_ref().unwrap().poll_files().await {
+                let max = self.files_max_bytes();
+                let collected = tokio::task::spawn_blocking(move || {
+                    geserdesk_clipboard::files::collect(&roots, max)
+                })
+                .await;
+                match collected {
+                    Ok(Ok((manifest, abs))) => {
+                        self.seq += 1;
+                        let (id, seq) = (ClipboardId::Clipboard, self.seq);
+                        tracing::debug!(
+                            entries = manifest.entries.len(),
+                            "copied files; sending the manifest"
+                        );
+                        let content =
+                            geserdesk_proto::clipboard::ClipboardContent::with_files(&manifest);
+                        self.pending_own_files = Some((manifest, abs));
+                        return std::iter::once(ClientMsg::ClipboardGrab { id, seq })
+                            .chain(
+                                outbound(&content)
+                                    .into_iter()
+                                    .map(move |chunk| ClientMsg::ClipboardData { id, seq, chunk }),
+                            )
+                            .collect();
+                    }
+                    Ok(Err(e)) => warn!(error = %e, "these files cannot be shared"),
+                    Err(e) => warn!(error = %e, "could not collect the copied files"),
+                }
+            }
+        }
         let Some(sync) = self
             .sync
             .as_ref()
@@ -522,21 +596,28 @@ impl ClientClipboard {
     }
 
     fn grab(&mut self, id: ClipboardId, seq: u64) {
-        if self.active() {
+        if self.active() || self.files_active() {
             self.inbound.grab(id, seq, self.max_bytes());
         }
     }
 
     async fn data(&mut self, id: ClipboardId, seq: u64, chunk: geserdesk_proto::clipboard::Chunk) {
-        let Some(sync) = self
-            .sync
-            .as_ref()
-            .filter(|_| self.options.clipboard_sharing)
-        else {
+        if !(self.options.clipboard_sharing || self.options.clipboard_files) {
             return;
-        };
+        }
         match self.inbound.data(id, seq, chunk) {
             Ok(Some(content)) => {
+                if let Some(manifest) = content.files() {
+                    self.on_files_announced(seq, manifest);
+                    return;
+                }
+                let Some(sync) = self
+                    .sync
+                    .as_ref()
+                    .filter(|_| self.options.clipboard_sharing)
+                else {
+                    return;
+                };
                 tracing::debug!(bytes = content.data_len(), "the server sent its clipboard");
                 if let Err(e) = sync.apply(content).await {
                     warn!(error = %e, "could not set the clipboard");
@@ -547,11 +628,73 @@ impl ClientClipboard {
         }
     }
 
+    /// `seq`'s manifest arrived, whole. Either it is this client's own push
+    /// echoed back (the only way it learns `seq`), or a genuine remote
+    /// announcement to maybe pull once the cursor actually arrives here.
+    fn on_files_announced(&mut self, seq: u64, manifest: FileManifest) {
+        if !self.options.clipboard_files {
+            return;
+        }
+        if let Some((mine, abs)) = self.pending_own_files.take() {
+            if mine == manifest {
+                self.files_owner.set(seq, mine, abs);
+            } else {
+                // Lost to a race with another machine's push; the server
+                // decides what `seq` means, this client does not retry.
+                warn!("the echoed manifest did not match what was just pushed");
+            }
+            // Whatever was pending to pull is moot: this machine is the owner
+            // now, and nothing here pulls from itself.
+            self.remote_files = None;
+            return;
+        }
+        self.remote_files = Some((seq, manifest));
+    }
+
+    /// The cursor just arrived on this screen: pull whatever remote files were
+    /// announced since the last pull, if any and if not pulled already.
+    fn pull_on_enter(&mut self) {
+        if !self.files_active() {
+            return;
+        }
+        let Some((seq, manifest)) = self.remote_files.clone() else {
+            return;
+        };
+        if self.last_pulled_seq == Some(seq) {
+            return;
+        }
+        self.last_pulled_seq = Some(seq);
+        // `files_active` already established `self.sync` is `Some`.
+        let sync = self.sync.clone().unwrap();
+        files::spawn_pull(
+            self.file_channel.clone(),
+            sync,
+            seq,
+            manifest,
+            files::staging_dir(seq),
+            self.options.clipboard_files_max_bytes,
+        );
+    }
+
+    /// The server is asking for a chunk of files *this* client announced.
+    async fn serve_file_read(&self, seq: u64, index: u32, offset: u64, len: u32) -> FileReadResult {
+        let owner = Arc::clone(&self.files_owner);
+        tokio::task::spawn_blocking(move || owner.read(seq, index, offset, len))
+            .await
+            .unwrap_or(FileReadResult::Err(FileReadError::NotFound))
+    }
+
     async fn set_options(&mut self, options: Options) {
         let was = self.options.clipboard_sharing;
+        let was_files = self.options.clipboard_files;
         self.options = options;
         if options.clipboard_sharing && !was {
             self.prime().await; // what is there now was not copied since
+        }
+        if options.clipboard_files && !was_files {
+            if let Some(sync) = &self.sync {
+                sync.prime_files().await;
+            }
         }
     }
 }
@@ -584,6 +727,7 @@ async fn session_loop<S>(
     keepalive: Duration,
     watch: &mut MonitorWatch,
     clip: &mut ClientClipboard,
+    file_rx: &mut FileChannelRx,
 ) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -610,11 +754,17 @@ where
                 }
                 continue;
             }
-            _ = clip_tick.tick(), if clip.active() => {
+            _ = clip_tick.tick(), if clip.active() || clip.files_active() => {
                 for msg in clip.changed().await {
                     if let Err(e) = ms.send(&msg).await {
                         return session_ended(e);
                     }
+                }
+                continue;
+            }
+            Some(req) = file_rx.0.recv() => {
+                if let Err(e) = ms.send(&req).await {
+                    return session_ended(e);
                 }
                 continue;
             }
@@ -640,7 +790,10 @@ where
                     return session_ended(e);
                 }
             }
-            ServerMsg::Enter { x, y, .. } => sink.enter(Point::new(x, y)),
+            ServerMsg::Enter { x, y, .. } => {
+                sink.enter(Point::new(x, y));
+                clip.pull_on_enter();
+            }
             ServerMsg::Leave => sink.leave(),
             ServerMsg::Key(ev) => sink.key(&ev),
             ServerMsg::Mouse(ev) => sink.mouse(ev),
@@ -651,6 +804,19 @@ where
             ServerMsg::ClipboardGrab { id, seq } => clip.grab(id, seq),
             ServerMsg::ClipboardData { id, seq, chunk } => clip.data(id, seq, chunk).await,
             ServerMsg::SetOptions(options) => clip.set_options(options).await,
+            ServerMsg::FileRead {
+                seq,
+                req,
+                index,
+                offset,
+                len,
+            } => {
+                let result = clip.serve_file_read(seq, index, offset, len).await;
+                if let Err(e) = ms.send(&ClientMsg::FileReply { req, result }).await {
+                    return session_ended(e);
+                }
+            }
+            ServerMsg::FileReply { req, result } => clip.file_channel.reply(req, result),
             other => tracing::debug!(?other, "ignoring server message (not implemented yet)"),
         }
     }
@@ -787,12 +953,14 @@ mod tests {
                 .unwrap();
         });
 
+        let (channel, mut file_rx) = FileChannel::new();
         session_loop(
             &mut client,
             &mut sink,
             Duration::from_secs(3),
             &mut off(),
-            &mut ClientClipboard::off(),
+            &mut ClientClipboard::off(channel),
+            &mut file_rx,
         )
         .await
         .unwrap();
@@ -801,6 +969,209 @@ mod tests {
         assert_eq!(sink.enters, vec![Point::new(5, 6)]);
         assert_eq!(sink.mice, vec![MouseEvent::MoveRel { dx: 3, dy: -2 }]);
         assert_eq!(sink.keys.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_remote_files_announcement_is_pulled_once_the_cursor_arrives() {
+        use geserdesk_clipboard::{ClipboardSync, MemoryClipboard};
+        use geserdesk_proto::clipboard::{ClipboardContent, FileEntry};
+
+        let (c, s) = tokio::io::duplex(64 * 1024);
+        let mut client = MessageStream::new(c);
+        let mut server = MessageStream::new(s);
+        let mem = MemoryClipboard::new();
+        let mut sink = RecordingSink::default();
+
+        let manifest = FileManifest {
+            entries: vec![FileEntry {
+                path: "a.txt".into(),
+                size: 3,
+                dir: false,
+            }],
+        };
+        let dest = files::staging_dir(99);
+        let _ = std::fs::remove_dir_all(&dest);
+
+        let server_task = tokio::spawn(async move {
+            // Announce files as seq 99, never pushed by this client.
+            let content = ClipboardContent::with_files(&manifest);
+            server
+                .send(&ServerMsg::ClipboardGrab {
+                    id: ClipboardId::Clipboard,
+                    seq: 99,
+                })
+                .await
+                .unwrap();
+            for chunk in outbound(&content) {
+                server
+                    .send(&ServerMsg::ClipboardData {
+                        id: ClipboardId::Clipboard,
+                        seq: 99,
+                        chunk,
+                    })
+                    .await
+                    .unwrap();
+            }
+            // The cursor arrives here: the client should start pulling.
+            server
+                .send(&ServerMsg::Enter {
+                    x: 0,
+                    y: 0,
+                    seq: 1,
+                    toggle_mods: ModMask::empty(),
+                })
+                .await
+                .unwrap();
+
+            let ClientMsg::FileRead {
+                seq, req, index, ..
+            } = server.recv().await.unwrap()
+            else {
+                panic!("expected a FileRead");
+            };
+            assert_eq!((seq, index), (99, 0));
+            server
+                .send(&ServerMsg::FileReply {
+                    req,
+                    result: FileReadResult::Data(b"abc".to_vec()),
+                })
+                .await
+                .unwrap();
+
+            server
+                .send(&ServerMsg::Close(CloseReason::ServerShutdown))
+                .await
+                .unwrap();
+        });
+
+        let (channel, mut file_rx) = FileChannel::new();
+        let mut clip = ClientClipboard::new(
+            Some(ClipboardSync::new(mem.clone())),
+            Options {
+                clipboard_files: true,
+                ..Options::default()
+            },
+            channel,
+        );
+        session_loop(
+            &mut client,
+            &mut sink,
+            Duration::from_secs(3),
+            &mut off(),
+            &mut clip,
+            &mut file_rx,
+        )
+        .await
+        .unwrap();
+        server_task.await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while mem.files().is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(mem.files(), Some(vec![dest.join("a.txt")]));
+        assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"abc");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn this_clients_own_files_are_served_when_the_server_asks() {
+        use geserdesk_clipboard::{ClipboardSync, MemoryClipboard};
+        use geserdesk_proto::clipboard::ClipboardContent;
+
+        let dir = std::env::temp_dir().join(format!("gd-client-own-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mine.txt"), "hello").unwrap();
+
+        let (c, s) = tokio::io::duplex(64 * 1024);
+        let mut client = MessageStream::new(c);
+        let mut server = MessageStream::new(s);
+        let mem = MemoryClipboard::new();
+        let mut sink = RecordingSink::default();
+
+        let server_task = tokio::spawn(async move {
+            // The client pushes its own files; the server assigns seq 5 and
+            // echoes it back (the only way the client learns it).
+            let mut asm = geserdesk_proto::clipboard::ChunkAssembler::new();
+            let content = loop {
+                match server.recv::<ClientMsg>().await.unwrap() {
+                    ClientMsg::ClipboardGrab { .. } => {}
+                    ClientMsg::ClipboardData { chunk, .. } => {
+                        if let Some(bytes) = asm.push(chunk).unwrap() {
+                            break ClipboardContent::decode(&bytes).unwrap();
+                        }
+                    }
+                    other => panic!("unexpected {other:?}"),
+                }
+            };
+            server
+                .send(&ServerMsg::ClipboardGrab {
+                    id: ClipboardId::Clipboard,
+                    seq: 5,
+                })
+                .await
+                .unwrap();
+            for chunk in outbound(&content) {
+                server
+                    .send(&ServerMsg::ClipboardData {
+                        id: ClipboardId::Clipboard,
+                        seq: 5,
+                        chunk,
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            // Now ask for its bytes, as if relaying another consumer.
+            server
+                .send(&ServerMsg::FileRead {
+                    seq: 5,
+                    req: 1,
+                    index: 0,
+                    offset: 0,
+                    len: 10,
+                })
+                .await
+                .unwrap();
+            let ClientMsg::FileReply { req, result } = server.recv().await.unwrap() else {
+                panic!("expected a FileReply");
+            };
+            assert_eq!(req, 1);
+            assert_eq!(result, FileReadResult::Data(b"hello".to_vec()));
+
+            server
+                .send(&ServerMsg::Close(CloseReason::ServerShutdown))
+                .await
+                .unwrap();
+        });
+
+        let (channel, mut file_rx) = FileChannel::new();
+        let mut clip = ClientClipboard::new(
+            Some(ClipboardSync::new(mem.clone())),
+            Options {
+                clipboard_files: true,
+                ..Options::default()
+            },
+            channel,
+        );
+        clip.prime().await;
+        mem.copy_files(vec![dir.join("mine.txt")]); // copied after connecting
+        session_loop(
+            &mut client,
+            &mut sink,
+            Duration::from_secs(3),
+            &mut off(),
+            &mut clip,
+            &mut file_rx,
+        )
+        .await
+        .unwrap();
+        server_task.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Not mistaken for a remote announcement to pull from.
+        assert_eq!(clip.remote_files, None);
     }
 
     #[tokio::test]
