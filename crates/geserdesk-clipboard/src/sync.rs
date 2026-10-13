@@ -20,6 +20,8 @@ struct Inner {
     seen: Option<u64>,
     /// The contents that were too large to share, so it is warned about once.
     refused: Option<u64>,
+    /// The OS change count at the last read; the same count means nothing to read.
+    count: Option<u64>,
 }
 
 /// Change detection and loop suppression over one [`Clipboard`]. Clones share
@@ -43,6 +45,7 @@ impl ClipboardSync {
             clipboard: Box::new(clipboard),
             seen: None,
             refused: None,
+            count: None,
         })))
     }
 
@@ -52,6 +55,7 @@ impl ClipboardSync {
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let mut inner = this.0.lock().unwrap();
+            inner.count = inner.clipboard.change_count();
             inner.seen = match inner.clipboard.get() {
                 Ok(Some(c)) => Some(fingerprint(&c)),
                 _ => None,
@@ -73,6 +77,11 @@ impl ClipboardSync {
 
     fn poll_blocking(&self, max_bytes: u64) -> Option<ClipboardContent> {
         let mut inner = self.0.lock().unwrap();
+        let count = inner.clipboard.change_count();
+        if count.is_some() && count == inner.count {
+            return None;
+        }
+        inner.count = count;
         let content = match inner.clipboard.get() {
             Ok(Some(c)) => c,
             Ok(None) => return None, // empty or not shareable: keep what we knew
@@ -118,6 +127,9 @@ impl ClipboardSync {
                 Ok(Some(now)) => fingerprint(&now),
                 _ => fingerprint(&content),
             });
+            // The write may not have reached the count yet (X11 reports it as an
+            // event); then the next poll reads once more and recognises it.
+            inner.count = inner.clipboard.change_count();
             Ok(())
         })
         .await
@@ -172,6 +184,61 @@ mod tests {
         assert_eq!(sync.poll(100).await, None);
         mem.copy("something else");
         assert!(sync.poll(100).await.is_some());
+    }
+
+    /// A clipboard with a change signal that counts its reads.
+    struct Signalled {
+        mem: MemoryClipboard,
+        count: Arc<std::sync::atomic::AtomicU64>,
+        reads: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl Clipboard for Signalled {
+        fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.mem.clone().get()
+        }
+        fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.mem.clone().set(content)
+        }
+        fn change_count(&mut self) -> Option<u64> {
+            Some(self.count.load(std::sync::atomic::Ordering::SeqCst))
+        }
+    }
+
+    #[tokio::test]
+    async fn with_a_change_signal_the_clipboard_is_only_read_after_a_change() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let mem = MemoryClipboard::new();
+        let count = Arc::new(AtomicU64::new(0));
+        let reads = Arc::new(AtomicU64::new(0));
+        let sync = ClipboardSync::new(Signalled {
+            mem: mem.clone(),
+            count: Arc::clone(&count),
+            reads: Arc::clone(&reads),
+        });
+        sync.prime().await;
+        let primed = reads.load(Ordering::SeqCst);
+
+        for _ in 0..5 {
+            assert_eq!(sync.poll(100).await, None);
+        }
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            primed,
+            "nothing changed, nothing read"
+        );
+
+        mem.copy("new");
+        count.fetch_add(1, Ordering::SeqCst); // what the OS would report
+        assert_eq!(sync.poll(100).await, Some(text("new")));
+        assert_eq!(sync.poll(100).await, None);
+        assert_eq!(reads.load(Ordering::SeqCst), primed + 1);
+
+        // Our own write bumps the count; it is read once, recognised, not offered.
+        sync.apply(text("from a peer")).await.unwrap();
+        assert_eq!(sync.poll(100).await, None);
     }
 
     #[tokio::test]

@@ -38,6 +38,10 @@ impl Clipboard for SystemClipboard {
         };
         result.map_err(|e| ClipboardError(e.to_string()))
     }
+
+    fn change_count(&mut self) -> Option<u64> {
+        crate::watch::change_count()
+    }
 }
 
 /// A clipboard held in memory. Clones share the contents, so a test can play
@@ -119,6 +123,30 @@ mod tests {
         let back = clip.get().unwrap().expect("something to read back");
         assert_eq!(back.text(), Some("hanya teks"));
         assert_eq!(back.html(), None, "the old style must not linger");
+
+        if let Some(saved) = saved {
+            clip.set(&saved).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "uses the desktop's clipboard"]
+    fn a_copy_changes_the_count_and_nothing_else_does() {
+        let mut clip = SystemClipboard::new().expect("a desktop with a clipboard");
+        let saved = clip.get().unwrap();
+        let before = clip
+            .change_count()
+            .expect("a change signal on this desktop");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(clip.change_count(), Some(before), "no copy, no change");
+
+        clip.set(&ClipboardContent::new(Some("hitung".into()), None))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while clip.change_count() == Some(before) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_ne!(clip.change_count(), Some(before), "a copy is seen");
 
         if let Some(saved) = saved {
             clip.set(&saved).unwrap();

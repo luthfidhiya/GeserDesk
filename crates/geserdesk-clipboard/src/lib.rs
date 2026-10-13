@@ -19,6 +19,7 @@
 mod inbound;
 mod sync;
 mod system;
+mod watch;
 
 pub use inbound::{Inbound, InboundError};
 pub use sync::{ClipboardSync, SharedClipboard};
@@ -65,6 +66,12 @@ pub trait Clipboard: Send + 'static {
     fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError>;
     /// Replace the clipboard with `content`.
     fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError>;
+    /// A number that changes whenever the clipboard does (see `watch`). While
+    /// it stays the same the clipboard is not read at all. `None`: no such
+    /// signal, read on every poll.
+    fn change_count(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 impl Clipboard for Box<dyn Clipboard> {
@@ -73,6 +80,9 @@ impl Clipboard for Box<dyn Clipboard> {
     }
     fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
         (**self).set(content)
+    }
+    fn change_count(&mut self) -> Option<u64> {
+        (**self).change_count()
     }
 }
 
