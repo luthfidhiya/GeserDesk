@@ -651,8 +651,8 @@ where
                     Ok(ClientMsg::ClipboardData { id, seq, chunk }) => {
                         if options.clipboard_sharing {
                             match pushed.data(id, seq, chunk) {
-                                Ok(Some(text)) => {
-                                    registration.hub().clipboard_in(registration.name(), text)
+                                Ok(Some(content)) => {
+                                    registration.hub().clipboard_in(registration.name(), content)
                                 }
                                 Ok(None) => {}
                                 Err(e) => warn!(client = registration.name(), "dropped a clipboard push: {e}"),

@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
+use geserdesk_proto::clipboard::ClipboardContent;
 use geserdesk_proto::{Point, Rect, ServerMsg};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -25,11 +26,11 @@ pub enum HubEvent {
     Positions(BTreeMap<String, Point>),
 }
 
-/// Clipboard text a client pushed, for the relay to apply and pass on.
+/// A clipboard a client pushed, for the relay to apply and pass on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SharedText {
+pub struct SharedClip {
     pub from: String,
-    pub text: String,
+    pub content: ClipboardContent,
 }
 
 struct Entry {
@@ -41,8 +42,8 @@ pub struct Hub {
     clients: Mutex<HashMap<String, Entry>>,
     events: UnboundedSender<HubEvent>,
     events_rx: Mutex<Option<UnboundedReceiver<HubEvent>>>,
-    clipboard: UnboundedSender<SharedText>,
-    clipboard_rx: Mutex<Option<UnboundedReceiver<SharedText>>>,
+    clipboard: UnboundedSender<SharedClip>,
+    clipboard_rx: Mutex<Option<UnboundedReceiver<SharedClip>>>,
 }
 
 impl Hub {
@@ -65,15 +66,15 @@ impl Hub {
 
     /// The clipboard texts clients push. Can be taken once; whoever takes it must
     /// drain it, or drop it when nothing will (sends then fail and cost nothing).
-    pub fn take_clipboard(&self) -> Option<UnboundedReceiver<SharedText>> {
+    pub fn take_clipboard(&self) -> Option<UnboundedReceiver<SharedClip>> {
         self.clipboard_rx.lock().unwrap().take()
     }
 
     /// A client finished pushing its clipboard.
-    pub fn clipboard_in(&self, from: &str, text: String) {
-        let _ = self.clipboard.send(SharedText {
+    pub fn clipboard_in(&self, from: &str, content: ClipboardContent) {
+        let _ = self.clipboard.send(SharedClip {
             from: from.to_string(),
-            text,
+            content,
         });
     }
 

@@ -503,14 +503,21 @@ impl ClientClipboard {
         else {
             return Vec::new();
         };
-        let Some(text) = sync.poll(self.max_bytes()).await else {
+        let Some(content) = sync.poll(self.max_bytes()).await else {
             return Vec::new();
         };
         self.seq += 1;
         let (id, seq) = (ClipboardId::Clipboard, self.seq);
-        tracing::debug!(bytes = text.len(), "the clipboard changed; sending it");
+        tracing::debug!(
+            bytes = content.data_len(),
+            "the clipboard changed; sending it"
+        );
         std::iter::once(ClientMsg::ClipboardGrab { id, seq })
-            .chain(outbound(&text).map(|chunk| ClientMsg::ClipboardData { id, seq, chunk }))
+            .chain(
+                outbound(&content)
+                    .into_iter()
+                    .map(|chunk| ClientMsg::ClipboardData { id, seq, chunk }),
+            )
             .collect()
     }
 
@@ -529,9 +536,9 @@ impl ClientClipboard {
             return;
         };
         match self.inbound.data(id, seq, chunk) {
-            Ok(Some(text)) => {
-                tracing::debug!(bytes = text.len(), "the server sent its clipboard");
-                if let Err(e) = sync.apply(text).await {
+            Ok(Some(content)) => {
+                tracing::debug!(bytes = content.data_len(), "the server sent its clipboard");
+                if let Err(e) = sync.apply(content).await {
                     warn!(error = %e, "could not set the clipboard");
                 }
             }

@@ -2,7 +2,7 @@
 //! The server's part in clipboard sharing (M9).
 //!
 //! The server's own clipboard and every client's are kept equal: whoever copies
-//! last wins. A text copied on the server goes to every client; a text a client
+//! last wins. A copy made on the server goes to every client; a copy a client
 //! pushes goes onto the server's clipboard and on to every other client. Nothing
 //! is held back for a screen switch, and a client that connects later is not
 //! sent what was copied before it came.
@@ -13,18 +13,20 @@
 use std::sync::Arc;
 
 use geserdesk_clipboard::{effective_max, outbound, ClipboardSync, POLL_INTERVAL};
-use geserdesk_proto::clipboard::{Chunk, ClipboardId};
+use geserdesk_proto::clipboard::{Chunk, ClipboardContent, ClipboardId};
 use geserdesk_proto::ServerMsg;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
-use crate::hub::{Hub, SharedText};
+use crate::hub::{Hub, SharedClip};
 
-/// The messages that push `text` as transfer `seq`.
-fn messages(seq: u64, text: &str) -> Vec<ServerMsg> {
+/// The messages that push `content` as transfer `seq`.
+fn messages(seq: u64, content: &ClipboardContent) -> Vec<ServerMsg> {
     let id = ClipboardId::Clipboard;
     let grab = std::iter::once(ServerMsg::ClipboardGrab { id, seq });
-    let data = outbound(text).map(move |chunk: Chunk| ServerMsg::ClipboardData { id, seq, chunk });
+    let data = outbound(content)
+        .into_iter()
+        .map(move |chunk: Chunk| ServerMsg::ClipboardData { id, seq, chunk });
     grab.chain(data).collect()
 }
 
@@ -32,7 +34,7 @@ fn messages(seq: u64, text: &str) -> Vec<ServerMsg> {
 pub async fn run(
     hub: Arc<Hub>,
     local: ClipboardSync,
-    mut from_clients: UnboundedReceiver<SharedText>,
+    mut from_clients: UnboundedReceiver<SharedClip>,
     max_bytes: u64,
 ) {
     let max = effective_max(max_bytes);
@@ -45,20 +47,20 @@ pub async fn run(
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                if let Some(text) = local.poll(max).await {
+                if let Some(content) = local.poll(max).await {
                     seq += 1;
-                    debug!(bytes = text.len(), "the server's clipboard changed; sending it to the clients");
-                    hub.broadcast_except(None, &messages(seq, &text));
+                    debug!(bytes = content.data_len(), "the server's clipboard changed; sending it to the clients");
+                    hub.broadcast_except(None, &messages(seq, &content));
                 }
             }
             shared = from_clients.recv() => {
-                let Some(SharedText { from, text }) = shared else { return };
-                debug!(%from, bytes = text.len(), "a client's clipboard arrived");
-                if let Err(e) = local.apply(text.clone()).await {
+                let Some(SharedClip { from, content }) = shared else { return };
+                debug!(%from, bytes = content.data_len(), "a client's clipboard arrived");
+                if let Err(e) = local.apply(content.clone()).await {
                     warn!(error = %e, "could not set the server's clipboard");
                 }
                 seq += 1;
-                hub.broadcast_except(Some(&from), &messages(seq, &text));
+                hub.broadcast_except(Some(&from), &messages(seq, &content));
             }
         }
     }
@@ -75,7 +77,7 @@ mod tests {
         vec![Rect::new(0, 0, 100, 100)]
     }
 
-    async fn texts(reg: &mut crate::hub::Registration) -> String {
+    async fn copies(reg: &mut crate::hub::Registration) -> ClipboardContent {
         let mut asm = geserdesk_proto::clipboard::ChunkAssembler::new();
         loop {
             let msg = tokio::time::timeout(Duration::from_secs(3), reg.outbox.recv())
@@ -86,7 +88,7 @@ mod tests {
                 ServerMsg::ClipboardGrab { .. } => {}
                 ServerMsg::ClipboardData { chunk, .. } => {
                     if let Some(bytes) = asm.push(chunk).unwrap() {
-                        return String::from_utf8(bytes).unwrap();
+                        return ClipboardContent::decode(&bytes).unwrap();
                     }
                 }
                 other => panic!("unexpected {other:?}"),
@@ -111,12 +113,13 @@ mod tests {
         // Whatever is on the clipboard when the relay starts is not news.
         tokio::time::sleep(Duration::from_millis(100)).await;
         mem.copy("from the server");
-        assert_eq!(texts(&mut a).await, "from the server");
-        assert_eq!(texts(&mut b).await, "from the server");
+        assert_eq!(copies(&mut a).await.text(), Some("from the server"));
+        assert_eq!(copies(&mut b).await.text(), Some("from the server"));
 
-        hub.clipboard_in("a", "from a".into());
-        assert_eq!(texts(&mut b).await, "from a");
-        assert_eq!(mem.contents().as_deref(), Some("from a"));
+        let styled = ClipboardContent::new(Some("from a".into()), Some("<b>from a</b>".into()));
+        hub.clipboard_in("a", styled.clone());
+        assert_eq!(copies(&mut b).await, styled);
+        assert_eq!(mem.content(), Some(styled));
         // `a` is not sent its own text back, and the server's poll does not
         // mistake the write for a new copy.
         tokio::time::sleep(POLL_INTERVAL * 3).await;

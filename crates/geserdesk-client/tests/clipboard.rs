@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use geserdesk_client::{connect, ClientConfig, NullSink, DEFAULT_HANDSHAKE_TIMEOUT};
-use geserdesk_clipboard::{Clipboard, ClipboardError, ClipboardSync, MemoryClipboard};
+use geserdesk_clipboard::{
+    Clipboard, ClipboardContent, ClipboardError, ClipboardSync, MemoryClipboard,
+};
 use geserdesk_proto::{
     ClientMsg, MessageStream, Point, Rect, ScreenInfo, ServerMsg, PROTOCOL_VERSION,
 };
@@ -36,13 +38,12 @@ impl Counting {
 }
 
 impl Clipboard for Counting {
-    fn get_text(&mut self) -> Result<Option<String>, ClipboardError> {
-        self.mem.clone().get_text()
+    fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError> {
+        self.mem.clone().get()
     }
-    fn set_text(&mut self, text: &str) -> Result<(), ClipboardError> {
+    fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
-        self.mem.copy(text);
-        Ok(())
+        self.mem.clone().set(content)
     }
 }
 
@@ -152,6 +153,38 @@ async fn a_copy_anywhere_reaches_everyone_once() {
     assert_eq!(rig.a.writes(), 2, "the server's copy and b's");
     assert_eq!(rig.b.writes(), 2, "a's copy and the server's");
     assert_eq!(rig.server.writes(), 2, "a's copy and b's");
+    let _ = rig.stop.send(true);
+}
+
+/// The point of carrying HTML: a page copied on one machine pastes with its style
+/// on another, in both directions and through the server.
+#[tokio::test]
+async fn a_copied_pages_style_travels_with_its_text() {
+    let rig = rig("").await;
+
+    let page = "<h1 style=\"color:red\">Judul</h1><p>isi <b>tebal</b></p>";
+    rig.server.mem.copy_html("Judul\nisi tebal", page);
+    arrives(&rig.a, "Judul\nisi tebal").await;
+    arrives(&rig.b, "Judul\nisi tebal").await;
+    assert_eq!(rig.a.mem.html().as_deref(), Some(page));
+    assert_eq!(rig.b.mem.html().as_deref(), Some(page));
+
+    let other = "<ul><li>satu</li><li>dua</li></ul>";
+    rig.b.mem.copy_html("satu\ndua", other);
+    arrives(&rig.server, "satu\ndua").await;
+    arrives(&rig.a, "satu\ndua").await;
+    assert_eq!(rig.server.mem.html().as_deref(), Some(other));
+    assert_eq!(rig.a.mem.html().as_deref(), Some(other));
+
+    // Plain text after a styled copy must not keep the old style.
+    rig.a.mem.copy("polos");
+    arrives(&rig.server, "polos").await;
+    arrives(&rig.b, "polos").await;
+    assert_eq!(rig.server.mem.html(), None);
+    assert_eq!(rig.b.mem.html(), None);
+
+    sleep(Duration::from_millis(1500)).await;
+    assert_eq!(rig.server.writes(), 2, "b's page and a's plain text");
     let _ = rig.stop.send(true);
 }
 
