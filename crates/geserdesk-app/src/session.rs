@@ -11,7 +11,9 @@ use geserdesk_client::{
     connect_observed, connect_with_status, ClientConfig, ClientStatus, ClientTls, InputSink,
     KnownServers, NullSink, ReconnectPolicy, ServerTrust, DEFAULT_HANDSHAKE_TIMEOUT,
 };
-use geserdesk_clipboard::{ClipboardSync, SystemClipboard};
+use geserdesk_clipboard::{
+    Clipboard, ClipboardContent, ClipboardError, ClipboardSync, SystemClipboard,
+};
 use geserdesk_server::{Config, DeskState};
 use geserdesk_tls::Identity;
 use serde::{Deserialize, Serialize};
@@ -183,7 +185,10 @@ impl Session {
         // clipboard of the machine it runs on.
         if opts.clipboard && !log_only {
             match SystemClipboard::new() {
-                Ok(c) => cfg.clipboard = Some(ClipboardSync::new(c)),
+                Ok(c) if opts.clipboard_files => cfg.clipboard = Some(ClipboardSync::new(c)),
+                // The server's own `clipboard_files` option is still the other
+                // half of this switch; this only ever narrows it further.
+                Ok(c) => cfg.clipboard = Some(ClipboardSync::new(NoFiles(c))),
                 Err(e) => {
                     warn!(error = %e, "the clipboard is not available; it will not be shared")
                 }
@@ -365,6 +370,25 @@ fn client_config(
     })
 }
 
+/// Wraps a real [`Clipboard`] but never reports or accepts a file list, for
+/// `ClientOptions.clipboard_files = false`: text, HTML and pictures still
+/// travel, files never do, in either direction.
+struct NoFiles<C>(C);
+
+impl<C: Clipboard> Clipboard for NoFiles<C> {
+    fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError> {
+        self.0.get()
+    }
+    fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
+        self.0.set(content)
+    }
+    fn change_count(&mut self) -> Option<u64> {
+        self.0.change_count()
+    }
+    // file_list/set_file_list keep the trait's default (never report, never
+    // accept), so this machine's files are never offered or overwritten.
+}
+
 /// The sink that really moves this machine's pointer and presses its keys.
 #[cfg(feature = "inject")]
 fn real_sink() -> Result<Box<dyn InputSink>, String> {
@@ -402,6 +426,35 @@ mod tests {
 
     fn session() -> Arc<Session> {
         Session::new(Handle::current())
+    }
+
+    #[test]
+    fn no_files_passes_data_through_but_never_sees_files() {
+        use geserdesk_clipboard::MemoryClipboard;
+        use std::path::PathBuf;
+
+        let mem = MemoryClipboard::new();
+        mem.copy("hello");
+        let mut wrapped = NoFiles(mem.clone());
+        assert_eq!(wrapped.get().unwrap().unwrap().text(), Some("hello"));
+        assert!(wrapped
+            .set(&ClipboardContent::new(Some("back".into()), None))
+            .is_ok());
+        assert_eq!(mem.contents(), Some("back".into()));
+
+        mem.copy_files(vec![PathBuf::from("/tmp/a.txt")]);
+        assert_eq!(wrapped.file_list().unwrap(), None, "never reports files");
+        assert!(
+            wrapped
+                .set_file_list(&[PathBuf::from("/tmp/b.txt")])
+                .is_err(),
+            "never accepts a file list either"
+        );
+        assert_eq!(
+            mem.files(),
+            Some(vec![PathBuf::from("/tmp/a.txt")]),
+            "left untouched"
+        );
     }
 
     #[test]

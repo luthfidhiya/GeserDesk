@@ -98,6 +98,10 @@ enum Command {
         /// Do not share this machine's clipboard with the server.
         #[arg(long)]
         no_clipboard: bool,
+        /// Share text, HTML and pictures, but never let this machine's files be
+        /// pulled, or pull anyone else's here. Has no effect with --no-clipboard.
+        #[arg(long)]
+        no_clipboard_files: bool,
         /// Override monitor detection: comma-separated `WxH+X+Y`, e.g.
         /// `1920x1080+0+0,1280x1024+1920+0`.
         #[arg(long)]
@@ -155,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
             identity_dir,
             server_fingerprint,
             no_clipboard,
+            no_clipboard_files,
             monitors: forced,
         } => {
             let monitors = forced
@@ -185,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
                 identity_dir: identity_dir.clone(),
                 monitors,
                 clipboard: !no_clipboard,
+                clipboard_files: !no_clipboard_files,
             };
             // The terminal asks about a server seen for the first time (or
             // `--server-fingerprint` answers it up front), as it always has.

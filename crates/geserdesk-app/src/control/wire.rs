@@ -52,6 +52,10 @@ pub struct ClientOptions {
     /// here, or by the server's `clipboard_sharing` option, shares nothing. A
     /// session that only logs input never touches the clipboard either.
     pub clipboard: bool,
+    /// Let files copied (not dragged) on this machine be pulled by others, and
+    /// pull theirs here. Off here even if the server's `clipboard_files` option
+    /// is on. Has no effect once `clipboard` itself is off.
+    pub clipboard_files: bool,
 }
 
 impl Default for ClientOptions {
@@ -65,6 +69,7 @@ impl Default for ClientOptions {
             identity_dir: None,
             monitors: None,
             clipboard: true,
+            clipboard_files: true,
         }
     }
 }
@@ -264,6 +269,7 @@ mod tests {
                     identity_dir: Some("/tmp/id".into()),
                     monitors: Some(vec![Rect::new(0, 0, 1280, 1024)]),
                     clipboard: false,
+                    clipboard_files: false,
                 }),
             },
         ];
