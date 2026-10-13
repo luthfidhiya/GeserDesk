@@ -34,6 +34,19 @@ pub enum PullError {
     Io(PathBuf, std::io::Error),
 }
 
+/// How far a pull has gotten, for a front end to show. `file_index`/`file_count`
+/// count non-folder entries only (a folder is created, not "transferred").
+#[derive(Debug, Clone, PartialEq)]
+pub struct Progress {
+    /// Whatever the caller tagged this pull with (a transfer's `seq`, typically).
+    pub seq: u64,
+    pub file: String,
+    pub file_index: usize,
+    pub file_count: usize,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}
+
 /// Pull every file in `manifest` into a fresh `dest` (created if needed) and
 /// return the *top-level* paths under it -- what a paste of the original copy
 /// should paste, folders included but their contents not repeated. Refuses to
@@ -44,11 +57,29 @@ pub async fn pull<F, Fut>(
     manifest: &FileManifest,
     dest: &Path,
     max_bytes: u64,
-    mut read: F,
+    read: F,
 ) -> Result<Vec<PathBuf>, PullError>
 where
     F: FnMut(u32, u64, u32) -> Fut,
     Fut: Future<Output = FileReadResult>,
+{
+    pull_with_progress(manifest, dest, max_bytes, 0, read, |_| {}).await
+}
+
+/// [`pull`], additionally calling `progress` after every chunk written, tagged
+/// with `seq` (purely descriptive -- `pull` itself does not interpret it).
+pub async fn pull_with_progress<F, Fut, P>(
+    manifest: &FileManifest,
+    dest: &Path,
+    max_bytes: u64,
+    seq: u64,
+    mut read: F,
+    mut progress: P,
+) -> Result<Vec<PathBuf>, PullError>
+where
+    F: FnMut(u32, u64, u32) -> Fut,
+    Fut: Future<Output = FileReadResult>,
+    P: FnMut(Progress),
 {
     if max_bytes > 0 && manifest.total_bytes() > max_bytes {
         return Err(PullError::TooLarge(max_bytes));
@@ -59,7 +90,7 @@ where
         .await
         .map_err(|e| PullError::Io(dest.to_path_buf(), e))?;
 
-    match pull_into(manifest, &resolved, &mut read).await {
+    match pull_into(manifest, &resolved, seq, &mut read, &mut progress).await {
         Ok(()) => Ok(top_level(manifest, &resolved)),
         Err(e) => {
             if let Err(cleanup) = tokio::fs::remove_dir_all(dest).await {
@@ -70,16 +101,24 @@ where
     }
 }
 
-async fn pull_into<F, Fut>(
+async fn pull_into<F, Fut, P>(
     manifest: &FileManifest,
     resolved: &[PathBuf],
+    seq: u64,
     read: &mut F,
+    progress: &mut P,
 ) -> Result<(), PullError>
 where
     F: FnMut(u32, u64, u32) -> Fut,
     Fut: Future<Output = FileReadResult>,
+    P: FnMut(Progress),
 {
     use tokio::io::AsyncWriteExt;
+
+    let file_count = manifest.entries.iter().filter(|e| !e.dir).count();
+    let bytes_total = manifest.total_bytes();
+    let mut bytes_done = 0u64;
+    let mut file_index = 0usize;
 
     for (index, (entry, path)) in manifest.entries.iter().zip(resolved).enumerate() {
         if entry.dir {
@@ -88,6 +127,12 @@ where
                 .map_err(|e| PullError::Io(path.clone(), e))?;
             continue;
         }
+        let file_name = entry
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&entry.path)
+            .to_string();
         let mut file = tokio::fs::File::create(path)
             .await
             .map_err(|e| PullError::Io(path.clone(), e))?;
@@ -103,6 +148,15 @@ where
                         .await
                         .map_err(|e| PullError::Io(path.clone(), e))?;
                     offset += bytes.len() as u64;
+                    bytes_done += bytes.len() as u64;
+                    progress(Progress {
+                        seq,
+                        file: file_name.clone(),
+                        file_index,
+                        file_count,
+                        bytes_done,
+                        bytes_total,
+                    });
                 }
                 FileReadResult::Err(e) => return Err(PullError::Read(e)),
             }
@@ -113,6 +167,7 @@ where
         file.flush()
             .await
             .map_err(|e| PullError::Io(path.clone(), e))?;
+        file_index += 1;
     }
     Ok(())
 }
@@ -291,6 +346,48 @@ mod tests {
         let err = pull(&manifest, &dest, 0, read).await.unwrap_err();
         assert!(matches!(err, PullError::ShortRead));
         assert!(!dest.exists());
+    }
+
+    #[tokio::test]
+    async fn progress_reports_each_chunk_tagged_with_seq_and_reaches_the_total() {
+        let dest = scratch("progress");
+        let size = MAX_READ_LEN as usize + 10;
+        let manifest = manifest_for(&[
+            ("a.bin", 3, false),
+            ("sub", 0, true),
+            ("sub/big.bin", size, false),
+        ]);
+        let data_a = vec![1u8, 2, 3];
+        let data_b: Vec<u8> = (0..size).map(|i| (i % 7) as u8).collect();
+        let read = {
+            let (data_a, data_b) = (data_a.clone(), data_b.clone());
+            move |index: u32, offset: u64, len: u32| {
+                let data = if index == 0 { &data_a } else { &data_b };
+                let offset = offset as usize;
+                let end = (offset + len as usize).min(data.len());
+                std::future::ready(FileReadResult::Data(data[offset..end].to_vec()))
+            }
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        pull_with_progress(&manifest, &dest, 0, 77, read, move |p| {
+            seen2.lock().unwrap().push(p);
+        })
+        .await
+        .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|p| p.seq == 77));
+        assert!(seen.iter().all(|p| p.file_count == 2));
+        assert_eq!(seen.first().unwrap().file, "a.bin");
+        assert_eq!(seen.first().unwrap().bytes_done, 3);
+        let last = seen.last().unwrap();
+        assert_eq!(last.file, "big.bin");
+        assert_eq!(last.file_index, 1);
+        assert_eq!(last.bytes_done, last.bytes_total);
+        assert_eq!(last.bytes_total, 3 + size as u64);
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[allow(dead_code)]
