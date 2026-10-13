@@ -17,12 +17,14 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use geserdesk_clipboard::ClipboardSync;
 use geserdesk_platform::{CaptureCmd, CaptureEvent, CaptureHandle};
 use geserdesk_proto::{Edge, ModMask, MouseEvent, Point, Rect, ServerMsg};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
 use crate::desk::{effective_origins, inset_clamp, nearest_point, DEFAULT_SIZE};
+use crate::files::{self, FileRouter, Owner};
 use crate::hub::{Hub, HubEvent};
 use crate::layout::{Decision, Layout, SwitchPolicy, SwitchState};
 
@@ -469,14 +471,31 @@ fn near_corner(bounds: &Rect, p: Point, edge: Edge, corner_size: i32) -> bool {
 /// Drive [`Core`] from the capture backend and the client hub until either
 /// input stream ends.
 pub async fn run(
+    core: Core,
+    hub: Arc<Hub>,
+    capture: CaptureHandle,
+    capture_events: UnboundedReceiver<CaptureEvent>,
+    hub_events: UnboundedReceiver<HubEvent>,
+) {
+    run_shared(core, hub, capture, capture_events, hub_events, None).await
+}
+
+/// [`run`], and when `files` is given (a [`FileRouter`], this server's own
+/// clipboard, whether sharing files is on, and the byte limit), pulls a
+/// client's files onto this server's own clipboard whenever the cursor
+/// returns here from a screen that currently owns some.
+pub async fn run_shared(
     mut core: Core,
     hub: Arc<Hub>,
     capture: CaptureHandle,
     mut capture_events: UnboundedReceiver<CaptureEvent>,
     mut hub_events: UnboundedReceiver<HubEvent>,
+    files: Option<(Arc<FileRouter>, ClipboardSync, bool, u64)>,
 ) {
     let started = Instant::now();
+    let mut last_pulled_seq: Option<u64> = None;
     loop {
+        let was_remote = core.active_remote().is_some();
         let mut pending: VecDeque<Action> = tokio::select! {
             ev = capture_events.recv() => match ev {
                 Some(ev) => core.handle(ev, started.elapsed().as_millis() as u64).into(),
@@ -510,6 +529,26 @@ pub async fn run(
                     if !hub.send(&to, msg) {
                         // The client vanished between events.
                         pending.extend(core.client_disconnected(&to));
+                    }
+                }
+            }
+        }
+
+        // The cursor just came back to this machine's own screen: if some
+        // other screen currently owns files, pull them for a paste here.
+        if was_remote && core.active_remote().is_none() {
+            if let Some((router, sync, true, max_bytes)) = &files {
+                if let Some((Owner::Client(_), seq, manifest)) = router.current() {
+                    if last_pulled_seq != Some(seq) {
+                        last_pulled_seq = Some(seq);
+                        files::spawn_local_pull(
+                            Arc::clone(router),
+                            sync.clone(),
+                            seq,
+                            manifest,
+                            files::staging_dir(seq),
+                            *max_bytes,
+                        );
                     }
                 }
             }

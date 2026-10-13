@@ -280,6 +280,10 @@ pub async fn run_server_shared(
     let hub = Hub::new();
     let file_router = FileRouter::new(Arc::clone(&hub));
     let mut background = Vec::new();
+    // The same ClipboardSync, if any, is used both to detect this server's own
+    // copies (below) and, when the cursor returns here, to apply a pull from
+    // whichever client currently owns files (in router::run_shared).
+    let local_sync = clipboard.map(ClipboardSync::new);
 
     let local = if capture {
         let (cap_tx, cap_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -294,14 +298,23 @@ pub async fn run_server_shared(
             local.clone(),
             config.positions.clone(),
         );
+        let files_for_router = local_sync.clone().map(|sync| {
+            (
+                Arc::clone(&file_router),
+                sync,
+                config.options.clipboard_files,
+                config.options.clipboard_files_max_bytes,
+            )
+        });
         // Aborting this task drops the capture handle, which makes the capture
         // thread release the grab and exit.
-        background.push(tokio::spawn(router::run(
+        background.push(tokio::spawn(router::run_shared(
             core,
             Arc::clone(&hub),
             capture,
             cap_rx,
             hub_events,
+            files_for_router,
         )));
         local
     } else {
@@ -313,10 +326,10 @@ pub async fn run_server_shared(
         .take_clipboard()
         .expect("a fresh hub has its clipboard stream");
     let sharing_anything = config.options.clipboard_sharing || config.options.clipboard_files;
-    if let (Some(clipboard), true) = (clipboard, sharing_anything) {
+    if let (Some(sync), true) = (local_sync, sharing_anything) {
         background.push(tokio::spawn(clipboard::run(
             Arc::clone(&hub),
-            ClipboardSync::new(clipboard),
+            sync,
             from_clients,
             config.options.clipboard_max_bytes,
             Arc::clone(&file_router),
@@ -543,7 +556,14 @@ where
     } else {
         VecDeque::new()
     };
-    let result = session_loop(&mut ms, demo, &mut registration, &config.options, &file_router).await;
+    let result = session_loop(
+        &mut ms,
+        demo,
+        &mut registration,
+        &config.options,
+        &file_router,
+    )
+    .await;
     ms.send(&ServerMsg::Close(CloseReason::ServerShutdown))
         .await
         .ok();

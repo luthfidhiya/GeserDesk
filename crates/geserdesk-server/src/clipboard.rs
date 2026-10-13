@@ -78,7 +78,7 @@ pub async fn run(
                                 seq += 1;
                                 debug!(entries = manifest.entries.len(), "the server's own files changed; announcing them");
                                 file_router.local_owner().set(seq, manifest.clone(), abs);
-                                file_router.announce(Owner::Server, seq);
+                                file_router.announce(Owner::Server, seq, manifest.clone());
                                 let content = ClipboardContent::with_files(&manifest);
                                 hub.broadcast_except(None, &messages(seq, &content));
                             }
@@ -101,7 +101,7 @@ pub async fn run(
                     }
                     seq += 1;
                     debug!(%from, entries = manifest.entries.len(), "a client's files arrived");
-                    file_router.announce(Owner::Client(from), seq);
+                    file_router.announce(Owner::Client(from), seq, manifest.clone());
                     // Echoed to everyone, including the pusher: it is the only
                     // way that client learns the `seq` the server assigned.
                     hub.broadcast_except(None, &messages(seq, &content));
@@ -231,10 +231,10 @@ mod tests {
         let seq_b = next_grab_seq(&mut b).await;
         assert_eq!(seq_a, seq_b);
         assert_eq!(copies(&mut a).await.files(), Some(manifest.clone()));
-        assert_eq!(copies(&mut b).await.files(), Some(manifest));
+        assert_eq!(copies(&mut b).await.files(), Some(manifest.clone()));
         assert_eq!(
             file_router.current(),
-            Some((crate::files::Owner::Client("a".into()), seq_a))
+            Some((crate::files::Owner::Client("a".into()), seq_a, manifest))
         );
         // The server's own clipboard is never touched by a client's files push.
         assert_eq!(mem.content(), None);

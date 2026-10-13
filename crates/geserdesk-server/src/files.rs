@@ -7,14 +7,16 @@
 //! asking the same owner at once must not collide.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use geserdesk_clipboard::files::FileOwner;
-use geserdesk_proto::clipboard::{FileReadError, FileReadResult};
+use geserdesk_clipboard::{effective_files_max, pull, ClipboardSync};
+use geserdesk_proto::clipboard::{FileManifest, FileReadError, FileReadResult};
 use geserdesk_proto::ServerMsg;
 use tokio::sync::oneshot;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::hub::Hub;
 
@@ -46,7 +48,7 @@ pub struct FileRouter {
     hub: Arc<Hub>,
     /// This server's own files, when it is the owner.
     local_owner: Arc<FileOwner>,
-    current: Mutex<Option<(Owner, u64)>>,
+    current: Mutex<Option<(Owner, u64, FileManifest)>>,
     pending: Mutex<HashMap<u64, Pending>>,
     next_req: AtomicU64,
 }
@@ -68,22 +70,22 @@ impl FileRouter {
         &self.local_owner
     }
 
-    /// `owner` just announced a fresh files manifest as transfer `seq`.
-    /// Replaces whoever owned files before. `seq` is whatever every consumer
-    /// will see on the `ClipboardGrab` that carries this manifest, so a
-    /// would-be puller (including this server, for its own screen) can tell
-    /// there is something new to fetch without decoding the manifest itself.
-    pub fn announce(&self, owner: Owner, seq: u64) {
-        *self.current.lock().unwrap() = Some((owner, seq));
+    /// `owner` just announced `manifest` as transfer `seq`. Replaces whoever
+    /// owned files before. `seq` is whatever every consumer will see on the
+    /// `ClipboardGrab` that carries this manifest; `manifest` itself is kept
+    /// here too (not just with the owner) so this server can pull for its own
+    /// screen without asking the owner to decode anything first.
+    pub fn announce(&self, owner: Owner, seq: u64, manifest: FileManifest) {
+        *self.current.lock().unwrap() = Some((owner, seq, manifest));
     }
 
-    /// Who owns files now, and at what `seq`, if anyone.
-    pub fn current(&self) -> Option<(Owner, u64)> {
+    /// Who owns files now, at what `seq`, and their manifest, if anyone.
+    pub fn current(&self) -> Option<(Owner, u64, FileManifest)> {
         self.current.lock().unwrap().clone()
     }
 
     fn current_owner(&self) -> Option<Owner> {
-        self.current.lock().unwrap().clone().map(|(o, _)| o)
+        self.current.lock().unwrap().clone().map(|(o, ..)| o)
     }
 
     /// `name` disconnected: if it was the owner, nobody is now (so a pull in
@@ -91,7 +93,7 @@ impl FileRouter {
     /// it is answered [`FileReadError::NotFound`].
     pub fn on_disconnected(&self, name: &str) {
         let mut current = self.current.lock().unwrap();
-        if matches!(current.as_ref(), Some((Owner::Client(n), _)) if n == name) {
+        if matches!(current.as_ref(), Some((Owner::Client(n), ..)) if n == name) {
             *current = None;
         }
         drop(current);
@@ -239,6 +241,50 @@ impl FileRouter {
     }
 }
 
+/// Where this server stages files pulled for its own screen, one folder per
+/// transfer. Kept apart from a client's own staging folder (same name, but
+/// never the same machine) so testing both sides in one process cannot clash.
+pub fn staging_dir(seq: u64) -> PathBuf {
+    std::env::temp_dir()
+        .join("geserdesk-clipboard-files-server")
+        .join(seq.to_string())
+}
+
+/// Pull `manifest` (transfer `seq`, owned by someone else right now) through
+/// `router` into `dest`, and on success put the top-level results on `sync`'s
+/// clipboard -- what this server's own screen should paste. Runs in its own
+/// task, so nothing else the router does waits on it; any failure is logged
+/// and abandoned, leaving the clipboard exactly as it was.
+pub fn spawn_local_pull(
+    router: Arc<FileRouter>,
+    sync: ClipboardSync,
+    seq: u64,
+    manifest: FileManifest,
+    dest: PathBuf,
+    files_max_bytes: u64,
+) {
+    tokio::spawn(async move {
+        let max = effective_files_max(files_max_bytes);
+        let result = pull::pull(&manifest, &dest, max, |index, offset, len| {
+            let router = Arc::clone(&router);
+            async move { router.request_local(seq, index, offset, len).await }
+        })
+        .await;
+        match result {
+            Ok(top) => {
+                info!(
+                    entries = top.len(),
+                    "pulled a client's files for this screen; updating the clipboard"
+                );
+                if let Err(e) = sync.apply_files(top).await {
+                    warn!(error = %e, "could not set the clipboard to the pulled files");
+                }
+            }
+            Err(e) => warn!(error = %e, "could not pull files for this screen"),
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,7 +326,7 @@ mod tests {
         router
             .local_owner()
             .set(7, manifest, vec![dir.join("f.txt")]);
-        router.announce(Owner::Server, 7);
+        router.announce(Owner::Server, 7, FileManifest::default());
 
         router.request_for_client("a", 7, 42, 0, 0, 10);
         let reply = tokio::time::timeout(Duration::from_secs(2), client.outbox.recv())
@@ -303,8 +349,11 @@ mod tests {
         let mut consumer = hub.register("a", mons()).unwrap();
         let mut owner_client = hub.register("b", mons()).unwrap();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()), 1);
-        assert_eq!(router.current(), Some((Owner::Client("b".into()), 1)));
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
+        assert_eq!(
+            router.current(),
+            Some((Owner::Client("b".into()), 1, FileManifest::default()))
+        );
 
         router.request_for_client("a", 9, 5, 2, 100, 50);
         let forwarded = tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
@@ -345,7 +394,7 @@ mod tests {
         let hub = Hub::new();
         let mut owner_client = hub.register("b", mons()).unwrap();
         let router = Arc::clone(&FileRouter::new(Arc::clone(&hub)));
-        router.announce(Owner::Client("b".into()), 1);
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
 
         let router2 = Arc::clone(&router);
         let pulling = tokio::spawn(async move { router2.request_local(3, 0, 0, 5).await });
@@ -369,7 +418,7 @@ mod tests {
         let _owner_client = hub.register("b", mons()).unwrap();
         let _impostor = hub.register("c", mons()).unwrap();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()), 1);
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
 
         router.request_for_client("a", 1, 10, 0, 0, 1);
         // Guess the req (it starts at 1 and this is the first request routed).
@@ -393,7 +442,7 @@ mod tests {
         let mut consumer = hub.register("a", mons()).unwrap();
         let owner_client = hub.register("b", mons()).unwrap();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()), 1);
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
 
         router.request_for_client("a", 1, 10, 0, 0, 1);
         drop(owner_client); // "b" disconnects with the request unanswered
@@ -410,17 +459,17 @@ mod tests {
                 result: FileReadResult::Err(FileReadError::NotFound)
             }
         );
-        assert_eq!(router.current().map(|(o, _)| o), None);
+        assert_eq!(router.current().map(|(o, ..)| o), None);
     }
 
     #[tokio::test]
     async fn disconnecting_a_machine_that_is_not_the_owner_leaves_ownership_alone() {
         let hub = Hub::new();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()), 1);
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
         router.on_disconnected("someone-else");
         assert_eq!(
-            router.current().map(|(o, _)| o),
+            router.current().map(|(o, ..)| o),
             Some(Owner::Client("b".into()))
         );
     }
@@ -429,10 +478,54 @@ mod tests {
     async fn sending_to_a_client_that_already_vanished_resolves_the_request_at_once() {
         let hub = Hub::new();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("ghost".into()), 1);
+        router.announce(Owner::Client("ghost".into()), 1, FileManifest::default());
         assert_eq!(
             router.request_local(1, 0, 0, 1).await,
             FileReadResult::Err(FileReadError::NotFound)
         );
+    }
+
+    #[tokio::test]
+    async fn the_server_pulls_a_client_owners_files_onto_its_own_clipboard() {
+        use geserdesk_clipboard::MemoryClipboard;
+        use geserdesk_proto::clipboard::FileEntry;
+        use std::time::Duration;
+
+        let hub = Hub::new();
+        let mut owner_client = hub.register("b", mons()).unwrap();
+        let router = FileRouter::new(Arc::clone(&hub));
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
+
+        let mem = MemoryClipboard::new();
+        let sync = ClipboardSync::new(mem.clone());
+        let manifest = FileManifest {
+            entries: vec![FileEntry {
+                path: "f.txt".into(),
+                size: 3,
+                dir: false,
+            }],
+        };
+        let dest = staging_dir(424_242);
+        let _ = std::fs::remove_dir_all(&dest);
+
+        spawn_local_pull(Arc::clone(&router), sync, 1, manifest, dest.clone(), 0);
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let req = match forwarded {
+            ServerMsg::FileRead { req, .. } => req,
+            other => panic!("unexpected {other:?}"),
+        };
+        router.reply_from_client("b", req, FileReadResult::Data(b"abc".to_vec()));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while mem.files().is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(mem.files(), Some(vec![dest.join("f.txt")]));
+        assert_eq!(std::fs::read(dest.join("f.txt")).unwrap(), b"abc");
+        let _ = std::fs::remove_dir_all(&dest);
     }
 }
