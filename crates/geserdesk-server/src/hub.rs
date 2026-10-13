@@ -25,6 +25,13 @@ pub enum HubEvent {
     Positions(BTreeMap<String, Point>),
 }
 
+/// Clipboard text a client pushed, for the relay to apply and pass on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedText {
+    pub from: String,
+    pub text: String,
+}
+
 struct Entry {
     tx: UnboundedSender<ServerMsg>,
     monitors: Vec<Rect>,
@@ -34,21 +41,40 @@ pub struct Hub {
     clients: Mutex<HashMap<String, Entry>>,
     events: UnboundedSender<HubEvent>,
     events_rx: Mutex<Option<UnboundedReceiver<HubEvent>>>,
+    clipboard: UnboundedSender<SharedText>,
+    clipboard_rx: Mutex<Option<UnboundedReceiver<SharedText>>>,
 }
 
 impl Hub {
     pub fn new() -> Arc<Self> {
         let (events, rx) = unbounded_channel();
+        let (clipboard, clipboard_rx) = unbounded_channel();
         Arc::new(Self {
             clients: Mutex::new(HashMap::new()),
             events,
             events_rx: Mutex::new(Some(rx)),
+            clipboard,
+            clipboard_rx: Mutex::new(Some(clipboard_rx)),
         })
     }
 
     /// The stream of connect/disconnect events. Can be taken once.
     pub fn take_events(&self) -> Option<UnboundedReceiver<HubEvent>> {
         self.events_rx.lock().unwrap().take()
+    }
+
+    /// The clipboard texts clients push. Can be taken once; whoever takes it must
+    /// drain it, or drop it when nothing will (sends then fail and cost nothing).
+    pub fn take_clipboard(&self) -> Option<UnboundedReceiver<SharedText>> {
+        self.clipboard_rx.lock().unwrap().take()
+    }
+
+    /// A client finished pushing its clipboard.
+    pub fn clipboard_in(&self, from: &str, text: String) {
+        let _ = self.clipboard.send(SharedText {
+            from: from.to_string(),
+            text,
+        });
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -88,6 +114,18 @@ impl Hub {
         match self.clients.lock().unwrap().get(name) {
             Some(entry) => entry.tx.send(msg).is_ok(),
             None => false,
+        }
+    }
+
+    /// Queue `msgs`, in order and without anything else between them, for every
+    /// client except `except`.
+    pub fn broadcast_except(&self, except: Option<&str>, msgs: &[ServerMsg]) {
+        for (name, entry) in self.clients.lock().unwrap().iter() {
+            if Some(name.as_str()) != except {
+                for msg in msgs {
+                    let _ = entry.tx.send(msg.clone());
+                }
+            }
         }
     }
 
@@ -181,6 +219,17 @@ mod tests {
             events.recv().await,
             Some(HubEvent::Disconnected("a".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn broadcast_skips_the_sender_and_keeps_messages_together() {
+        let hub = Hub::new();
+        let mut a = hub.register("a", mons()).unwrap();
+        let mut b = hub.register("b", mons()).unwrap();
+        hub.broadcast_except(Some("a"), &[ServerMsg::Leave, ServerMsg::KeepAlive]);
+        assert!(matches!(b.outbox.recv().await, Some(ServerMsg::Leave)));
+        assert!(matches!(b.outbox.recv().await, Some(ServerMsg::KeepAlive)));
+        assert!(a.outbox.try_recv().is_err());
     }
 
     #[tokio::test]

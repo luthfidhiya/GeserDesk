@@ -13,6 +13,7 @@ authors.workspace = true
 geserdesk-proto.workspace = true
 geserdesk-platform.workspace = true
 geserdesk-tls.workspace = true
+geserdesk-clipboard.workspace = true
 serde.workspace = true
 toml.workspace = true
 toml_edit.workspace = true

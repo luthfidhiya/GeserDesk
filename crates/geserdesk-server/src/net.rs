@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use geserdesk_clipboard::{effective_max, Clipboard, ClipboardSync, Inbound, SystemClipboard};
 use geserdesk_proto::{
     ClientMsg, CloseReason, MessageStream, ModMask, MouseEvent, Options, Rect, ScreenInfo,
     ServerMsg, Version, PROTOCOL_VERSION,
@@ -25,6 +26,7 @@ use tokio::sync::{oneshot, watch};
 use tracing::{info, warn};
 
 use crate::admin::DeskState;
+use crate::clipboard;
 use crate::config::Config;
 use crate::hub::{Hub, Registration};
 use crate::layout::Layout;
@@ -248,6 +250,31 @@ pub async fn run_server_with(
     shutdown: watch::Receiver<bool>,
     ready: Option<oneshot::Sender<Arc<DeskState>>>,
 ) -> anyhow::Result<()> {
+    // The desktop's clipboard is shared whenever its input is captured; a server
+    // that only runs the network side leaves it alone.
+    let clipboard: Option<Box<dyn Clipboard>> = if capture && config.options.clipboard_sharing {
+        match SystemClipboard::new() {
+            Ok(c) => Some(Box::new(c)),
+            Err(e) => {
+                warn!(error = %e, "the clipboard is not available; it will not be shared");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    run_server_shared(config, capture, shutdown, ready, clipboard).await
+}
+
+/// [`run_server_with`] with the clipboard to share chosen by the caller (`None`
+/// shares none). The server keeps the clients' clipboards equal to this one.
+pub async fn run_server_shared(
+    config: Config,
+    capture: bool,
+    shutdown: watch::Receiver<bool>,
+    ready: Option<oneshot::Sender<Arc<DeskState>>>,
+    clipboard: Option<Box<dyn Clipboard>>,
+) -> anyhow::Result<()> {
     let hub = Hub::new();
     let mut background = Vec::new();
 
@@ -278,6 +305,18 @@ pub async fn run_server_with(
         drop(hub.take_events()); // nothing routes input here, so nobody listens
         geserdesk_platform::monitors().unwrap_or_else(|_| vec![Rect::new(0, 0, 1920, 1080)])
     };
+
+    let from_clients = hub
+        .take_clipboard()
+        .expect("a fresh hub has its clipboard stream");
+    if let (Some(clipboard), true) = (clipboard, config.options.clipboard_sharing) {
+        background.push(tokio::spawn(clipboard::run(
+            Arc::clone(&hub),
+            ClipboardSync::new(clipboard),
+            from_clients,
+            config.options.clipboard_max_bytes,
+        )));
+    } // else nobody relays: dropped, so a client's pushes are discarded
 
     let result = serve_with_hub(config, hub, local, shutdown, ready).await;
     for task in background {
@@ -486,7 +525,7 @@ where
     } else {
         VecDeque::new()
     };
-    let result = session_loop(&mut ms, demo, &mut registration).await;
+    let result = session_loop(&mut ms, demo, &mut registration, &config.options).await;
     ms.send(&ServerMsg::Close(CloseReason::ServerShutdown))
         .await
         .ok();
@@ -559,6 +598,7 @@ async fn session_loop<S>(
     ms: &mut MessageStream<S>,
     mut demo: VecDeque<ServerMsg>,
     registration: &mut Registration,
+    options: &Options,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -566,6 +606,8 @@ where
     let mut ticker = tokio::time::interval(KEEPALIVE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut missed: u32 = 0;
+    let mut pushed = Inbound::new();
+    let max_bytes = effective_max(options.clipboard_max_bytes);
     let mut demo_ticker = tokio::time::interval(DEMO_STEP);
     demo_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -598,6 +640,24 @@ where
                         registration
                             .hub()
                             .set_monitors(registration.name(), sanitize_monitors(&info));
+                        missed = 0;
+                    }
+                    Ok(ClientMsg::ClipboardGrab { id, seq }) => {
+                        if options.clipboard_sharing {
+                            pushed.grab(id, seq, max_bytes);
+                        }
+                        missed = 0;
+                    }
+                    Ok(ClientMsg::ClipboardData { id, seq, chunk }) => {
+                        if options.clipboard_sharing {
+                            match pushed.data(id, seq, chunk) {
+                                Ok(Some(text)) => {
+                                    registration.hub().clipboard_in(registration.name(), text)
+                                }
+                                Ok(None) => {}
+                                Err(e) => warn!(client = registration.name(), "dropped a clipboard push: {e}"),
+                            }
+                        }
                         missed = 0;
                     }
                     Ok(other) => {
