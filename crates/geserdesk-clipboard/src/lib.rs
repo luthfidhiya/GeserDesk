@@ -17,6 +17,7 @@
 //! * [`Inbound`] -- reassembles what a peer sends, with a size limit.
 //! * [`outbound`] -- the chunk stream that carries one [`ClipboardContent`].
 
+pub mod files;
 mod inbound;
 pub mod picture;
 mod sync;
