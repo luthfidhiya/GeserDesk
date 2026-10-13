@@ -147,8 +147,11 @@ opened. See *Daemon and controllers* below.
  geserdesk stop      ┘     (JSON, one line each)     (network, TLS, capture, injection)
 ```
 
-* `geserdesk server --config ...` **is** a daemon: the same server as always, plus a
-  control channel. `--no-control` turns the channel off.
+* `geserdesk server --config ...` and `geserdesk client ...` **are** daemons: the same
+  server and client as always, plus a control channel. There is no way to run either
+  without it, so a session started from a terminal can always be attached to by the
+  app and seen by `geserdesk status`. If the channel cannot be opened the command
+  stops and says why (`GESERDESK_RUNTIME_DIR` moves it).
 * The app starts a daemon itself when you press Start and none is running. It lives
   as long as its session: Stop (or a failure) ends it. A daemon nobody gives work to
   leaves after 30 s.
@@ -163,8 +166,9 @@ opened. See *Daemon and controllers* below.
   (isolated runs, tests). A socket path longer than about 100 bytes is refused.
 * A controller of another protocol version may only read `Info` and send `Shutdown`,
   so an old daemon can always be ended after an upgrade; the app offers a button.
-* `geserdesk client` is not part of this yet: its extra flags do not map onto the
-  channel, so the app cannot attach to a client started from the CLI.
+* A client started from the terminal still asks `Trust this server? [y/N]` there (or
+  takes `--server-fingerprint`); the app attached to it is not asked as well, so a
+  question never has two answerers.
 * The app's daemon writes its output to `daemon.log` next to the identity files.
 
 ## Security
