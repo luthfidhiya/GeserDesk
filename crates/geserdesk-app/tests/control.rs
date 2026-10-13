@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use geserdesk_app::control::wire::{encode, read_line, Command, Request, ToController};
-use geserdesk_app::control::{ConnectError, Endpoint, Event, StartSpec, PROTOCOL};
+use geserdesk_app::control::{ClientOptions, ConnectError, Endpoint, Event, StartSpec, PROTOCOL};
 use geserdesk_app::daemon::{run, DaemonOptions};
 use geserdesk_app::{LogBuffer, Mode, Remote, Status};
-use geserdesk_proto::Point;
+use geserdesk_proto::{Point, Rect};
+use geserdesk_server::{run_server_with, Config};
 use interprocess::local_socket::traits::tokio::Stream as _;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::task::JoinHandle;
@@ -151,7 +152,10 @@ async fn a_controller_of_another_protocol_can_only_read_info_and_shut_down() {
     .await
     .unwrap();
     let hello = read_line(&mut recv).await.unwrap().unwrap();
-    assert!(hello.contains("\"protocol\":1"), "{hello}");
+    assert!(
+        hello.contains(&format!("\"protocol\":{PROTOCOL}")),
+        "{hello}"
+    );
     send.write_all(say(2, Command::Status).as_bytes())
         .await
         .unwrap();
@@ -411,4 +415,120 @@ async fn shutdown_stops_the_session_and_ends_the_daemon() {
     }
     assert!(saw_closing);
     assert!(remote.status().await.is_err());
+}
+
+/// A plain-TCP server in this process for a client session to connect to.
+/// Returns its address, a way to stop it, and its desk.
+async fn local_server() -> (
+    String,
+    tokio::sync::watch::Sender<bool>,
+    std::sync::Arc<geserdesk_server::DeskState>,
+) {
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let config = Config::parse(&format!(
+        "[server]\nlisten = \"127.0.0.1:{port}\"\nscreen = \"linux-pc\"\ntls = false\n\n\
+         [[screens]]\nname = \"linux-pc\"\n\n[[screens]]\nname = \"win\"\n"
+    ))
+    .unwrap();
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(run_server_with(config, false, shutdown, Some(ready_tx)));
+    let desk = timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .expect("the server came up")
+        .unwrap();
+    // The listener is bound just after the desk is handed over.
+    sleep(Duration::from_millis(100)).await;
+    (format!("127.0.0.1:{port}"), stop, desk)
+}
+
+fn plain_client(server: &str, reconnect: bool) -> StartSpec {
+    StartSpec::Client(ClientOptions {
+        server: server.into(),
+        name: "win".into(),
+        log_only: true,
+        reconnect,
+        tls: false,
+        monitors: Some(vec![Rect::new(0, 0, 1280, 1024)]),
+        ..ClientOptions::default()
+    })
+}
+
+#[tokio::test]
+async fn a_client_runs_through_the_channel_and_reports_its_forced_monitors() {
+    let dir = scratch("client");
+    let (addr, stop, desk) = local_server().await;
+    let (endpoint, _daemon) = start_daemon(&dir, false).await;
+    let remote = Remote::connect(&endpoint).await.unwrap();
+
+    remote.start(plain_client(&addr, true)).await.unwrap();
+    assert_eq!(
+        remote.refresh_info().await.unwrap().mode,
+        Some(Mode::Client)
+    );
+    until(|| async { (remote.status().await.unwrap() == Status::Connected).then_some(()) }).await;
+
+    // The server sees the machine with the monitors the options forced, not detected ones.
+    let win = desk
+        .snapshot()
+        .screens
+        .into_iter()
+        .find(|s| s.name == "win")
+        .unwrap();
+    assert!(win.connected);
+    assert_eq!(win.monitors, vec![Rect::new(0, 0, 1280, 1024)]);
+
+    // A client keeps trying while the server is away, and a second start is refused.
+    assert!(remote.start(plain_client(&addr, true)).await.is_err());
+    let _ = stop.send(true);
+    until(|| async { matches!(remote.status().await.unwrap(), Status::Retrying(_)).then_some(()) })
+        .await;
+    remote.stop().await.unwrap();
+    assert_eq!(remote.status().await.unwrap(), Status::Stopped);
+}
+
+#[tokio::test]
+async fn a_client_without_reconnect_ends_with_its_connection() {
+    let dir = scratch("oneshot");
+    let (addr, stop, _desk) = local_server().await;
+    let (endpoint, daemon) = start_daemon(&dir, true).await;
+    let remote = Remote::connect(&endpoint).await.unwrap();
+    remote.start(plain_client(&addr, false)).await.unwrap();
+    until(|| async { (remote.status().await.unwrap() == Status::Connected).then_some(()) }).await;
+
+    let _ = stop.send(true);
+    // The daemon was told to leave with its session, and it does.
+    let result = timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("the daemon ended after the connection did")
+        .unwrap();
+    // The server said goodbye, so this is a clean end (exit code 0), as `--no-reconnect` always was.
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test]
+async fn a_client_that_cannot_reach_the_server_without_reconnect_fails_the_daemon() {
+    let dir = scratch("refused");
+    // Nothing listens on this port.
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    let (endpoint, daemon) = start_daemon(&dir, true).await;
+    let remote = Remote::connect(&endpoint).await.unwrap();
+    remote
+        .start(plain_client(&format!("127.0.0.1:{port}"), false))
+        .await
+        .unwrap();
+    let result = timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("the daemon ended")
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "an unreachable server is reported as a failure"
+    );
 }

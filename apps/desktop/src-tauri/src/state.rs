@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use geserdesk_app::control::{ConnectError, Info, StartSpec};
-use geserdesk_app::settings::{config_dir, with_default_port};
+use geserdesk_app::settings::config_dir;
 use geserdesk_app::{Endpoint, Mode, Remote, Settings, Status};
 use serde::Serialize;
 use tokio::sync::Notify;
@@ -42,11 +42,7 @@ pub struct AppState {
 /// What `Start` asks the daemon to run for `settings`.
 pub fn spec_for(settings: &Settings) -> StartSpec {
     match settings.mode {
-        Mode::Client => StartSpec::Client {
-            server: with_default_port(&settings.client.server),
-            name: settings.client.name.trim().to_string(),
-            log_only: settings.client.log_only,
-        },
+        Mode::Client => StartSpec::Client((&settings.client).into()),
         Mode::Server => StartSpec::Server {
             config: settings.server.config.trim().to_string(),
             // For testing the app without it taking over this machine's input.

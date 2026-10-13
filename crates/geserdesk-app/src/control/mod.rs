@@ -14,4 +14,4 @@ pub mod wire;
 
 pub use remote::{ConnectError, Remote};
 pub use transport::Endpoint;
-pub use wire::{Command, Event, Info, Reply, StartSpec, PROTOCOL};
+pub use wire::{ClientOptions, Command, Event, Info, Reply, StartSpec, PROTOCOL};

@@ -18,7 +18,7 @@ pub mod session;
 pub mod settings;
 pub mod trust;
 
-pub use control::{Endpoint, Remote};
+pub use control::{ClientOptions, Endpoint, Remote};
 pub use geserdesk_server::{DeskSnapshot, DeskState};
 pub use log::{BufferLayer, LogBuffer, LogLine};
 pub use session::{Session, Status};

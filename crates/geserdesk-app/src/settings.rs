@@ -86,6 +86,17 @@ impl Default for ServerSettings {
     }
 }
 
+impl From<&ClientSettings> for crate::control::ClientOptions {
+    fn from(s: &ClientSettings) -> Self {
+        Self {
+            server: with_default_port(&s.server),
+            name: s.name.trim().to_string(),
+            log_only: s.log_only,
+            ..Self::default()
+        }
+    }
+}
+
 /// This machine's name, as a starting point for the screen name.
 pub fn hostname() -> String {
     // GUI programs rarely inherit $HOSTNAME on Linux, so fall back to the file.

@@ -9,13 +9,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
+use geserdesk_client::ServerTrust;
 use geserdesk_server::Config;
 use tokio::runtime::Handle;
 use tokio::time::{interval, sleep};
 use tracing::info;
 
 use crate::control::service::{wait_closed, Service};
-use crate::control::{Endpoint, StartSpec};
+use crate::control::{ClientOptions, Endpoint};
 use crate::log::LogBuffer;
 use crate::session::{Session, Status};
 
@@ -24,14 +25,15 @@ const LINGER: Duration = Duration::from_secs(1);
 /// Time for controllers to receive the closing event before the process ends.
 const FAREWELL: Duration = Duration::from_millis(300);
 
-/// What to run as soon as the daemon is up.
+/// What to run as soon as the daemon is up (the CLI starts it with its own flags).
 pub enum Initial {
-    /// A server from a config the caller already prepared (the CLI applies its flags).
-    Server {
-        config: Box<Config>,
-        capture: bool,
+    /// A server from a config the caller already prepared.
+    Server { config: Box<Config>, capture: bool },
+    /// A client; `trust` replaces the default "ask the controller" when given.
+    Client {
+        options: Box<ClientOptions>,
+        trust: Option<Arc<dyn ServerTrust>>,
     },
-    Spec(StartSpec),
 }
 
 pub struct DaemonOptions {
@@ -64,7 +66,9 @@ pub async fn run(opts: DaemonOptions, log: LogBuffer) -> anyhow::Result<()> {
         Some(Initial::Server { config, capture }) => session
             .start_server_config(*config, capture)
             .map_err(|e| anyhow!(e))?,
-        Some(Initial::Spec(spec)) => service.start(spec).map_err(|e| anyhow!(e))?,
+        Some(Initial::Client { options, trust }) => session
+            .start_client_options(&options, trust)
+            .map_err(|e| anyhow!(e))?,
         None => {}
     }
     info!(dir = %opts.endpoint.dir().display(), "daemon ready for controllers");
@@ -72,7 +76,6 @@ pub async fn run(opts: DaemonOptions, log: LogBuffer) -> anyhow::Result<()> {
     let serving = tokio::spawn(Arc::clone(&service).serve(bound));
     let mut closing = service.closing();
     let started = Instant::now();
-    let mut was_running = session.is_running();
     let mut ended_at: Option<Instant> = None;
     let mut tick = interval(Duration::from_millis(500));
 
@@ -87,9 +90,10 @@ pub async fn run(opts: DaemonOptions, log: LogBuffer) -> anyhow::Result<()> {
             _ = wait_closed(&mut closing) => break,
             _ = tick.tick() => {
                 if session.is_running() {
-                    was_running = true;
                     ended_at = None;
-                } else if was_running {
+                } else if session.sessions_started() > 0 {
+                    // One was started and is over (it may have been over before the
+                    // first look, e.g. a server that refused the connection at once).
                     if opts.exit_on_stop {
                         let since = *ended_at.get_or_insert_with(Instant::now);
                         if since.elapsed() >= LINGER {

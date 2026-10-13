@@ -2,13 +2,14 @@
 //! Starting and stopping the client or the server on a runtime, and the state a
 //! front end shows about them.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use geserdesk_client::{
-    connect_with_status, ClientConfig, ClientStatus, ClientTls, InputSink, KnownServers, NullSink,
-    ReconnectPolicy, DEFAULT_HANDSHAKE_TIMEOUT,
+    connect_observed, connect_with_status, ClientConfig, ClientStatus, ClientTls, InputSink,
+    KnownServers, NullSink, ReconnectPolicy, ServerTrust, DEFAULT_HANDSHAKE_TIMEOUT,
 };
 use geserdesk_server::{Config, DeskState};
 use geserdesk_tls::Identity;
@@ -18,7 +19,8 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::settings::{config_dir, with_default_port, ClientSettings, Mode, ServerSettings};
+use crate::control::ClientOptions;
+use crate::settings::{config_dir, with_default_port, Mode, ServerSettings};
 use crate::trust::{PromptSlot, PromptTrust, TrustPrompt};
 
 /// How long a server gets to close its sessions and release the keyboard and
@@ -81,6 +83,7 @@ pub struct Session {
     status: watch::Sender<Status>,
     prompt: Arc<PromptSlot>,
     running: Mutex<Option<Running>>,
+    started: AtomicU64,
     desk: Mutex<Option<Arc<DeskState>>>,
 }
 
@@ -91,6 +94,7 @@ impl Session {
             status: watch::channel(Status::Stopped).0,
             prompt: PromptSlot::new(),
             running: Mutex::new(None),
+            started: AtomicU64::new(0),
             desk: Mutex::new(None),
         })
     }
@@ -124,6 +128,12 @@ impl Session {
         running.is_some()
     }
 
+    /// How many sessions have been started, however briefly they lasted. Lets a
+    /// watcher tell "never started" from "started and already over".
+    pub fn sessions_started(&self) -> u64 {
+        self.started.load(Ordering::SeqCst)
+    }
+
     /// Which kind of session is up, if any.
     pub fn mode(&self) -> Option<Mode> {
         if !self.is_running() {
@@ -144,45 +154,32 @@ impl Session {
         self.status.send_replace(status);
     }
 
-    pub fn start_client(self: &Arc<Self>, s: &ClientSettings) -> Result<(), String> {
+    /// Start a client. `trust` decides which servers to believe: `None` asks
+    /// whichever controller is attached (the "trust this server?" question); the
+    /// CLI passes its own, which asks on the terminal.
+    pub fn start_client_options(
+        self: &Arc<Self>,
+        opts: &ClientOptions,
+        trust: Option<Arc<dyn ServerTrust>>,
+    ) -> Result<(), String> {
         if self.is_running() {
             return Err("Sudah berjalan. Hentikan dulu.".into());
         }
-        let server = with_default_port(&s.server);
-        if server.is_empty() {
-            return Err("Isi alamat server dulu (contoh 192.168.100.10).".into());
-        }
-        let name = s.name.trim().to_string();
-        if name.is_empty() {
-            return Err("Isi nama layar komputer ini.".into());
-        }
-        let dir = config_dir().ok_or("tidak ada direktori konfigurasi pengguna")?;
-        let identity = Identity::load_or_create(&dir.join("client-identity.pem"), &name)
-            .map_err(|e| format!("identitas TLS: {e}"))?;
-        info!(fingerprint = %identity.fingerprint(), "this computer's certificate (shown on the server when asking to approve it)");
-
         geserdesk_platform::init_process();
-        let monitors = geserdesk_platform::monitors().unwrap_or_default();
-        for (i, m) in monitors.iter().enumerate() {
-            info!(index = i, x = m.x, y = m.y, w = m.w, h = m.h, "monitor");
-        }
-        let cfg = ClientConfig {
-            server: server.clone(),
-            name: name.clone(),
-            monitors,
-            detect: Some(|| geserdesk_platform::monitors().ok()),
-            tls: Some(ClientTls {
-                identity: Arc::new(identity),
-                trust: Arc::new(PromptTrust {
-                    known: KnownServers::in_dir(&dir),
-                    slot: Arc::clone(&self.prompt),
-                }),
-            }),
-            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-        };
-        let log_only = s.log_only;
+        let slot = Arc::clone(&self.prompt);
+        let cfg = client_config(opts, |dir| {
+            trust.unwrap_or_else(|| {
+                Arc::new(PromptTrust {
+                    known: KnownServers::in_dir(dir),
+                    slot,
+                })
+            })
+        })?;
+        let log_only = opts.log_only;
+        let reconnect = opts.reconnect;
         let this = Arc::clone(self);
-        info!(%server, %name, "starting client");
+        info!(server = %cfg.server, name = %cfg.name, reconnect, "starting client");
+        self.started.fetch_add(1, Ordering::SeqCst);
         self.set(Status::Connecting);
 
         let task = self.rt.spawn(async move {
@@ -202,9 +199,24 @@ impl Session {
                 let this = Arc::clone(&this);
                 move |st: ClientStatus| this.set(st.into())
             };
-            // Only returns for an error that retrying cannot fix.
-            let fatal = connect_with_status(&cfg, sink, ReconnectPolicy::default(), &report).await;
-            error!(error = %fatal, "client stopped");
+            if reconnect {
+                // Only returns for an error that retrying cannot fix.
+                let fatal =
+                    connect_with_status(&cfg, sink, ReconnectPolicy::default(), &report).await;
+                error!(error = %fatal, "client stopped");
+            } else {
+                // One connection: a clean end is a stop, anything else is a failure.
+                match connect_observed(&cfg, sink, &report).await {
+                    Ok(()) => {
+                        info!("disconnected from the server");
+                        this.set(Status::Stopped);
+                    }
+                    Err(e) => {
+                        error!(error = %e, "client stopped");
+                        this.set(Status::Fatal(e.to_string()));
+                    }
+                }
+            }
         });
         *self.running.lock().unwrap() = Some(Running::Client(task));
         Ok(())
@@ -228,6 +240,7 @@ impl Session {
         if self.is_running() {
             return Err("Sudah berjalan. Hentikan dulu.".into());
         }
+        self.started.fetch_add(1, Ordering::SeqCst);
         self.set(Status::ServerRunning);
 
         let (stop, shutdown) = watch::channel(false);
@@ -280,6 +293,62 @@ impl Session {
         }
         self.answer_prompt(false); // a question left open would hang its thread
     }
+}
+
+/// The connection settings `opts` ask for. `make_trust` is given the directory
+/// holding this client's identity (and pinned servers) and returns who decides
+/// which servers to trust; it is not called when TLS is off.
+fn client_config(
+    opts: &ClientOptions,
+    make_trust: impl FnOnce(&Path) -> Arc<dyn ServerTrust>,
+) -> Result<ClientConfig, String> {
+    let server = with_default_port(&opts.server);
+    if server.is_empty() {
+        return Err("Isi alamat server dulu (contoh 192.168.100.10).".into());
+    }
+    let name = opts.name.trim().to_string();
+    if name.is_empty() {
+        return Err("Isi nama layar komputer ini.".into());
+    }
+
+    let tls = if opts.tls {
+        let dir = opts
+            .identity_dir
+            .clone()
+            .or_else(config_dir)
+            .ok_or("tidak ada direktori konfigurasi pengguna")?;
+        let identity = Identity::load_or_create(&dir.join("client-identity.pem"), &name)
+            .map_err(|e| format!("identitas TLS: {e}"))?;
+        info!(fingerprint = %identity.fingerprint(), "this computer's certificate (shown on the server when asking to approve it)");
+        Some(ClientTls {
+            identity: Arc::new(identity),
+            trust: make_trust(&dir),
+        })
+    } else {
+        warn!("TLS is OFF: this connection is neither encrypted nor verified");
+        None
+    };
+
+    let monitors = match &opts.monitors {
+        Some(forced) => forced.clone(),
+        None => geserdesk_platform::monitors().unwrap_or_default(),
+    };
+    for (i, m) in monitors.iter().enumerate() {
+        info!(index = i, x = m.x, y = m.y, w = m.w, h = m.h, "monitor");
+    }
+    Ok(ClientConfig {
+        server,
+        name,
+        monitors,
+        // A forced list is not re-detected.
+        detect: if opts.monitors.is_some() {
+            None
+        } else {
+            Some(|| geserdesk_platform::monitors().ok())
+        },
+        tls,
+        handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+    })
 }
 
 /// The sink that really moves this machine's pointer and presses its keys.
@@ -338,28 +407,101 @@ mod tests {
         );
     }
 
+    struct Nobody;
+    impl ServerTrust for Nobody {
+        fn pinned(&self, _: &str) -> Option<geserdesk_tls::Fingerprint> {
+            None
+        }
+        fn confirm_new(&self, _: &str, _: &geserdesk_tls::Fingerprint) -> bool {
+            false
+        }
+    }
+
+    fn nobody(_: &Path) -> Arc<dyn ServerTrust> {
+        Arc::new(Nobody)
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gd-sess-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     #[tokio::test]
     async fn a_client_needs_an_address_and_a_name() {
         let s = session();
-        let blank_address = ClientSettings {
+        let blank_address = ClientOptions {
             server: "  ".into(),
-            ..ClientSettings::default()
+            ..ClientOptions::default()
         };
         assert!(s
-            .start_client(&blank_address)
+            .start_client_options(&blank_address, None)
             .unwrap_err()
             .contains("alamat server"));
-        let blank_name = ClientSettings {
+        let blank_name = ClientOptions {
             server: "10.0.0.2".into(),
             name: " ".into(),
-            ..ClientSettings::default()
+            ..ClientOptions::default()
         };
         assert!(s
-            .start_client(&blank_name)
+            .start_client_options(&blank_name, None)
             .unwrap_err()
             .contains("nama layar"));
         assert!(!s.is_running());
         assert_eq!(s.status(), Status::Stopped);
+    }
+
+    #[test]
+    fn options_become_the_connection_settings_they_ask_for() {
+        // TLS off: no identity, no trust, and the trust maker is never asked.
+        let plain = ClientOptions {
+            server: "10.0.0.2".into(),
+            name: " win ".into(),
+            tls: false,
+            ..ClientOptions::default()
+        };
+        let cfg = client_config(&plain, |_| panic!("no trust is needed without TLS")).unwrap();
+        assert!(cfg.tls.is_none());
+        assert_eq!(cfg.server, "10.0.0.2:24810", "the default port is added");
+        assert_eq!(cfg.name, "win");
+        assert!(cfg.detect.is_some(), "monitors are re-detected by default");
+
+        // Forced monitors are reported as given and never re-detected.
+        let forced = ClientOptions {
+            monitors: Some(vec![geserdesk_proto::Rect::new(0, 0, 1280, 1024)]),
+            ..plain.clone()
+        };
+        let cfg = client_config(&forced, nobody).unwrap();
+        assert_eq!(
+            cfg.monitors,
+            vec![geserdesk_proto::Rect::new(0, 0, 1280, 1024)]
+        );
+        assert!(cfg.detect.is_none());
+    }
+
+    #[test]
+    fn tls_uses_the_identity_directory_it_is_given() {
+        let dir = temp_dir("identity");
+        let opts = ClientOptions {
+            server: "10.0.0.2:1".into(),
+            name: "win".into(),
+            identity_dir: Some(dir.clone()),
+            monitors: Some(Vec::new()),
+            ..ClientOptions::default()
+        };
+        let mut seen = None;
+        let cfg = client_config(&opts, |d| {
+            seen = Some(d.to_path_buf());
+            Arc::new(Nobody)
+        })
+        .unwrap();
+        assert!(cfg.tls.is_some());
+        assert_eq!(
+            seen,
+            Some(dir.clone()),
+            "the trust maker gets the same directory"
+        );
+        assert!(dir.join("client-identity.pem").exists());
     }
 
     #[tokio::test]

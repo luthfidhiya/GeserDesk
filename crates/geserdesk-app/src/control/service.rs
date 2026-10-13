@@ -16,7 +16,6 @@ use super::wire::{
 };
 use crate::log::{LogBuffer, LogLine};
 use crate::session::{Session, Status};
-use crate::settings::ClientSettings;
 use crate::trust::TrustPrompt;
 
 /// How long a new connection has to say who it is.
@@ -274,15 +273,7 @@ impl Service {
     /// Start the session `spec` describes.
     pub fn start(&self, spec: StartSpec) -> Result<(), String> {
         match spec {
-            StartSpec::Client {
-                server,
-                name,
-                log_only,
-            } => self.session.start_client(&ClientSettings {
-                server,
-                name,
-                log_only,
-            }),
+            StartSpec::Client(options) => self.session.start_client_options(&options, None),
             StartSpec::Server { config, capture } => {
                 let path = std::path::PathBuf::from(config.trim());
                 let config = geserdesk_server::Config::load(&path)

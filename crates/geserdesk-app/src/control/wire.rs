@@ -7,8 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::io;
+use std::path::PathBuf;
 
-use geserdesk_proto::Point;
+use geserdesk_proto::{Point, Rect};
 use geserdesk_server::DeskSnapshot;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
@@ -20,21 +21,54 @@ use crate::trust::TrustPrompt;
 
 /// Bumped when the messages change shape. A daemon outlives the app that
 /// started it, so the two can disagree after an upgrade.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// Longest line either side accepts, so a stray peer cannot make us buffer
 /// without end.
 pub const MAX_LINE: usize = 4 * 1024 * 1024;
 
+/// Everything that can be asked of a client, whoever starts it (the app or the CLI).
+/// A field left out takes its default, so new options can be added without breaking
+/// older senders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientOptions {
+    /// `host:port` of the server.
+    pub server: String,
+    /// This machine's screen name; must match the server's config.
+    pub name: String,
+    /// Log input instead of injecting it.
+    pub log_only: bool,
+    /// Connect again when the link drops (off: end after the first connection).
+    pub reconnect: bool,
+    /// Encrypt and verify the server (off only for debugging).
+    pub tls: bool,
+    /// Where this client's identity and pinned servers live (default: the
+    /// per-user configuration directory).
+    pub identity_dir: Option<PathBuf>,
+    /// Report these monitors instead of detecting them (VMs, testing).
+    pub monitors: Option<Vec<Rect>>,
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            name: String::new(),
+            log_only: false,
+            reconnect: true,
+            tls: true,
+            identity_dir: None,
+            monitors: None,
+        }
+    }
+}
+
 /// What to run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StartSpec {
-    Client {
-        server: String,
-        name: String,
-        log_only: bool,
-    },
+    Client(ClientOptions),
     Server {
         config: String,
         /// Capture this machine's keyboard and mouse (off: network side only).
@@ -216,11 +250,15 @@ mod tests {
             Command::ClearLog,
             Command::Subscribe,
             Command::Start {
-                spec: StartSpec::Client {
+                spec: StartSpec::Client(ClientOptions {
                     server: "h:1".into(),
                     name: "n".into(),
                     log_only: true,
-                },
+                    reconnect: false,
+                    tls: false,
+                    identity_dir: Some("/tmp/id".into()),
+                    monitors: Some(vec![Rect::new(0, 0, 1280, 1024)]),
+                }),
             },
         ];
         for cmd in all {
@@ -231,6 +269,21 @@ mod tests {
             let back: Request = serde_json::from_str(line.trim()).unwrap();
             assert_eq!(back.cmd, cmd, "{line}");
         }
+    }
+
+    #[test]
+    fn client_options_left_out_take_their_defaults() {
+        let spec: StartSpec =
+            serde_json::from_str(r#"{"kind":"client","server":"h:1","name":"n"}"#).unwrap();
+        let StartSpec::Client(opts) = spec else {
+            panic!("not a client");
+        };
+        assert_eq!(opts.server, "h:1");
+        assert!(
+            opts.reconnect && opts.tls,
+            "retry and TLS are on unless turned off"
+        );
+        assert!(!opts.log_only && opts.identity_dir.is_none() && opts.monitors.is_none());
     }
 
     #[test]
