@@ -17,14 +17,13 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use geserdesk_clipboard::ClipboardSync;
 use geserdesk_platform::{CaptureCmd, CaptureEvent, CaptureHandle};
 use geserdesk_proto::{Edge, ModMask, MouseEvent, Point, Rect, ServerMsg};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
 use crate::desk::{effective_origins, inset_clamp, nearest_point, DEFAULT_SIZE};
-use crate::files::{self, FileRouter, Owner};
+use crate::files::{self, LocalFiles, Owner};
 use crate::hub::{Hub, HubEvent};
 use crate::layout::{Decision, Layout, SwitchPolicy, SwitchState};
 
@@ -480,17 +479,16 @@ pub async fn run(
     run_shared(core, hub, capture, capture_events, hub_events, None).await
 }
 
-/// [`run`], and when `files` is given (a [`FileRouter`], this server's own
-/// clipboard, whether sharing files is on, and the byte limit), pulls a
-/// client's files onto this server's own clipboard whenever the cursor
-/// returns here from a screen that currently owns some.
+/// [`run`], and when `files` is given, pulls a client's files onto this
+/// server's own clipboard whenever the cursor returns here from a screen that
+/// currently owns some.
 pub async fn run_shared(
     mut core: Core,
     hub: Arc<Hub>,
     capture: CaptureHandle,
     mut capture_events: UnboundedReceiver<CaptureEvent>,
     mut hub_events: UnboundedReceiver<HubEvent>,
-    files: Option<(Arc<FileRouter>, ClipboardSync, bool, u64)>,
+    files: Option<LocalFiles>,
 ) {
     let started = Instant::now();
     let mut last_pulled_seq: Option<u64> = None;
@@ -537,17 +535,18 @@ pub async fn run_shared(
         // The cursor just came back to this machine's own screen: if some
         // other screen currently owns files, pull them for a paste here.
         if was_remote && core.active_remote().is_none() {
-            if let Some((router, sync, true, max_bytes)) = &files {
-                if let Some((Owner::Client(_), seq, manifest)) = router.current() {
+            if let Some(lf) = files.as_ref().filter(|lf| lf.enabled) {
+                if let Some((Owner::Client(_), seq, manifest)) = lf.router.current() {
                     if last_pulled_seq != Some(seq) {
                         last_pulled_seq = Some(seq);
                         files::spawn_local_pull(
-                            Arc::clone(router),
-                            sync.clone(),
+                            Arc::clone(&lf.router),
+                            lf.sync.clone(),
                             seq,
                             manifest,
                             files::staging_dir(seq),
-                            *max_bytes,
+                            lf.max_bytes,
+                            lf.progress.clone(),
                         );
                     }
                 }

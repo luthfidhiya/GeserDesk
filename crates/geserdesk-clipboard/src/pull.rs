@@ -47,6 +47,22 @@ pub struct Progress {
     pub bytes_total: u64,
 }
 
+/// A whole pull's lifecycle, for a front end to show: zero or more [`Progress`]
+/// reports, then exactly one of `Done` or `Failed`. [`pull_with_progress`]
+/// itself only ever reports `Progress`; a caller that drives a pull to
+/// completion (`geserdesk_client::files::spawn_pull` and its server-side
+/// equivalent) reports `Done`/`Failed` once the result is known.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PullEvent {
+    Progress(Progress),
+    Done,
+    Failed(String),
+}
+
+/// Where a pull's lifecycle goes, for a front end to show. Whoever starts a
+/// client or server builds this; pulling itself only ever calls it.
+pub type ProgressSink = std::sync::Arc<dyn Fn(PullEvent) + Send + Sync>;
+
 /// Pull every file in `manifest` into a fresh `dest` (created if needed) and
 /// return the *top-level* paths under it -- what a paste of the original copy
 /// should paste, folders included but their contents not repeated. Refuses to

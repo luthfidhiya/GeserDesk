@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use geserdesk_clipboard::pull::{ProgressSink, PullEvent};
 use geserdesk_clipboard::{effective_files_max, pull, ClipboardSync};
 use geserdesk_proto::clipboard::{FileManifest, FileReadError, FileReadResult};
 use geserdesk_proto::ClientMsg;
@@ -94,13 +95,26 @@ pub fn spawn_pull(
     manifest: FileManifest,
     dest: PathBuf,
     files_max_bytes: u64,
+    on_progress: Option<ProgressSink>,
 ) {
     tokio::spawn(async move {
         let max = effective_files_max(files_max_bytes);
-        let result = pull::pull(&manifest, &dest, max, |index, offset, len| {
-            let channel = channel.clone();
-            async move { channel.read(seq, index, offset, len).await }
-        })
+        let progress_sink = on_progress.clone();
+        let result = pull::pull_with_progress(
+            &manifest,
+            &dest,
+            max,
+            seq,
+            |index, offset, len| {
+                let channel = channel.clone();
+                async move { channel.read(seq, index, offset, len).await }
+            },
+            move |p| {
+                if let Some(cb) = &progress_sink {
+                    cb(PullEvent::Progress(p));
+                }
+            },
+        )
         .await;
         match result {
             Ok(top) => {
@@ -110,9 +124,21 @@ pub fn spawn_pull(
                 );
                 if let Err(e) = sync.apply_files(top).await {
                     warn!(error = %e, "could not set the clipboard to the pulled files");
+                    if let Some(cb) = &on_progress {
+                        cb(PullEvent::Failed(e.to_string()));
+                    }
+                    return;
+                }
+                if let Some(cb) = &on_progress {
+                    cb(PullEvent::Done);
                 }
             }
-            Err(e) => warn!(error = %e, "could not pull files from the server"),
+            Err(e) => {
+                warn!(error = %e, "could not pull files from the server");
+                if let Some(cb) = &on_progress {
+                    cb(PullEvent::Failed(e.to_string()));
+                }
+            }
         }
     });
 }
@@ -191,7 +217,7 @@ mod tests {
             }],
         };
 
-        spawn_pull(channel.clone(), sync, 4242, manifest, dest.clone(), 0);
+        spawn_pull(channel.clone(), sync, 4242, manifest, dest.clone(), 0, None);
         let sent = tokio::time::timeout(Duration::from_secs(2), rx.0.recv())
             .await
             .unwrap()
@@ -208,6 +234,61 @@ mod tests {
         }
         assert_eq!(mem.files(), Some(vec![dest.join("f.txt")]));
         assert_eq!(std::fs::read(dest.join("f.txt")).unwrap(), b"abc");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn a_pull_reports_its_progress_tagged_with_seq() {
+        let mem = geserdesk_clipboard::MemoryClipboard::new();
+        let sync = ClipboardSync::new(mem);
+        let (channel, mut rx) = FileChannel::new();
+        let dest = staging_dir(99).join(std::process::id().to_string());
+        let _ = std::fs::remove_dir_all(&dest);
+        let manifest = FileManifest {
+            entries: vec![FileEntry {
+                path: "f.txt".into(),
+                size: 3,
+                dir: false,
+            }],
+        };
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let sink: ProgressSink = Arc::new(move |p| seen2.lock().unwrap().push(p));
+        spawn_pull(
+            channel.clone(),
+            sync,
+            99,
+            manifest,
+            dest.clone(),
+            0,
+            Some(sink),
+        );
+
+        let req = match tokio::time::timeout(Duration::from_secs(2), rx.0.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            ClientMsg::FileRead { req, .. } => req,
+            other => panic!("unexpected {other:?}"),
+        };
+        channel.reply(req, FileReadResult::Data(b"abc".to_vec()));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while seen.lock().unwrap().len() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        match &seen[0] {
+            PullEvent::Progress(p) => {
+                assert_eq!(p.seq, 99);
+                assert_eq!(p.bytes_done, 3);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(seen[1], PullEvent::Done);
         let _ = std::fs::remove_dir_all(&dest);
     }
 }

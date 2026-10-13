@@ -241,6 +241,17 @@ impl FileRouter {
     }
 }
 
+/// What [`crate::router::run_shared`] needs to pull a client owner's files for
+/// this server's own screen when the cursor returns home.
+#[derive(Clone)]
+pub struct LocalFiles {
+    pub router: Arc<FileRouter>,
+    pub sync: ClipboardSync,
+    pub enabled: bool,
+    pub max_bytes: u64,
+    pub progress: Option<pull::ProgressSink>,
+}
+
 /// Where this server stages files pulled for its own screen, one folder per
 /// transfer. Kept apart from a client's own staging folder (same name, but
 /// never the same machine) so testing both sides in one process cannot clash.
@@ -262,13 +273,26 @@ pub fn spawn_local_pull(
     manifest: FileManifest,
     dest: PathBuf,
     files_max_bytes: u64,
+    on_progress: Option<pull::ProgressSink>,
 ) {
     tokio::spawn(async move {
         let max = effective_files_max(files_max_bytes);
-        let result = pull::pull(&manifest, &dest, max, |index, offset, len| {
-            let router = Arc::clone(&router);
-            async move { router.request_local(seq, index, offset, len).await }
-        })
+        let progress_sink = on_progress.clone();
+        let result = pull::pull_with_progress(
+            &manifest,
+            &dest,
+            max,
+            seq,
+            |index, offset, len| {
+                let router = Arc::clone(&router);
+                async move { router.request_local(seq, index, offset, len).await }
+            },
+            move |p| {
+                if let Some(cb) = &progress_sink {
+                    cb(pull::PullEvent::Progress(p));
+                }
+            },
+        )
         .await;
         match result {
             Ok(top) => {
@@ -278,9 +302,21 @@ pub fn spawn_local_pull(
                 );
                 if let Err(e) = sync.apply_files(top).await {
                     warn!(error = %e, "could not set the clipboard to the pulled files");
+                    if let Some(cb) = &on_progress {
+                        cb(pull::PullEvent::Failed(e.to_string()));
+                    }
+                    return;
+                }
+                if let Some(cb) = &on_progress {
+                    cb(pull::PullEvent::Done);
                 }
             }
-            Err(e) => warn!(error = %e, "could not pull files for this screen"),
+            Err(e) => {
+                warn!(error = %e, "could not pull files for this screen");
+                if let Some(cb) = &on_progress {
+                    cb(pull::PullEvent::Failed(e.to_string()));
+                }
+            }
         }
     });
 }
@@ -508,7 +544,15 @@ mod tests {
         let dest = staging_dir(424_242);
         let _ = std::fs::remove_dir_all(&dest);
 
-        spawn_local_pull(Arc::clone(&router), sync, 1, manifest, dest.clone(), 0);
+        spawn_local_pull(
+            Arc::clone(&router),
+            sync,
+            1,
+            manifest,
+            dest.clone(),
+            0,
+            None,
+        );
 
         let forwarded = tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
             .await
@@ -526,6 +570,63 @@ mod tests {
         }
         assert_eq!(mem.files(), Some(vec![dest.join("f.txt")]));
         assert_eq!(std::fs::read(dest.join("f.txt")).unwrap(), b"abc");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn a_local_pull_reports_progress_then_done() {
+        use geserdesk_clipboard::pull::PullEvent;
+        use geserdesk_clipboard::MemoryClipboard;
+        use geserdesk_proto::clipboard::FileEntry;
+        use std::time::Duration;
+
+        let hub = Hub::new();
+        let mut owner_client = hub.register("b", mons()).unwrap();
+        let router = FileRouter::new(Arc::clone(&hub));
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
+
+        let sync = ClipboardSync::new(MemoryClipboard::new());
+        let manifest = FileManifest {
+            entries: vec![FileEntry {
+                path: "f.txt".into(),
+                size: 3,
+                dir: false,
+            }],
+        };
+        let dest = staging_dir(424_243);
+        let _ = std::fs::remove_dir_all(&dest);
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let sink: pull::ProgressSink = Arc::new(move |e| seen2.lock().unwrap().push(e));
+        spawn_local_pull(
+            Arc::clone(&router),
+            sync,
+            1,
+            manifest,
+            dest.clone(),
+            0,
+            Some(sink),
+        );
+
+        let req = match tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            ServerMsg::FileRead { req, .. } => req,
+            other => panic!("unexpected {other:?}"),
+        };
+        router.reply_from_client("b", req, FileReadResult::Data(b"abc".to_vec()));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while seen.lock().unwrap().len() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(matches!(seen[0], PullEvent::Progress(_)));
+        assert_eq!(seen[1], PullEvent::Done);
         let _ = std::fs::remove_dir_all(&dest);
     }
 }

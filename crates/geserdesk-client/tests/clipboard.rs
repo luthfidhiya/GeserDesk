@@ -79,6 +79,7 @@ async fn rig_with(extra_options: &str, connect_a: bool) -> Rig {
         shutdown,
         None,
         Some(Box::new(server.clone())),
+        None,
     ));
     sleep(Duration::from_millis(200)).await;
 
@@ -92,6 +93,7 @@ async fn rig_with(extra_options: &str, connect_a: bool) -> Rig {
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             clipboard: Some(ClipboardSync::new(clip.clone())),
+            transfer_progress: None,
         };
         tokio::spawn(async move { connect(&cfg, NullSink).await });
         clip

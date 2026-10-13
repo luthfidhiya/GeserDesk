@@ -57,7 +57,7 @@ impl std::fmt::Debug for ClientTls {
 }
 
 /// What the client needs to know to connect.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClientConfig {
     /// `host:port` of the server.
     pub server: String,
@@ -80,6 +80,24 @@ pub struct ClientConfig {
     /// This machine's clipboard, to keep equal to the server's. `None` shares
     /// nothing (the server's `clipboard_sharing` option is the other switch).
     pub clipboard: SharedClipboard,
+    /// Where a files pull's progress goes, for a front end to show. `None`
+    /// means nobody is watching; pulling still happens.
+    pub transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
+}
+
+impl std::fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("server", &self.server)
+            .field("name", &self.name)
+            .field("monitors", &self.monitors)
+            .field("detect", &self.detect.is_some())
+            .field("tls", &self.tls.is_some())
+            .field("handshake_timeout", &self.handshake_timeout)
+            .field("clipboard", &self.clipboard)
+            .field("transfer_progress", &self.transfer_progress.is_some())
+            .finish()
+    }
 }
 
 /// The default for [`ClientConfig::handshake_timeout`].
@@ -446,7 +464,12 @@ where
         reported: screen.monitors.clone(),
     };
     let (channel, mut file_rx) = FileChannel::new();
-    let mut clip = ClientClipboard::new(config.clipboard.clone(), connected.options, channel);
+    let mut clip = ClientClipboard::new(
+        config.clipboard.clone(),
+        connected.options,
+        channel,
+        config.transfer_progress.clone(),
+    );
     clip.prime().await;
     session_loop(
         &mut ms,
@@ -481,10 +504,16 @@ struct ClientClipboard {
     /// or another client, relayed) worth pulling when the cursor arrives here.
     remote_files: Option<(u64, FileManifest)>,
     last_pulled_seq: Option<u64>,
+    transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
 }
 
 impl ClientClipboard {
-    fn new(sync: SharedClipboard, options: Options, file_channel: FileChannel) -> Self {
+    fn new(
+        sync: SharedClipboard,
+        options: Options,
+        file_channel: FileChannel,
+        transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
+    ) -> Self {
         Self {
             sync,
             options,
@@ -495,13 +524,14 @@ impl ClientClipboard {
             pending_own_files: None,
             remote_files: None,
             last_pulled_seq: None,
+            transfer_progress,
         }
     }
 
     /// A connection that shares nothing.
     #[cfg(test)]
     fn off(file_channel: FileChannel) -> Self {
-        Self::new(None, Options::default(), file_channel)
+        Self::new(None, Options::default(), file_channel, None)
     }
 
     fn active(&self) -> bool {
@@ -673,6 +703,7 @@ impl ClientClipboard {
             manifest,
             files::staging_dir(seq),
             self.options.clipboard_files_max_bytes,
+            self.transfer_progress.clone(),
         );
     }
 
@@ -1052,6 +1083,7 @@ mod tests {
                 ..Options::default()
             },
             channel,
+            None,
         );
         session_loop(
             &mut client,
@@ -1154,6 +1186,7 @@ mod tests {
                 ..Options::default()
             },
             channel,
+            None,
         );
         clip.prime().await;
         mem.copy_files(vec![dir.join("mine.txt")]); // copied after connecting
@@ -1199,6 +1232,7 @@ mod tests {
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             clipboard: None,
+            transfer_progress: None,
         };
 
         // Run the client briefly; it should handshake and answer a keep-alive.
@@ -1286,6 +1320,7 @@ mod tests {
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             clipboard: None,
+            transfer_progress: None,
         }
     }
 
@@ -1482,6 +1517,7 @@ mod tests {
                 }),
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 clipboard: None,
+                transfer_progress: None,
             }
         }
 
@@ -1604,6 +1640,7 @@ mod tests {
                 // completes, so only the timeout ends this.
                 handshake_timeout: Duration::from_millis(300),
                 clipboard: None,
+                transfer_progress: None,
             };
             let err = tokio::time::timeout(
                 Duration::from_secs(5),
@@ -1674,6 +1711,7 @@ mod tests {
                 }),
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 clipboard: None,
+                transfer_progress: None,
             };
             let err = connect(&config, RecordingSink::default())
                 .await
