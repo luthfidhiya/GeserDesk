@@ -1314,7 +1314,6 @@ dependencies = [
  "clap",
  "geserdesk-app",
  "geserdesk-client",
- "geserdesk-platform",
  "geserdesk-proto",
  "geserdesk-server",
  "geserdesk-tls",

@@ -8,8 +8,9 @@
 //! geserdesk stop          # end it
 //! ```
 //!
-//! `server` also opens a control channel, so the desktop app (or `status` /
-//! `stop`) can attach to it; `--no-control` runs it without one.
+//! `server` and `client` run as the daemon: the same engine the desktop app
+//! uses, with a control channel, so the app (or `status` / `stop`) can attach
+//! to them. There is no way to run either without that channel.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,13 +18,9 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use geserdesk_app::daemon::{DaemonOptions, Initial};
-use geserdesk_app::{BufferLayer, Endpoint, LogBuffer};
-use geserdesk_client::{
-    connect, connect_with_retry, ClientConfig, ClientTls, NullSink, ReconnectPolicy,
-    DEFAULT_HANDSHAKE_TIMEOUT,
-};
+use geserdesk_app::{BufferLayer, ClientOptions, Endpoint, LogBuffer};
 use geserdesk_proto::Rect;
-use geserdesk_server::{serve, serve_with_capture, Config};
+use geserdesk_server::Config;
 use tracing::{info, warn};
 use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -67,9 +64,6 @@ enum Command {
         /// configuration directory).
         #[arg(long)]
         identity_dir: Option<PathBuf>,
-        /// Do not open the control channel the desktop app attaches to.
-        #[arg(long)]
-        no_control: bool,
     },
     /// Show what the running daemon is doing (exit code 1 if none runs).
     Status,
@@ -121,7 +115,6 @@ async fn main() -> anyhow::Result<()> {
             no_capture,
             no_tls,
             identity_dir,
-            no_control,
         } => {
             let mut cfg = Config::load(&config)
                 .with_context(|| format!("loading config from {}", config.display()))?;
@@ -136,26 +129,17 @@ async fn main() -> anyhow::Result<()> {
                 "starting server"
             );
             let capture = !(demo || no_capture);
-            if no_control {
-                if capture {
-                    serve_with_capture(cfg).await
-                } else {
-                    serve(cfg).await
-                }
-            } else {
-                let opts = DaemonOptions {
-                    endpoint: Endpoint::default_for_user()
-                        .context("no directory for the control channel")?,
-                    started_by: "cli".into(),
-                    exit_on_stop: true,
-                    idle_timeout: None,
-                    initial: Some(Initial::Server {
-                        config: Box::new(cfg),
-                        capture,
-                    }),
-                };
-                geserdesk_app::daemon::run(opts, log).await
-            }
+            let opts = DaemonOptions {
+                endpoint: control_endpoint()?,
+                started_by: "cli".into(),
+                exit_on_stop: true,
+                idle_timeout: None,
+                initial: Some(Initial::Server {
+                    config: Box::new(cfg),
+                    capture,
+                }),
+            };
+            geserdesk_app::daemon::run(opts, log).await
         }
         Command::Status => std::process::exit(control::status().await?),
         Command::Stop => std::process::exit(control::stop().await?),
@@ -169,107 +153,67 @@ async fn main() -> anyhow::Result<()> {
             server_fingerprint,
             monitors: forced,
         } => {
-            let forced = forced
+            let monitors = forced
                 .as_deref()
                 .map(parse_monitors)
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("--monitors: {e}"))?;
-            geserdesk_platform::init_process();
-            let monitors = match forced
-                .clone()
-                .map(Ok)
-                .unwrap_or_else(geserdesk_platform::monitors)
-            {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not detect monitors; reporting a 1920x1080 placeholder");
-                    Vec::new()
-                }
+            let forced_fingerprint: Option<geserdesk_tls::Fingerprint> = server_fingerprint
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .context("--server-fingerprint")?;
+            // Without the `inject` feature nothing can be injected: say so and log instead.
+            let log_only = if !dry_run && !cfg!(feature = "inject") {
+                warn!(
+                    "built without the `inject` feature; running as if --dry-run (no real input)"
+                );
+                true
+            } else {
+                dry_run
             };
-            for (i, m) in monitors.iter().enumerate() {
-                info!(index = i, x = m.x, y = m.y, w = m.w, h = m.h, "monitor");
-            }
-            let tls = if no_tls {
-                warn!("TLS is OFF: this connection is neither encrypted nor verified");
+            let options = ClientOptions {
+                server,
+                name,
+                log_only,
+                reconnect: !no_reconnect,
+                tls: !no_tls,
+                identity_dir: identity_dir.clone(),
+                monitors,
+            };
+            // The terminal asks about a server seen for the first time (or
+            // `--server-fingerprint` answers it up front), as it always has.
+            let trust: Option<Arc<dyn geserdesk_client::ServerTrust>> = if no_tls {
                 None
             } else {
                 let dir = identity_dir
                     .or_else(geserdesk_tls::default_dir)
                     .context("no home directory; pass --identity-dir")?;
-                let identity = geserdesk_tls::Identity::load_or_create(
-                    &dir.join("client-identity.pem"),
-                    &name,
-                )
-                .context("loading this client's TLS identity")?;
-                info!(
-                    fingerprint = %identity.fingerprint(),
-                    "this client's certificate (the server shows this when asking to approve it)"
-                );
-                let forced = server_fingerprint
-                    .as_deref()
-                    .map(str::parse)
-                    .transpose()
-                    .context("--server-fingerprint")?;
-                Some(ClientTls {
-                    identity: Arc::new(identity),
-                    trust: Arc::new(trust::FileTrust::new(
-                        geserdesk_client::KnownServers::in_dir(&dir),
-                        forced,
-                    )),
-                })
+                Some(Arc::new(trust::FileTrust::new(
+                    geserdesk_client::KnownServers::in_dir(&dir),
+                    forced_fingerprint,
+                )))
             };
-            let cfg = ClientConfig {
-                server,
-                name,
-                monitors,
-                tls,
-                handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-                // A forced list is not re-detected.
-                detect: if forced.is_some() {
-                    None
-                } else {
-                    Some(|| geserdesk_platform::monitors().ok())
-                },
+            let opts = DaemonOptions {
+                endpoint: control_endpoint()?,
+                started_by: "cli".into(),
+                exit_on_stop: true,
+                idle_timeout: None,
+                initial: Some(Initial::Client {
+                    options: Box::new(options),
+                    trust,
+                }),
             };
-            info!(name = %cfg.name, server = %cfg.server, "starting client");
-            run_client(cfg, dry_run, !no_reconnect).await
+            geserdesk_app::daemon::run(opts, log).await
         }
     }
 }
 
-#[cfg(feature = "inject")]
-async fn run_client(cfg: ClientConfig, dry_run: bool, reconnect: bool) -> anyhow::Result<()> {
-    if dry_run {
-        drive(&cfg, NullSink, reconnect).await
-    } else {
-        let sink = geserdesk_client::EnigoSink::new().context("initialising input injection")?;
-        drive(&cfg, sink, reconnect).await
-    }
-}
-
-#[cfg(not(feature = "inject"))]
-async fn run_client(cfg: ClientConfig, dry_run: bool, reconnect: bool) -> anyhow::Result<()> {
-    if !dry_run {
-        tracing::warn!(
-            "built without the `inject` feature; running as if --dry-run (no real input)"
-        );
-    }
-    drive(&cfg, NullSink, reconnect).await
-}
-
-/// Run the client once, or keep it connected for as long as it can be.
-async fn drive(
-    cfg: &ClientConfig,
-    sink: impl geserdesk_client::InputSink,
-    reconnect: bool,
-) -> anyhow::Result<()> {
-    if reconnect {
-        let fatal = connect_with_retry(cfg, sink, ReconnectPolicy::default()).await;
-        Err(fatal.into())
-    } else {
-        connect(cfg, sink).await?;
-        Ok(())
-    }
+/// Where the control channel lives; the error says how to move it.
+fn control_endpoint() -> anyhow::Result<Endpoint> {
+    Endpoint::default_for_user().context(
+        "no directory for the control channel (set GESERDESK_RUNTIME_DIR to one you can write to)",
+    )
 }
 
 /// Parse `WxH+X+Y[,WxH+X+Y...]` (the geometry notation `xrandr` prints).
