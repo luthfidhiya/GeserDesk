@@ -76,8 +76,8 @@ symbol that way, it falls back to synthesising `ch`.
 |---|---|
 | `Hello { version, screen }` | First frame. Advertises protocol version and this machine's screen. |
 | `ScreenChanged(ScreenInfo)` | Resolution / monitor arrangement changed. |
-| `ClipboardGrab { id, seq }` | A local app took ownership of clipboard `id`. |
-| `ClipboardData { id, seq, chunk }` | A chunk of clipboard contents the server asked for. |
+| `ClipboardGrab { id, seq }` | A local app changed clipboard `id`; its contents follow as `ClipboardData` with the same `seq` (see *Clipboard*). |
+| `ClipboardData { id, seq, chunk }` | A chunk of the clipboard contents announced by the `ClipboardGrab` with this `seq`. |
 | `FileOffer { name, size }` | Offer to send a file (drag-and-drop from the client). |
 | `FileChunk(Chunk)` | A chunk of an in-progress file transfer. |
 | `KeepAlive` | Reply to `ServerMsg::KeepAlive`. |
@@ -93,7 +93,7 @@ symbol that way, it falls back to synthesising `ch`.
 | `Leave` | The cursor left. The client releases all held keys/buttons and sends clipboard data for any selection it grabbed. |
 | `Key(KeyEvent)` | Synthesize a key event. |
 | `Mouse(MouseEvent)` | Synthesize a mouse event. |
-| `ClipboardGrab { id, seq }` | The server (or another screen) grabbed a clipboard. |
+| `ClipboardGrab { id, seq }` | The server (or, relayed, another screen) changed clipboard `id`; its contents follow as `ClipboardData` with the same `seq`. |
 | `ClipboardData { id, seq, chunk }` | A chunk of clipboard contents to apply locally. |
 | `FileOffer { name, size }` / `FileChunk(Chunk)` | Incoming file transfer. |
 | `SetOptions(Options)` | Push a new set of runtime options. |
@@ -132,10 +132,32 @@ which the server closes the connection.
 
 ## Sequence numbers
 
-`seq` in `Enter` increases each time the server hands control to a screen. The
-client stores the latest `seq` and echoes it in `ClipboardGrab` / `ClipboardData`
-so the server can order clipboard ownership across screens (the same role as
-Input Leap's `kMsgCEnter` sequence number).
+`seq` in `Enter` increases each time the server hands control to a screen.
+Clipboard messages do **not** echo it (see below); their `seq` is a transfer number.
+
+## Clipboard
+
+Sharing is push-on-change, not ownership handover, so no request message exists:
+
+1. Whoever sees its clipboard change (a local application wrote it, not a peer)
+   sends `ClipboardGrab { Clipboard, seq }`, then `ClipboardData { Clipboard, seq, chunk }`
+   for `Start { total }`, `Data`*, `End` (`Chunk::stream`), with nothing else from that
+   sender in between.
+2. `seq` is chosen by the sender and increases per push. It ties chunks to their
+   grab; a new `ClipboardGrab` discards a transfer still in progress, and chunks
+   whose `seq` is not the current one are ignored.
+3. The server writes a client's text onto its own clipboard and relays it, as its own
+   transfer, to every other client (never back to the sender).
+4. The text is UTF-8. A receiver refuses more than `clipboard_max_bytes` (0 means
+   16 MiB) as soon as `Start.total` or the bytes received exceed it, and drops a
+   transfer that breaks the grammar or is not UTF-8. The connection stays up.
+5. `Options.clipboard_sharing = false` turns it off: the server ignores clipboard
+   messages and sends none, and a client stops reading and pushing. A client takes
+   the options from the handshake's `SetOptions` and from later ones.
+6. Only `ClipboardId::Clipboard` is shared; `Primary` is ignored.
+
+A peer that predates this logs and ignores clipboard messages, so the wire format
+and version are unchanged.
 
 ## Changes
 

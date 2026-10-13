@@ -23,7 +23,8 @@ moves them to a client by pushing the cursor against a screen edge (or
 | Multi-monitor detection + layout editor | ✅ done, detection confirmed on Windows (2 monitors) |
 | M8 — TLS 1.3, certificate pinning, trust-on-first-use | ✅ done, confirmed Linux server <-> Windows client |
 | Desktop app (Tauri + React) with tray | ✅ built; start/stop, layout editor and tray still to be driven end to end on a real desktop |
-| M7, M9+ — Windows capture, clipboard, files | ⬜ not started |
+| M9 — clipboard sync (text) | ✅ built and tested on loopback with in-memory clipboards; not yet tried on the real desktop clipboards or on Windows |
+| M7, M10+ — Windows capture, files | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
 in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -170,6 +171,24 @@ opened. See *Daemon and controllers* below.
   takes `--server-fingerprint`); the app attached to it is not asked as well, so a
   question never has two answerers.
 * The app's daemon writes its output to `daemon.log` next to the identity files.
+
+## Clipboard
+
+Plain text is kept equal on the server and every client: whoever copies last wins,
+within about half a second, with no screen switch needed. Images, files and the
+X11 middle-click selection are not shared. A client connecting later is not sent
+what was copied before it came; its own clipboard is left alone until the next copy.
+
+* Off for everyone: `clipboard_sharing = false` under `[options]` in the server
+  config. Off for one machine: `geserdesk client --no-clipboard`.
+* `clipboard_max_bytes` under `[options]` caps one copy (0 = the built-in ceiling,
+  16 MiB). A larger copy stays where it was made.
+* The server shares its desktop's clipboard only while it captures that desktop's
+  input (so not with `--no-capture`), and a client only when it injects real input
+  (so not with `--dry-run`): trial runs never rewrite your clipboard.
+* A copy is sent in clear text to every connected machine, so a password copied
+  from a password manager reaches them all. Turn sharing off if that is not what
+  you want.
 
 ## Security
 
