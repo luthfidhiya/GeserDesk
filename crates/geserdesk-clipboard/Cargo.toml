@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "geserdesk-clipboard"
+description = "Clipboard sharing for GeserDesk: a backend trait, change detection and the receiving side of a transfer (M9)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+geserdesk-proto.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Text only: no image decoding. Wayland needs its own backend (M13).
+arboard = { version = "3.6", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

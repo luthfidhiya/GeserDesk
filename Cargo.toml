@@ -7,6 +7,7 @@ members = [
     "crates/geserdesk-proto",
     "crates/geserdesk-platform",
     "crates/geserdesk-tls",
+    "crates/geserdesk-clipboard",
     "crates/geserdesk-server",
     "crates/geserdesk-client",
     "crates/geserdesk-app",
@@ -26,6 +27,7 @@ authors = ["GeserDesk contributors"]
 geserdesk-proto = { path = "crates/geserdesk-proto" }
 geserdesk-platform = { path = "crates/geserdesk-platform" }
 geserdesk-tls = { path = "crates/geserdesk-tls" }
+geserdesk-clipboard = { path = "crates/geserdesk-clipboard" }
 geserdesk-server = { path = "crates/geserdesk-server" }
 geserdesk-client = { path = "crates/geserdesk-client" }
 geserdesk-app = { path = "crates/geserdesk-app" }

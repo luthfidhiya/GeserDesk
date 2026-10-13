@@ -1290,6 +1290,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "geserdesk-client",
+ "geserdesk-clipboard",
  "geserdesk-platform",
  "geserdesk-proto",
  "geserdesk-server",
@@ -1329,6 +1330,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "enigo",
+ "geserdesk-clipboard",
  "geserdesk-proto",
  "geserdesk-server",
  "geserdesk-tls",
@@ -1337,6 +1339,17 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "geserdesk-clipboard"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "geserdesk-proto",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1384,6 +1397,7 @@ name = "geserdesk-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "geserdesk-clipboard",
  "geserdesk-platform",
  "geserdesk-proto",
  "geserdesk-tls",
