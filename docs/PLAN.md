@@ -329,8 +329,8 @@ All testing is **direct Linux ↔ Windows**, no VM.
 | # | Milestone |
 |---|---|
 | **M8** | TLS (`tokio-rustls`) + fingerprint TOFU, concept from `FingerprintDatabase.cpp`. **Safe on a real network from here on** |
-| **M9** | clipboard sync (`arboard` + change polling) — **text done, session 8** |
-| **M10** | file transfer (32 KiB chunks on the M1 foundation) |
+| **M9** | clipboard sync (`arboard` + change polling) — **text session 8, HTML session 10, pictures session 11** |
+| **M10** | file transfer — **done differently than planned: no chunked stream on the M1 foundation; a copy announces its manifest at once and the bytes are pulled by whoever needs them, when they need them (session 12)** |
 | **M11** | GUI + tray — drag-and-drop grid for the layout. Planned as `egui`; **built as Tauri 2 + React instead** (session 6): the layout editor and approvals were already a web UI, and one front end beats two. Costs a system WebView (WebKitGTK on Linux, WebView2 on Windows 11) |
 | **M12** | autostart + packaging (`.deb`, InnoSetup installer). The daemon from session 7 is what autostart now has to launch at login (systemd user unit; on Windows a per-user startup entry, not a service, because capture needs the interactive session) |
 
@@ -581,3 +581,65 @@ The client was built (MSVC Build Tools, Rust 1.99, Node 24 with pnpm through cor
 - **Pictures:** `arboard` with `image-data`, crate `image` (PNG only). RGBA from the OS becomes PNG with fast compression; a received PNG has its dimensions checked from the header (16384 per side, 64 megapixels) before it is decoded with `image::Limits`. A picture is only taken from a clipboard without text, because Office puts a bitmap of copied text next to it; when setting, text wins over a picture. `fit()` drops HTML first, then the picture. Protocol 3.1 (a 3.0 peer skips the item).
 - **Verified:** unit tests (PNG round trip with alpha, a wrong byte count, not-a-PNG, a forged header with a valid CRC claiming 60000x60000, `fit` with pictures, the change signal reading only after a change); a loopback test where a 640x400 noisy screenshot (several chunks) copied on a client reaches the server and the other client byte for byte, and a later text copy replaces it. **On this X11 desktop's real clipboard** (`cargo test -p geserdesk-clipboard -- --ignored --test-threads=1`, saving and restoring the clipboard): XFixes reports a copy and nothing else; a picture set and read back has the same pixels.
 - **Not verified:** Win+Shift+S and Shift+PrtSc through to the other machine (needs the new build on both sides); `GetClipboardSequenceNumber` on Windows.
+
+### Session 12 — 2026-10-13 — clipboard files: pulled when and where they are needed (protocol 4.0, M10)
+
+- **Design, changed from the session 11 plan during a spike:** files only ever announce a manifest (names, sizes,
+  folder flag) through the clipboard, same pipe as text/HTML/pictures; the spike (offering a real folder via
+  `arboard::set().file_list()` from this process, Ctrl+V in Nautilus, and the reverse) showed Nautilus accepts and
+  offers a plain `text/uri-list` with no extra X11 code, so the planned fallback owner was dropped. One real bug
+  found there: `arboard`'s X11 reader only splits `text/uri-list` on `\n`, so a path Nautilus wrote (`\r\n` endings)
+  keeps a trailing `\r`; `SystemClipboard::file_list()` trims it. Bytes are pulled afterwards, by index into the
+  manifest, through new `FileRead`/`FileReply` messages (replacing `FileOffer`/`FileChunk`, never implemented) --
+  `PROTOCOL` is **4.0**. A consumer pulls only when it actually needs the files: a client when the cursor arrives on
+  its screen, the server for its own screen when the cursor returns there. **Not built this session, unlike the
+  approved plan:** the progress window (a small Tauri popup showing percent/speed/Cancel). Transfers run silently;
+  this is a real gap for anything but a quick, small copy and should be the next thing added.
+- **New:** `geserdesk-clipboard`: `collect` (walks a copy's paths into a manifest + their absolute paths,
+  depth-first, symlinks left out, capped at 10 000 entries / 32 levels deep / a configurable byte total),
+  `FileOwner` (serves reads of what *this* machine last announced, checking the file has not changed size and never
+  following a symlink), `stage::sanitize_manifest` (resolves a peer's relative paths under a destination, refusing
+  anything that could escape it, collide once case is ignored, or use a name Windows reserves), `pull` (drives a
+  caller-supplied chunk reader against a manifest: creates folders in order, writes files sequentially, removes
+  everything on any failure), `Clipboard::file_list`/`set_file_list` (while files are on the clipboard, `get()` now
+  returns `None`: GTK and Windows both also put the path as plain text, which must not be shared as text).
+  `geserdesk-server`: `FileRouter` (who owns files now, at what `seq`, with their manifest; routes a `FileRead` to
+  the owner -- rewriting `req` so two askers cannot collide -- or answers directly if the server itself owns it;
+  `spawn_local_pull` pulls for the server's own screen when `router::run_shared` sees the cursor return home while a
+  client still owns files). `geserdesk-client`: `FileChannel` (a pull cannot write to the session's one
+  `MessageStream` from its own task, so it queues what to send and is handed back the matching reply) and
+  `ClientClipboard` learned to push its own files (gated so it never pushes a second time before the server's echo
+  confirms the first `seq` -- the only way a client learns what `seq` its own push became), remember a remote
+  announcement, and pull it on `ServerMsg::Enter`.
+- **Decisions:** `clipboard_sharing` and `clipboard_files` are independent switches now (a server can share text
+  without files, or the reverse); the inbound grab/data stream is reassembled whenever either is on, and only the
+  decoded content's own kind decides whether it is relayed. A files announcement is echoed to **everyone including
+  the pusher** (unlike text/HTML/pictures, which are never echoed back) -- the only way the pusher learns the `seq`
+  the server assigned, since the server always reassigns its own `seq` when relaying. `clipboard_files_max_bytes`
+  defaults to 256 MiB; a copy over it, or one whose `collect()` fails (too many entries, too deep), is simply never
+  announced. `--no-clipboard-files` / `ClientOptions.clipboard_files` narrows what the server's own option allows,
+  via a small `NoFiles` wrapper that keeps the `Clipboard` trait's default (never report, never accept a file list)
+  while text/HTML/pictures still pass through.
+- **Verified:** unit and component tests across all three crates (manifest collection with real folders including a
+  symlink and the real `MAX_ENTRIES` limit; path sanitising against `../x`, `/etc/passwd`, `C:\x`, `con.txt`, a
+  trailing dot/space, an overlong component, a case-insensitive duplicate; `pull` against an in-memory reader,
+  including a byte-limit refusal, an unsafe manifest refusal, a short read, and cleanup on any failure -- a real bug
+  found here: a `tokio::fs::File` write was not reliably visible to a plain `std::fs::read` without an explicit
+  `flush`, which made one test flaky about half the time; `FileRouter` routing a request to a client owner and back
+  with `req` rewritten, refusing a reply from the wrong connection, failing what was pending when the owner
+  disconnects, and pulling for the server's own screen; both client-side directions driven through `session_loop`
+  over a real duplex stream -- pulling a remote announcement into a real staging folder once a faked `Enter`
+  arrives, and serving a `FileRead` for files pushed and echoed back with a seq). **On this X11 desktop's real
+  clipboard:** the Nautilus spike (folder + subfolder pasted and read back whole) and `SystemClipboard::file_list`/
+  `set_file_list` round-tripping, `get()` returning `None` while files are held. `fmt`, `clippy -D warnings`,
+  `cargo test --workspace` throughout.
+- **Not verified:** a real Windows client pushing or pulling files at all (needs the new build there); pasting a
+  pulled folder into a real Explorer or Nautilus across the network (only the staging and clipboard-set steps were
+  exercised, with a fake or in-memory peer standing in for the network); the progress window (not built); a true
+  three-machine run (server + two real TCP clients) exercising a cursor-driven pull, since that needs real input
+  capture, which was not exercised here on purpose.
+- **Known gaps:** no progress indication during a pull -- a large copy looks like nothing is happening until it
+  finishes or fails; a `--no-capture` server relays no files at all, same as it already did for text (no screen to
+  return to, so nothing ever triggers a local pull, and nobody's `Enter` ever arrives either); pulling is strictly
+  sequential (one chunk in flight at a time), not pipelined, so a slow link pulls more slowly than it could; no
+  resuming a pull that failed partway, no images/RTF, and the primary selection is still not shared.

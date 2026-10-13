@@ -23,8 +23,9 @@ moves them to a client by pushing the cursor against a screen edge (or
 | Multi-monitor detection + layout editor | ✅ done, detection confirmed on Windows (2 monitors, one above the other); re-reporting after a monitor is plugged or unplugged while running not yet exercised |
 | M8 — TLS 1.3, certificate pinning, trust-on-first-use | ✅ done, confirmed Linux server <-> Windows client |
 | Desktop app (Tauri + React) with tray | ✅ built; on Windows it starts, spawns its daemon detached, attaches over the named pipe and leaves the daemon running when the app dies; the window itself (layout editor, tray, dialogs) is still to be driven on Windows |
-| M9 — clipboard sync (text, HTML, pictures) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); an X11 clipboard on the Linux side not yet tried |
-| M7, M10+ — Windows capture, files | ⬜ not started |
+| M9 — clipboard sync (text, HTML, pictures) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); the real X11 clipboard checked on this desktop (text, HTML, a picture, a file list, a change signal) |
+| M10 — clipboard files (names/sizes announced at once, bytes pulled on arrival) | ✅ built and unit/component tested (manifest collection, path sanitising, the pull itself, routing a request to whichever machine owns the files, pulling for the server's own screen); Nautilus accepts and offers a file list from `arboard` with no extra code; not yet tried with a real Windows client, nor pasted into a real Explorer/Nautilus from across the network |
+| M7 — Windows capture (Windows as the server) | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
 in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -180,8 +181,9 @@ needed. The HTML is what carries a copied web page's style into Word or a mail
 client; programs that only take text get the text. A screenshot (Win+Shift+S,
 Shift+PrtSc) or a copied image travels as PNG, as long as nothing on the
 clipboard is text (Office puts a picture of copied text next to it, which is not
-sent). Files and the X11 middle-click selection are not shared yet. A client connecting later is not sent
-what was copied before it came; its own clipboard is left alone until the next copy.
+sent). The X11 middle-click selection is not shared. A client connecting later
+is not sent what was copied before it came; its own clipboard is left alone
+until the next copy.
 
 * Off for everyone: `clipboard_sharing = false` under `[options]` in the server
   config. Off for one machine: `geserdesk client --no-clipboard`.
@@ -194,6 +196,26 @@ what was copied before it came; its own clipboard is left alone until the next c
 * A copy is sent in clear text to every connected machine, so a password copied
   from a password manager reaches them all. Turn sharing off if that is not what
   you want.
+
+### Files
+
+A right-click **Copy** of a file or folder (not drag-and-drop) follows the clipboard
+too: the names and sizes go to every machine at once, but the bytes are only
+pulled to whichever one the cursor actually arrives on, into a temporary folder,
+and only then does **Paste** there find anything. Pasting on the machine that
+copied them needs nothing pulled; it already has them. Nothing is pulled to a
+machine the cursor never visits.
+
+* Off for everyone: `clipboard_files = false` under `[options]`. Off for one
+  machine (it can still share text/HTML/pictures): `geserdesk client
+  --no-clipboard-files`.
+* `clipboard_files_max_bytes` under `[options]` caps one copy's total size
+  (0 = the built-in ceiling, 256 MiB); a copy over it is never offered.
+* Every path is checked before anything is written: nothing may escape the
+  destination folder, collide with another entry once case is ignored, or use a
+  name Windows reserves (`CON`, `NUL`, `COM1`, ...), whichever OS copied it or is
+  pasting it.
+* Nothing is ever read from, or written to, a symlink.
 
 ## Security
 
