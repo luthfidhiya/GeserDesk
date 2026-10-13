@@ -6,6 +6,7 @@
 //!   into synthesized OS input. The [`InputSink`] trait is always available;
 //!   the real `enigo`-backed sink is behind the `inject` feature (M3).
 
+pub mod files;
 pub mod inject;
 pub mod net;
 pub mod trust_store;
