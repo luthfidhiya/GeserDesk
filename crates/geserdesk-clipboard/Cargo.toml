@@ -14,8 +14,10 @@ geserdesk-proto.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# Text only: no image decoding. Wayland needs its own backend (M13).
-arboard = { version = "3.6", default-features = false }
+# Wayland needs its own backend (M13).
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Pictures travel as PNG.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["xfixes"] }

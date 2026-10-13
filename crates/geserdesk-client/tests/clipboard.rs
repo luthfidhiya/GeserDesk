@@ -129,6 +129,49 @@ async fn arrives(clip: &Counting, text: &str) {
     });
 }
 
+async fn picture_arrives(clip: &Counting, png: &[u8]) {
+    timeout(Duration::from_secs(5), async {
+        while clip.mem.image().as_deref() != Some(png) {
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the picture never arrived"));
+}
+
+/// A screenshot-sized picture: noisy enough that PNG cannot shrink it to nothing.
+fn screenshot() -> Vec<u8> {
+    let (w, h) = (640u32, 400u32);
+    let mut bytes = Vec::with_capacity((w * h * 4) as usize);
+    let mut x: u32 = 12345;
+    for _ in 0..w * h {
+        x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        bytes.extend_from_slice(&[(x >> 16) as u8, (x >> 8) as u8, x as u8, 255]);
+    }
+    geserdesk_clipboard::picture::to_png(&geserdesk_clipboard::picture::Rgba {
+        width: w,
+        height: h,
+        bytes,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_screenshot_reaches_everyone_and_text_after_it_replaces_it() {
+    let rig = rig("").await;
+    let png = screenshot();
+    assert!(png.len() > 32 * 1024, "spans several chunks");
+
+    rig.a.mem.copy_image(png.clone());
+    picture_arrives(&rig.server, &png).await;
+    picture_arrives(&rig.b, &png).await;
+
+    rig.b.mem.copy("teks sesudah gambar");
+    arrives(&rig.a, "teks sesudah gambar").await;
+    assert_eq!(rig.a.mem.image(), None, "the text replaced the picture");
+    let _ = rig.stop.send(true);
+}
+
 #[tokio::test]
 async fn a_copy_anywhere_reaches_everyone_once() {
     let rig = rig("").await;

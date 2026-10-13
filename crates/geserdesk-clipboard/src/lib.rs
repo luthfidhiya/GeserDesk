@@ -7,8 +7,9 @@
 //! and never reported back, which is what stops two machines echoing one copy
 //! between them forever.
 //!
-//! Plain text and HTML are shared (the HTML is what carries a copied web page's
-//! style into Word). Images, files and the X11 primary selection are not.
+//! Plain text, HTML (what carries a copied web page's style into Word) and
+//! pictures (PNG, so screenshots) are shared. Files and the X11 primary
+//! selection are not.
 //!
 //! * [`Clipboard`] -- the OS clipboard, as little as this needs of it.
 //!   [`SystemClipboard`] is the real one, [`MemoryClipboard`] is for tests.
@@ -17,6 +18,7 @@
 //! * [`outbound`] -- the chunk stream that carries one [`ClipboardContent`].
 
 mod inbound;
+pub mod picture;
 mod sync;
 mod system;
 mod watch;
@@ -43,14 +45,13 @@ pub fn effective_max(configured: u64) -> u64 {
     }
 }
 
-/// What a size limit lets through of `content`: all of it, or just its plain text
-/// when the style would make it too large, or nothing when even the text would.
+/// What a size limit lets through of `content`: all of it, or without its HTML,
+/// or just its plain text, or nothing when even the text would not fit.
 pub fn fit(content: &ClipboardContent, max_bytes: u64) -> Option<ClipboardContent> {
-    if content.data_len() as u64 <= max_bytes {
-        return Some(content.clone());
-    }
-    let plain = content.text_only();
-    (!plain.is_empty() && plain.data_len() as u64 <= max_bytes).then_some(plain)
+    // The style goes first, then the picture; the text is what matters most.
+    [content.clone(), content.without_html(), content.text_only()]
+        .into_iter()
+        .find(|c| !c.is_empty() && c.data_len() as u64 <= max_bytes)
 }
 
 /// The chunk stream that carries `content`.
@@ -109,5 +110,19 @@ mod tests {
         assert_eq!(fit(&c, 2), None);
         let html_only = ClipboardContent::new(None, Some("<p>".repeat(50)));
         assert_eq!(fit(&html_only, 10), None);
+    }
+
+    #[test]
+    fn a_picture_is_kept_over_its_html_and_dropped_before_the_text() {
+        let pic = ClipboardContent::new(None, Some("<img src=x>".into())).with_image(vec![0; 100]);
+        assert_eq!(fit(&pic, 200), Some(pic.clone()));
+        assert_eq!(fit(&pic, 100), Some(pic.without_html()));
+        assert_eq!(
+            fit(&pic, 50),
+            None,
+            "a picture alone that does not fit is not sent"
+        );
+        let both = ClipboardContent::new(Some("t".into()), None).with_image(vec![0; 100]);
+        assert_eq!(fit(&both, 50), Some(both.text_only()));
     }
 }

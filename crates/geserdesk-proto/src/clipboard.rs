@@ -18,6 +18,8 @@ pub const CHUNK_SIZE: usize = 32 * 1024;
 /// changing the wire format.
 pub const MIME_TEXT: &str = "text/plain";
 pub const MIME_HTML: &str = "text/html";
+/// A picture (a screenshot, a copied image) as PNG.
+pub const MIME_IMAGE: &str = "image/png";
 
 /// One format of a clipboard's contents.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -69,9 +71,34 @@ impl ClipboardContent {
         self.string(MIME_HTML)
     }
 
+    /// The PNG bytes of a picture, if there is one.
+    pub fn image(&self) -> Option<&[u8]> {
+        let item = self.items.iter().find(|i| i.mime == MIME_IMAGE)?;
+        Some(&item.data)
+    }
+
+    /// The same contents with a picture added (replacing any there was).
+    pub fn with_image(mut self, png: Vec<u8>) -> Self {
+        self.items.retain(|i| i.mime != MIME_IMAGE);
+        if !png.is_empty() {
+            self.items.push(ClipboardItem {
+                mime: MIME_IMAGE.to_string(),
+                data: png,
+            });
+        }
+        self
+    }
+
+    /// The same contents without their HTML.
+    pub fn without_html(&self) -> Self {
+        let mut c = self.clone();
+        c.items.retain(|i| i.mime != MIME_HTML);
+        c
+    }
+
     /// Whether there is nothing a clipboard here could hold.
     pub fn is_empty(&self) -> bool {
-        self.text().is_none() && self.html().is_none()
+        self.text().is_none() && self.html().is_none() && self.image().is_none()
     }
 
     /// The bytes of the formats themselves, which is what a size limit counts.

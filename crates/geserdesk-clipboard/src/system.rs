@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::sync::{Arc, Mutex};
 
+use crate::picture::{self, Rgba};
 use crate::{Clipboard, ClipboardContent, ClipboardError};
 
 /// The desktop's clipboard (X11, Windows).
@@ -26,15 +27,38 @@ impl Clipboard for SystemClipboard {
         // Without HTML the platforms differ in how they say so (an error, not
         // always `ContentNotAvailable`); a clipboard with no style is normal.
         let html = self.0.get().html().ok();
-        let content = ClipboardContent::new(text, html);
+        let mut content = ClipboardContent::new(text, html);
+        // A picture only when there is no text: Office puts a bitmap of copied
+        // text next to it, and that must not ride along with every copy.
+        if content.text().is_none() {
+            if let Ok(img) = self.0.get().image() {
+                let rgba = Rgba {
+                    width: img.width as u32,
+                    height: img.height as u32,
+                    bytes: img.bytes.into_owned(),
+                };
+                content = content.with_image(picture::to_png(&rgba)?);
+            }
+        }
         Ok((!content.is_empty()).then_some(content))
     }
 
     fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
-        let result = match (content.html(), content.text()) {
-            (Some(html), text) => self.0.set().html(html, text),
-            (None, Some(text)) => self.0.set_text(text),
-            (None, None) => return Ok(()),
+        // One kind of thing at a time: setting a picture replaces the text, so
+        // text wins when both came (as `get` above never sends both).
+        let result = match (content.text(), content.html(), content.image()) {
+            (Some(text), Some(html), _) => self.0.set().html(html, Some(text)),
+            (Some(text), None, _) => self.0.set_text(text),
+            (None, _, Some(png)) => {
+                let rgba = picture::from_png(png)?;
+                self.0.set_image(arboard::ImageData {
+                    width: rgba.width as usize,
+                    height: rgba.height as usize,
+                    bytes: rgba.bytes.into(),
+                })
+            }
+            (None, Some(html), None) => self.0.set().html(html, None),
+            (None, None, None) => return Ok(()),
         };
         result.map_err(|e| ClipboardError(e.to_string()))
     }
@@ -65,6 +89,15 @@ impl MemoryClipboard {
             Some(text.to_string()),
             Some(html.to_string()),
         ));
+    }
+
+    /// A screenshot: a picture and nothing else.
+    pub fn copy_image(&self, png: Vec<u8>) {
+        *self.0.lock().unwrap() = Some(ClipboardContent::default().with_image(png));
+    }
+
+    pub fn image(&self) -> Option<Vec<u8>> {
+        self.content()?.image().map(<[u8]>::to_vec)
     }
 
     pub fn contents(&self) -> Option<String> {
@@ -123,6 +156,33 @@ mod tests {
         let back = clip.get().unwrap().expect("something to read back");
         assert_eq!(back.text(), Some("hanya teks"));
         assert_eq!(back.html(), None, "the old style must not linger");
+
+        if let Some(saved) = saved {
+            clip.set(&saved).unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "uses the desktop's clipboard"]
+    fn the_desktop_clipboard_carries_a_picture() {
+        let mut clip = SystemClipboard::new().expect("a desktop with a clipboard");
+        let saved = clip.get().unwrap();
+
+        let rgba = Rgba {
+            width: 3,
+            height: 2,
+            bytes: [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]]
+                .repeat(2)
+                .concat(),
+        };
+        let png = picture::to_png(&rgba).unwrap();
+        clip.set(&ClipboardContent::default().with_image(png))
+            .unwrap();
+        let back = clip.get().unwrap().expect("a picture to read back");
+        assert_eq!(back.text(), None);
+        let pixels = picture::from_png(back.image().expect("a picture")).unwrap();
+        assert_eq!((pixels.width, pixels.height), (3, 2));
+        assert_eq!(pixels.bytes, rgba.bytes);
 
         if let Some(saved) = saved {
             clip.set(&saved).unwrap();
