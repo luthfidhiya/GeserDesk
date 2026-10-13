@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use tracing::{debug, warn};
@@ -13,6 +14,12 @@ fn fingerprint(content: &ClipboardContent) -> u64 {
     h.finish()
 }
 
+fn fingerprint_paths(paths: &[PathBuf]) -> u64 {
+    let mut h = DefaultHasher::new();
+    paths.hash(&mut h);
+    h.finish()
+}
+
 struct Inner {
     clipboard: Box<dyn Clipboard>,
     /// What the clipboard held when we last looked or wrote: contents that are
@@ -22,6 +29,11 @@ struct Inner {
     refused: Option<u64>,
     /// The OS change count at the last read; the same count means nothing to read.
     count: Option<u64>,
+    /// The file list last seen or written, tracked separately from `seen`/`count`
+    /// so files and data (text/HTML/image) do not interfere with each other's
+    /// change detection.
+    files_seen: Option<u64>,
+    files_count: Option<u64>,
 }
 
 /// Change detection and loop suppression over one [`Clipboard`]. Clones share
@@ -46,6 +58,8 @@ impl ClipboardSync {
             seen: None,
             refused: None,
             count: None,
+            files_seen: None,
+            files_count: None,
         })))
     }
 
@@ -58,6 +72,21 @@ impl ClipboardSync {
             inner.count = inner.clipboard.change_count();
             inner.seen = match inner.clipboard.get() {
                 Ok(Some(c)) => Some(fingerprint(&c)),
+                _ => None,
+            };
+        })
+        .await;
+    }
+
+    /// The files equivalent of [`prime`](Self::prime): whatever file copy is on
+    /// the clipboard now is not news.
+    pub async fn prime_files(&self) {
+        let this = self.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut inner = this.0.lock().unwrap();
+            inner.files_count = inner.clipboard.change_count();
+            inner.files_seen = match inner.clipboard.file_list() {
+                Ok(Some(list)) if !list.is_empty() => Some(fingerprint_paths(&list)),
                 _ => None,
             };
         })
@@ -111,6 +140,59 @@ impl ClipboardSync {
                 None
             }
         }
+    }
+
+    /// The top-level paths a local application copied (not dragged) onto the
+    /// clipboard since the last call, if that changed: not empty, and not our
+    /// own write (see [`apply_files`](Self::apply_files)).
+    pub async fn poll_files(&self) -> Option<Vec<PathBuf>> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.poll_files_blocking())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    fn poll_files_blocking(&self) -> Option<Vec<PathBuf>> {
+        let mut inner = self.0.lock().unwrap();
+        let count = inner.clipboard.change_count();
+        if count.is_some() && count == inner.files_count {
+            return None;
+        }
+        inner.files_count = count;
+        let list = match inner.clipboard.file_list() {
+            Ok(Some(list)) if !list.is_empty() => list,
+            Ok(_) => return None,
+            Err(e) => {
+                debug!(error = %e, "could not read the clipboard's file list");
+                return None;
+            }
+        };
+        let id = fingerprint_paths(&list);
+        if inner.files_seen == Some(id) {
+            return None;
+        }
+        inner.files_seen = Some(id);
+        Some(list)
+    }
+
+    /// Put files pulled from a peer on the local clipboard, as what a paste of
+    /// them pastes. Remembered, so the next [`poll_files`](Self::poll_files)
+    /// does not offer it back.
+    pub async fn apply_files(&self, paths: Vec<PathBuf>) -> Result<(), ClipboardError> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut inner = this.0.lock().unwrap();
+            inner.clipboard.set_file_list(&paths)?;
+            inner.files_seen = Some(match inner.clipboard.file_list() {
+                Ok(Some(now)) if !now.is_empty() => fingerprint_paths(&now),
+                _ => fingerprint_paths(&paths),
+            });
+            inner.files_count = inner.clipboard.change_count();
+            Ok(())
+        })
+        .await
+        .map_err(|e| ClipboardError(e.to_string()))?
     }
 
     /// Put what a peer sent on the local clipboard. It is remembered, so the next
@@ -239,6 +321,42 @@ mod tests {
         // Our own write bumps the count; it is read once, recognised, not offered.
         sync.apply(text("from a peer")).await.unwrap();
         assert_eq!(sync.poll(100).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_file_copy_is_reported_once_and_hides_text_from_poll() {
+        let mem = MemoryClipboard::new();
+        mem.copy("before");
+        let sync = ClipboardSync::new(mem.clone());
+        sync.prime().await;
+        sync.prime_files().await;
+
+        assert_eq!(sync.poll_files().await, None, "nothing copied yet");
+        let paths = vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b")];
+        mem.copy_files(paths.clone());
+        assert_eq!(sync.poll_files().await, Some(paths));
+        assert_eq!(sync.poll_files().await, None, "reported once");
+        assert_eq!(
+            sync.poll(100).await,
+            None,
+            "a file copy is not offered as text"
+        );
+    }
+
+    #[tokio::test]
+    async fn files_applied_locally_are_not_offered_back_and_a_later_text_copy_still_is() {
+        let mem = MemoryClipboard::new();
+        let sync = ClipboardSync::new(mem.clone());
+        sync.prime().await;
+        sync.prime_files().await;
+
+        let pulled = vec![PathBuf::from("/tmp/pulled/a.txt")];
+        sync.apply_files(pulled.clone()).await.unwrap();
+        assert_eq!(mem.files(), Some(pulled));
+        assert_eq!(sync.poll_files().await, None);
+
+        mem.copy("after a file copy");
+        assert_eq!(sync.poll(100).await, Some(text("after a file copy")));
     }
 
     #[tokio::test]

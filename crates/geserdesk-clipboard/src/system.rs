@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::picture::{self, Rgba};
@@ -18,6 +19,11 @@ impl SystemClipboard {
 
 impl Clipboard for SystemClipboard {
     fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError> {
+        // Files take over the whole clipboard: GTK and Windows both also put
+        // the path(s) on it as plain text, which is not a text copy to share.
+        if !self.file_list()?.unwrap_or_default().is_empty() {
+            return Ok(None);
+        }
         let text = match self.0.get_text() {
             Ok(t) => Some(t),
             // Empty, or an image / file list: no text.
@@ -63,6 +69,31 @@ impl Clipboard for SystemClipboard {
         result.map_err(|e| ClipboardError(e.to_string()))
     }
 
+    fn file_list(&mut self) -> Result<Option<Vec<PathBuf>>, ClipboardError> {
+        match self.0.get().file_list() {
+            Ok(list) => Ok(Some(
+                list.into_iter()
+                    .map(|p| {
+                        // Nautilus (and other GTK apps) write `text/uri-list`
+                        // with CRLF line endings; `arboard` only splits on
+                        // `\n`, so each path still carries a trailing `\r`.
+                        let s = p.to_string_lossy();
+                        PathBuf::from(s.trim_end_matches('\r'))
+                    })
+                    .collect(),
+            )),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(ClipboardError(e.to_string())),
+        }
+    }
+
+    fn set_file_list(&mut self, paths: &[PathBuf]) -> Result<(), ClipboardError> {
+        self.0
+            .set()
+            .file_list(paths)
+            .map_err(|e| ClipboardError(e.to_string()))
+    }
+
     fn change_count(&mut self) -> Option<u64> {
         crate::watch::change_count()
     }
@@ -71,7 +102,15 @@ impl Clipboard for SystemClipboard {
 /// A clipboard held in memory. Clones share the contents, so a test can play
 /// the part of "the application the user copied in".
 #[derive(Clone, Default)]
-pub struct MemoryClipboard(Arc<Mutex<Option<ClipboardContent>>>);
+pub struct MemoryClipboard(Arc<Mutex<Slot>>);
+
+#[derive(Default)]
+struct Slot {
+    content: Option<ClipboardContent>,
+    /// A copy of files, as the real OS clipboards store it separately from
+    /// text/HTML/image: setting one clears the other (see `get`/`copy*`).
+    files: Option<Vec<PathBuf>>,
+}
 
 impl MemoryClipboard {
     pub fn new() -> Self {
@@ -80,20 +119,33 @@ impl MemoryClipboard {
 
     /// What a user's own copy of plain text would do.
     pub fn copy(&self, text: &str) {
-        *self.0.lock().unwrap() = Some(ClipboardContent::new(Some(text.to_string()), None));
+        let mut slot = self.0.lock().unwrap();
+        slot.content = Some(ClipboardContent::new(Some(text.to_string()), None));
+        slot.files = None;
     }
 
     /// A copy from a web page: text and its HTML.
     pub fn copy_html(&self, text: &str, html: &str) {
-        *self.0.lock().unwrap() = Some(ClipboardContent::new(
+        let mut slot = self.0.lock().unwrap();
+        slot.content = Some(ClipboardContent::new(
             Some(text.to_string()),
             Some(html.to_string()),
         ));
+        slot.files = None;
     }
 
     /// A screenshot: a picture and nothing else.
     pub fn copy_image(&self, png: Vec<u8>) {
-        *self.0.lock().unwrap() = Some(ClipboardContent::default().with_image(png));
+        let mut slot = self.0.lock().unwrap();
+        slot.content = Some(ClipboardContent::default().with_image(png));
+        slot.files = None;
+    }
+
+    /// What a right-click "Copy" of these paths would do.
+    pub fn copy_files(&self, paths: Vec<PathBuf>) {
+        let mut slot = self.0.lock().unwrap();
+        slot.files = Some(paths);
+        slot.content = None;
     }
 
     pub fn image(&self) -> Option<Vec<u8>> {
@@ -109,17 +161,39 @@ impl MemoryClipboard {
     }
 
     pub fn content(&self) -> Option<ClipboardContent> {
-        self.0.lock().unwrap().clone()
+        self.0.lock().unwrap().content.clone()
+    }
+
+    /// The paths the clipboard holds as a file copy (not text/HTML/image).
+    pub fn files(&self) -> Option<Vec<PathBuf>> {
+        self.0.lock().unwrap().files.clone()
     }
 }
 
 impl Clipboard for MemoryClipboard {
     fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError> {
-        Ok(self.content())
+        let slot = self.0.lock().unwrap();
+        if slot.files.as_ref().is_some_and(|f| !f.is_empty()) {
+            return Ok(None); // files take over, same as `SystemClipboard`
+        }
+        Ok(slot.content.clone())
     }
 
     fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
-        *self.0.lock().unwrap() = Some(content.clone());
+        let mut slot = self.0.lock().unwrap();
+        slot.content = Some(content.clone());
+        slot.files = None;
+        Ok(())
+    }
+
+    fn file_list(&mut self) -> Result<Option<Vec<PathBuf>>, ClipboardError> {
+        Ok(self.0.lock().unwrap().files.clone())
+    }
+
+    fn set_file_list(&mut self, paths: &[PathBuf]) -> Result<(), ClipboardError> {
+        let mut slot = self.0.lock().unwrap();
+        slot.files = Some(paths.to_vec());
+        slot.content = None;
         Ok(())
     }
 }
@@ -187,6 +261,41 @@ mod tests {
         if let Some(saved) = saved {
             clip.set(&saved).unwrap();
         }
+    }
+
+    #[test]
+    #[ignore = "uses the desktop's clipboard"]
+    fn the_desktop_clipboard_carries_a_file_list_and_hides_it_as_text() {
+        let mut clip = SystemClipboard::new().expect("a desktop with a clipboard");
+        let saved_content = clip.get().unwrap();
+        let saved_files = clip.file_list().unwrap();
+
+        let dir = std::env::temp_dir().join(format!("gd-clipboard-system-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("uji.txt");
+        std::fs::write(&file, "isi").unwrap();
+
+        clip.set_file_list(std::slice::from_ref(&file)).unwrap();
+        let back = clip.file_list().unwrap().expect("a file list to read back");
+        assert_eq!(
+            back.into_iter()
+                .map(|p| p.canonicalize().unwrap_or(p))
+                .collect::<Vec<_>>(),
+            vec![file.canonicalize().unwrap()]
+        );
+        assert_eq!(
+            clip.get().unwrap(),
+            None,
+            "get() must not surface the path as if it were copied text"
+        );
+
+        if let Some(files) = saved_files {
+            clip.set_file_list(&files).unwrap();
+        } else if let Some(content) = saved_content {
+            clip.set(&content).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

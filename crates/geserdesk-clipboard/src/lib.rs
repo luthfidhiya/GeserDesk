@@ -64,10 +64,27 @@ pub fn outbound(content: &ClipboardContent) -> Vec<Chunk> {
 /// asked), so async code runs them on a blocking thread.
 pub trait Clipboard: Send + 'static {
     /// What is on the clipboard in the formats shared; `None` if it is empty or
-    /// holds only something else (an image, files).
+    /// holds only something else (files). While the clipboard holds files (see
+    /// [`file_list`](Self::file_list)), this returns `Ok(None)`: GTK and Windows
+    /// both also put the path(s) on the clipboard as plain text, which is not
+    /// something to share as text.
     fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError>;
     /// Replace the clipboard with `content`.
     fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError>;
+    /// The top-level paths a local application copied (not dragged) onto the
+    /// clipboard, if any; `None` on a platform or a clipboard holding something
+    /// else. The default never reports files.
+    fn file_list(&mut self) -> Result<Option<Vec<std::path::PathBuf>>, ClipboardError> {
+        Ok(None)
+    }
+    /// Replace the clipboard with a list of files (what a paste pastes). The
+    /// default refuses: a clipboard that cannot report files cannot set them
+    /// either.
+    fn set_file_list(&mut self, _paths: &[std::path::PathBuf]) -> Result<(), ClipboardError> {
+        Err(ClipboardError(
+            "this clipboard cannot hold a file list".into(),
+        ))
+    }
     /// A number that changes whenever the clipboard does (see `watch`). While
     /// it stays the same the clipboard is not read at all. `None`: no such
     /// signal, read on every poll.
@@ -82,6 +99,12 @@ impl Clipboard for Box<dyn Clipboard> {
     }
     fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
         (**self).set(content)
+    }
+    fn file_list(&mut self) -> Result<Option<Vec<std::path::PathBuf>>, ClipboardError> {
+        (**self).file_list()
+    }
+    fn set_file_list(&mut self, paths: &[std::path::PathBuf]) -> Result<(), ClipboardError> {
+        (**self).set_file_list(paths)
     }
     fn change_count(&mut self) -> Option<u64> {
         (**self).change_count()
