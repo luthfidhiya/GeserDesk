@@ -196,6 +196,19 @@ mod enigo_sink {
                         tracing::warn!(hid = ev.hid, "no way to type this key; ignored");
                         return;
                     };
+                    let key = os_key(key);
+                    // A character with no key on this layout is typed as text,
+                    // which enigo sends as a whole press-and-release on each
+                    // call: once on press, nothing to release.
+                    #[cfg(windows)]
+                    if let Key::Unicode(c) = key {
+                        if win::text_only(c) {
+                            if let Err(e) = self.enigo.key(key, Direction::Click) {
+                                tracing::warn!(error = %e, ?key, "key injection failed");
+                            }
+                            return;
+                        }
+                    }
                     // A repeat re-presses the key that is already down.
                     let key = *self.held_keys.entry(ev.hid).or_insert(key);
                     self.inject(key, Direction::Press);
@@ -247,17 +260,67 @@ mod enigo_sink {
         }
     }
 
+    /// Adjust a key to what this OS's injection can type.
+    ///
+    /// enigo 0.3 on Windows finds the virtual key of a character with
+    /// `VkKeyScanExW` but keeps that call's shift-state byte as part of the key
+    /// code (`'A'` becomes 0x0141, not 0x41), so every character that needs
+    /// Shift -- capitals, `!`, `@`, `?`, ... -- turns into an invalid key and
+    /// types nothing. Look the key up here and hand enigo the plain virtual
+    /// key: the server sends Shift as a key of its own, so the OS already has
+    /// it held.
+    fn os_key(key: Key) -> Key {
+        #[cfg(windows)]
+        if let Key::Unicode(c) = key {
+            if let Some(vk) = win::shifted_vk(c) {
+                return Key::Other(u32::from(vk));
+            }
+        }
+        key
+    }
+
     #[cfg(windows)]
     mod win {
         use windows_sys::Win32::Foundation::POINT;
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE,
-            MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+            GetKeyboardLayout, SendInput, VkKeyScanExW, INPUT, INPUT_0, INPUT_MOUSE,
+            MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         };
+
+        /// What the layout of the focused window says about typing `c`: the
+        /// virtual key and the modifier bits (shift 1, ctrl 2, alt 4) it needs,
+        /// or `None` if the character has no key on it.
+        fn lookup(c: char) -> Option<(u16, i16)> {
+            let mut buf = [0u16; 2];
+            let [unit] = *c.encode_utf16(&mut buf) else {
+                return None; // outside the BMP: always typed as text
+            };
+            let layout = unsafe {
+                GetKeyboardLayout(GetWindowThreadProcessId(
+                    GetForegroundWindow(),
+                    std::ptr::null_mut(),
+                ))
+            };
+            let found = unsafe { VkKeyScanExW(unit, layout) };
+            (found != -1).then_some(((found & 0xff) as u16, (found >> 8) & 0xff))
+        }
+
+        /// The virtual key that types `c` with a modifier held, if the layout
+        /// needs one; `None` for characters typed plainly (enigo handles those)
+        /// or not on the layout at all.
+        pub fn shifted_vk(c: char) -> Option<u16> {
+            lookup(c).filter(|&(_, state)| state != 0).map(|(vk, _)| vk)
+        }
+
+        /// A printable character with no key on the layout, which has to be
+        /// typed as text. Control characters keep their own keys.
+        pub fn text_only(c: char) -> bool {
+            !c.is_control() && lookup(c).is_none()
+        }
 
         pub fn cursor_pos() -> Option<(i32, i32)> {
             let mut p = POINT { x: 0, y: 0 };
@@ -371,6 +434,33 @@ mod enigo_sink {
             0x51 => Key::DownArrow,
             0x52 => Key::UpArrow,
             0x53 => Key::Numlock,
+            // The numeric keypad. The server sends these with the character they
+            // make, which would type the digit row's key; the HID code says which
+            // physical key it was. Windows virtual keys VK_NUMPAD0..9 (0x60..),
+            // VK_MULTIPLY, VK_ADD, VK_SUBTRACT, VK_DECIMAL, VK_DIVIDE.
+            #[cfg(windows)]
+            0x54 => Key::Other(0x6F),
+            #[cfg(windows)]
+            0x55 => Key::Other(0x6A),
+            #[cfg(windows)]
+            0x56 => Key::Other(0x6D),
+            #[cfg(windows)]
+            0x57 => Key::Other(0x6B),
+            #[cfg(windows)]
+            0x59..=0x61 => Key::Other(0x61 + u32::from(hid - 0x59)),
+            #[cfg(windows)]
+            0x62 => Key::Other(0x60),
+            #[cfg(windows)]
+            0x63 => Key::Other(0x6E),
+            // Scroll Lock is an ordinary key here (VK_SCROLL): it toggles the
+            // client's own Scroll Lock state. The server's `scroll_lock_locks`
+            // option is not wired to it.
+            #[cfg(windows)]
+            0x47 => Key::Other(0x91),
+            // The Menu / Application key between Right Alt and Right Ctrl.
+            // enigo only has it on Windows, so other clients still ignore it.
+            #[cfg(windows)]
+            0x65 => Key::Apps,
             0x68..=0x6F => [
                 Key::F13,
                 Key::F14,
@@ -447,6 +537,31 @@ mod enigo_sink {
             assert_eq!(key_for(&ev(0xE1, None)), Some(Key::LShift));
         }
 
+        #[cfg(windows)]
+        #[test]
+        fn keypad_keys_are_numpad_virtual_keys_whatever_the_character() {
+            // KP 1, KP 0, KP + and KP . with the character a server adds.
+            assert_eq!(key_for(&ev(0x59, Some('1'))), Some(Key::Other(0x61)));
+            assert_eq!(key_for(&ev(0x61, Some('9'))), Some(Key::Other(0x69)));
+            assert_eq!(key_for(&ev(0x62, Some('0'))), Some(Key::Other(0x60)));
+            assert_eq!(key_for(&ev(0x57, Some('+'))), Some(Key::Other(0x6B)));
+            assert_eq!(key_for(&ev(0x63, Some('.'))), Some(Key::Other(0x6E)));
+            // The digit row is untouched.
+            assert_eq!(key_for(&ev(0x1E, Some('1'))), Some(Key::Unicode('1')));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn scroll_lock_is_an_ordinary_key_on_windows() {
+            assert_eq!(key_for(&ev(0x47, None)), Some(Key::Other(0x91)));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn the_menu_key_is_the_apps_key_on_windows() {
+            assert_eq!(key_for(&ev(0x65, None)), Some(Key::Apps));
+        }
+
         #[test]
         fn printable_keys_use_the_server_character() {
             assert_eq!(key_for(&ev(0x04, Some('a'))), Some(Key::Unicode('a')));
@@ -456,6 +571,21 @@ mod enigo_sink {
         #[test]
         fn unknown_key_without_character_is_untypable() {
             assert_eq!(key_for(&ev(0x04, None)), None);
+        }
+
+        /// The lookups depend on the focused window's layout, so these only
+        /// state what holds on every Latin layout (and on layouts without
+        /// Latin letters, where nothing is found and everything is text).
+        #[cfg(windows)]
+        #[test]
+        fn windows_lookups_never_hand_enigo_a_shift_state_as_a_key() {
+            assert_eq!(win::shifted_vk('a'), None);
+            assert!(matches!(win::shifted_vk('A'), None | Some(0x41)));
+            // Control characters keep their keys and are never "text".
+            assert!(!win::text_only('\n'));
+            // `os_key` leaves keys that need no help alone.
+            assert_eq!(os_key(Key::Return), Key::Return);
+            assert_eq!(os_key(Key::Unicode('a')), Key::Unicode('a'));
         }
 
         #[test]
