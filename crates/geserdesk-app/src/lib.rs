@@ -7,6 +7,7 @@
 //! * [`settings`] -- the remembered settings (`gui.toml`) and the starting config.
 //! * [`log`]      -- recent log lines, kept for the screen and streamed to it.
 //! * [`trust`]    -- asking the person whether to trust a server seen for the first time.
+//! * [`transfer`] -- progress of a files pull, streamed to a front end.
 //!
 //! The desktop app is a thin shell over this crate; a different front end could
 //! reuse it unchanged.
@@ -16,6 +17,7 @@ pub mod daemon;
 pub mod log;
 pub mod session;
 pub mod settings;
+pub mod transfer;
 pub mod trust;
 
 pub use control::{ClientOptions, Endpoint, Remote};
@@ -23,4 +25,5 @@ pub use geserdesk_server::{DeskSnapshot, DeskState};
 pub use log::{BufferLayer, LogBuffer, LogLine};
 pub use session::{Session, Status};
 pub use settings::{ClientSettings, Mode, ServerSettings, Settings, Theme};
+pub use transfer::{TransferProgress, TransferState};
 pub use trust::TrustPrompt;

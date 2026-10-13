@@ -27,6 +27,6 @@ pub use config::{Config, ConfigError};
 pub use hub::{Hub, HubEvent};
 pub use layout::{Layout, SwitchPolicy, SwitchState};
 pub use net::{
-    run_server, run_server_shared, run_server_with, serve, serve_with_capture, HandshakeOutcome,
-    ServerHandle,
+    run_server, run_server_shared, run_server_with, run_server_with_progress, serve,
+    serve_with_capture, HandshakeOutcome, ServerHandle,
 };

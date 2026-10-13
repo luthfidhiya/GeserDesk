@@ -88,6 +88,7 @@ pub struct Session {
     running: Mutex<Option<Running>>,
     started: AtomicU64,
     desk: Mutex<Option<Arc<DeskState>>>,
+    transfers: crate::transfer::TransferHub,
 }
 
 impl Session {
@@ -99,7 +100,13 @@ impl Session {
             running: Mutex::new(None),
             started: AtomicU64::new(0),
             desk: Mutex::new(None),
+            transfers: crate::transfer::TransferHub::new(),
         })
+    }
+
+    /// Every files pull's progress, for a front end to show.
+    pub fn subscribe_transfers(&self) -> tokio::sync::broadcast::Receiver<crate::transfer::TransferProgress> {
+        self.transfers.subscribe()
     }
 
     pub fn status(&self) -> Status {
@@ -193,6 +200,7 @@ impl Session {
                     warn!(error = %e, "the clipboard is not available; it will not be shared")
                 }
             }
+            cfg.transfer_progress = Some(self.transfers.pull_sink());
         }
         let this = Arc::clone(self);
         info!(server = %cfg.server, name = %cfg.name, reconnect, "starting client");
@@ -263,8 +271,16 @@ impl Session {
         let (stop, shutdown) = watch::channel(false);
         let (ready_tx, ready_rx) = oneshot::channel();
         let this = Arc::clone(self);
+        let progress = self.transfers.pull_sink();
         let task = self.rt.spawn(async move {
-            match geserdesk_server::run_server_with(config, capture, shutdown, Some(ready_tx)).await
+            match geserdesk_server::run_server_with_progress(
+                config,
+                capture,
+                shutdown,
+                Some(ready_tx),
+                Some(progress),
+            )
+            .await
             {
                 Ok(()) => info!("server stopped"),
                 Err(e) => {
@@ -367,6 +383,7 @@ fn client_config(
         handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         // Opening the desktop's clipboard is left to whoever starts the session.
         clipboard: None,
+        transfer_progress: None,
     })
 }
 
