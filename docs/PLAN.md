@@ -643,3 +643,33 @@ The client was built (MSVC Build Tools, Rust 1.99, Node 24 with pnpm through cor
   return to, so nothing ever triggers a local pull, and nobody's `Enter` ever arrives either); pulling is strictly
   sequential (one chunk in flight at a time), not pipelined, so a slow link pulls more slowly than it could; no
   resuming a pull that failed partway, no images/RTF, and the primary selection is still not shared.
+
+### Session 13 — 2026-10-13 — the progress window the session 12 plan deferred
+
+- **What:** a small, frameless, always-on-top window now shows a files pull while it happens, closing the "no
+  progress indication" gap session 12 left open. `geserdesk_clipboard::pull::pull_with_progress` already reported
+  each chunk; it now also reports `Done`/`Failed` as a `PullEvent`, and every `PullReport` names which machine the
+  files are coming from (`"server"` from a client's own view; the owning client's screen name from the server's,
+  threaded through from `router::run_shared` where it already knew it). `spawn_pull` (client) and `spawn_local_pull`
+  (server, now taking a `LocalPullJob` instead of eight positional arguments -- clippy's own limit) both accept an
+  optional sink and drive it through a whole pull's lifecycle, not just its chunks.
+- **New in `geserdesk-app`:** `Session.transfers: TransferHub`, a `broadcast` stream of `TransferProgress`
+  (seq, peer, file, counts, byte totals, running/done/failed), fed whenever a client or a server session starts.
+  `Event::Transfer` carries it to controllers; `PROTOCOL` moved to **3** (an older app would fail to decode a new
+  tagged-enum variant it has never seen, so this needed the same version bump a wire-shape change always gets, not
+  just an additive field).
+- **New in the desktop app:** `transfer_window.rs` opens a second Tauri window (same bundle, `?popup=transfer`,
+  no router added) near the screen's corner the first time a `Running` report arrives, and raises it again for each
+  later pull; `TransferPopup.tsx` renders whatever report it is currently sent and hides itself a couple seconds
+  after `Done`, longer after `Failed` (so the message stays readable) -- the Rust side never has to decide when to
+  hide it, only when to show it again.
+- **Verified:** new unit tests for `PullEvent`/`PullReport` end-to-end through `spawn_pull`/`spawn_local_pull`, and
+  for `TransferHub` (a sink's own `seq` tracked independently of another sink's, a `Failed` with no `Progress` first
+  still a valid report). `fmt`, `clippy -D warnings`, `cargo test --workspace`, the frontend's existing vitest suite,
+  `tsc --noEmit`, `pnpm build`, all green -- all without a display, so none of this was watched actually opening,
+  moving, or disappearing on screen.
+- **Known gaps:** no Cancel button -- aborting a pull already in flight is not wired anywhere in this chain, so the
+  window is informational only; its own close button (✕) only hides the window, the pull keeps running underneath.
+  The popup's position, sizing against a real multi-monitor and multi-DPI setup, and its appearance in both themes
+  are all unverified (`tauri dev` was not run). A transfer that never reports `Done`/`Failed` (a bug, or a pull that
+  hangs rather than erroring) would leave the window open indefinitely with no timeout of its own.

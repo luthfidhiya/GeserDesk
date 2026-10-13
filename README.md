@@ -24,7 +24,7 @@ moves them to a client by pushing the cursor against a screen edge (or
 | M8 — TLS 1.3, certificate pinning, trust-on-first-use | ✅ done, confirmed Linux server <-> Windows client |
 | Desktop app (Tauri + React) with tray | ✅ built; on Windows it starts, spawns its daemon detached, attaches over the named pipe and leaves the daemon running when the app dies; the window itself (layout editor, tray, dialogs) is still to be driven on Windows |
 | M9 — clipboard sync (text, HTML, pictures) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); the real X11 clipboard checked on this desktop (text, HTML, a picture, a file list, a change signal) |
-| M10 — clipboard files (names/sizes announced at once, bytes pulled on arrival) | ✅ built and unit/component tested (manifest collection, path sanitising, the pull itself, routing a request to whichever machine owns the files, pulling for the server's own screen); Nautilus accepts and offers a file list from `arboard` with no extra code; not yet tried with a real Windows client, nor pasted into a real Explorer/Nautilus from across the network |
+| M10 — clipboard files (names/sizes announced at once, bytes pulled on arrival) | ✅ built and unit/component tested (manifest collection, path sanitising, the pull itself, routing a request to whichever machine owns the files, pulling for the server's own screen); Nautilus accepts and offers a file list from `arboard` with no extra code; a small always-on-top window shows a pull's progress; not yet tried with a real Windows client, nor pasted into a real Explorer/Nautilus from across the network, nor the progress window actually opened on screen |
 | M7 — Windows capture (Windows as the server) | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
@@ -204,7 +204,9 @@ too: the names and sizes go to every machine at once, but the bytes are only
 pulled to whichever one the cursor actually arrives on, into a temporary folder,
 and only then does **Paste** there find anything. Pasting on the machine that
 copied them needs nothing pulled; it already has them. Nothing is pulled to a
-machine the cursor never visits.
+machine the cursor never visits. The desktop app shows a small always-on-top
+window while a pull is under way (it has no Cancel yet; closing it only hides
+it, the pull keeps going).
 
 * Off for everyone: `clipboard_files = false` under `[options]`. Off for one
   machine (it can still share text/HTML/pictures): `geserdesk client
