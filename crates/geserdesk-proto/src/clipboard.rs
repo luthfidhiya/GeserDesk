@@ -20,6 +20,11 @@ pub const MIME_TEXT: &str = "text/plain";
 pub const MIME_HTML: &str = "text/html";
 /// A picture (a screenshot, a copied image) as PNG.
 pub const MIME_IMAGE: &str = "image/png";
+/// A list of files/folders copied (not dragged) on the clipboard, as a
+/// postcard-encoded [`FileManifest`]. The bytes of the files themselves are
+/// not here; they are pulled with [`crate::message::ClientMsg::FileRead`] /
+/// [`crate::message::ServerMsg::FileRead`].
+pub const MIME_FILES: &str = "application/x-geserdesk-files";
 
 /// One format of a clipboard's contents.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -96,9 +101,33 @@ impl ClipboardContent {
         c
     }
 
+    /// The file/folder manifest, if this copy was of files rather than data.
+    pub fn files(&self) -> Option<FileManifest> {
+        let item = self.items.iter().find(|i| i.mime == MIME_FILES)?;
+        FileManifest::decode(&item.data).ok()
+    }
+
+    /// Files replace everything else: a copy is either files, or data (text,
+    /// HTML, a picture), never both, so a receiver is never tempted to read a
+    /// path as if it were pasteable text.
+    pub fn with_files(manifest: &FileManifest) -> Self {
+        if manifest.entries.is_empty() {
+            return Self::default();
+        }
+        Self {
+            items: vec![ClipboardItem {
+                mime: MIME_FILES.to_string(),
+                data: manifest.encode(),
+            }],
+        }
+    }
+
     /// Whether there is nothing a clipboard here could hold.
     pub fn is_empty(&self) -> bool {
-        self.text().is_none() && self.html().is_none() && self.image().is_none()
+        self.text().is_none()
+            && self.html().is_none()
+            && self.image().is_none()
+            && self.files().is_none()
     }
 
     /// The bytes of the formats themselves, which is what a size limit counts.
@@ -118,6 +147,64 @@ impl ClipboardContent {
     pub fn decode(bytes: &[u8]) -> Result<Self, ContentError> {
         postcard::from_bytes(bytes).map_err(|_| ContentError)
     }
+}
+
+/// One file or folder in a [`FileManifest`]. `path` is relative to the copy's
+/// root and `/`-separated regardless of the owner's OS; a folder has `size = 0`
+/// and `dir = true`. Entries are listed depth-first, folder before contents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub path: String,
+    pub size: u64,
+    pub dir: bool,
+}
+
+/// The names and sizes of what was copied, announced with the clipboard; the
+/// bytes are pulled separately, by index into this list, only while it is the
+/// manifest currently on the clipboard (see `seq` on the file-read messages).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileManifest {
+    pub entries: Vec<FileEntry>,
+}
+
+impl FileManifest {
+    /// The sum of every (non-folder) entry's size: what a full pull would cost.
+    pub fn total_bytes(&self) -> u64 {
+        self.entries.iter().filter(|e| !e.dir).map(|e| e.size).sum()
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("a vector of strings, sizes and bools always encodes")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ContentError> {
+        postcard::from_bytes(bytes).map_err(|_| ContentError)
+    }
+}
+
+/// The answer to a file-read request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileReadResult {
+    Data(Vec<u8>),
+    Err(FileReadError),
+}
+
+/// Why a file-read request was refused. The connection stays up either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+pub enum FileReadError {
+    /// `index` is not in the manifest for this `seq` (or `seq` itself is unknown).
+    #[error("no such file in the manifest")]
+    NotFound,
+    /// The offset or length requested does not fit the file's manifest size, or
+    /// the file on disk no longer matches it.
+    #[error("the file does not match what was announced")]
+    Changed,
+    /// This peer declined to serve it (sharing turned off, path escaped the copy).
+    #[error("reading this file is not allowed")]
+    Denied,
+    /// A newer copy replaced the one `seq` referred to.
+    #[error("a newer copy replaced this one")]
+    Superseded,
 }
 
 /// Which clipboard a message refers to. Most platforms only have `Clipboard`;
@@ -274,6 +361,39 @@ mod tests {
         let back = ClipboardContent::decode(&c.encode()).unwrap();
         assert_eq!(back.text(), Some("t"));
         assert_eq!(back.html(), None);
+    }
+
+    #[test]
+    fn a_file_manifest_rides_alone_and_excludes_everything_else() {
+        let manifest = FileManifest {
+            entries: vec![
+                FileEntry {
+                    path: "a.txt".into(),
+                    size: 5,
+                    dir: false,
+                },
+                FileEntry {
+                    path: "sub".into(),
+                    size: 0,
+                    dir: true,
+                },
+                FileEntry {
+                    path: "sub/b.txt".into(),
+                    size: 7,
+                    dir: false,
+                },
+            ],
+        };
+        let c = ClipboardContent::with_files(&manifest);
+        assert_eq!(c.files(), Some(manifest.clone()));
+        assert_eq!(c.text(), None);
+        assert_eq!(c.html(), None);
+        assert_eq!(c.image(), None);
+        assert!(!c.is_empty());
+        assert_eq!(manifest.total_bytes(), 12);
+        assert_eq!(ClipboardContent::decode(&c.encode()).unwrap(), c);
+
+        assert!(ClipboardContent::with_files(&FileManifest::default()).is_empty());
     }
 
     #[test]

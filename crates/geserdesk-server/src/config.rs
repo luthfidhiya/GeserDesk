@@ -187,6 +187,8 @@ impl Config {
             scroll_lock_locks: policy.scroll_lock_locks,
             screensaver_sync: opt.screensaver_sync.unwrap_or(false),
             relative_mouse_moves: opt.relative_mouse_moves.unwrap_or(true),
+            clipboard_files: opt.clipboard_files.unwrap_or(true),
+            clipboard_files_max_bytes: opt.clipboard_files_max_bytes.unwrap_or(0),
         };
 
         Ok(Config {
@@ -281,6 +283,8 @@ struct OptionsSection {
     scroll_lock_locks: Option<bool>,
     clipboard_sharing: Option<bool>,
     clipboard_max_bytes: Option<u64>,
+    clipboard_files: Option<bool>,
+    clipboard_files_max_bytes: Option<u64>,
     screensaver_sync: Option<bool>,
     relative_mouse_moves: Option<bool>,
 }

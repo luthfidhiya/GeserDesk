@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks.
-pub const PROTOCOL_VERSION: Version = Version { major: 3, minor: 1 };
+pub const PROTOCOL_VERSION: Version = Version { major: 4, minor: 0 };
 
 /// A `(major, minor)` protocol version.
 ///

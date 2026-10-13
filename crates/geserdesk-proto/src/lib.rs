@@ -28,7 +28,7 @@ pub mod input;
 pub mod message;
 pub mod version;
 
-pub use clipboard::{Chunk, ClipboardId};
+pub use clipboard::{Chunk, ClipboardId, FileEntry, FileManifest, FileReadError, FileReadResult};
 pub use codec::{CodecError, MessageStream};
 pub use geometry::{Edge, EdgeSet, Point, Rect, ScreenInfo};
 pub use input::{Button, KeyAction, KeyEvent, ModMask, MouseEvent};

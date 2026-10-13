@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use geserdesk_proto::clipboard::ClipboardId;
+use geserdesk_proto::clipboard::{ClipboardId, FileReadError, FileReadResult};
 use geserdesk_proto::{
     Button, Chunk, ClientMsg, CloseReason, Edge, KeyAction, KeyEvent, MessageStream, ModMask,
     MouseEvent, Options, Point, Rect, ScreenInfo, ServerMsg, Version,
@@ -35,12 +35,21 @@ fn all_client_msgs() -> Vec<ClientMsg> {
             seq: 7,
             chunk: Chunk::Data(vec![1, 2, 3, 4, 5]),
         },
-        ClientMsg::FileOffer {
-            name: "notes.txt".into(),
-            size: 12_345,
+        ClientMsg::FileRead {
+            seq: 1,
+            req: 2,
+            index: 0,
+            offset: 0,
+            len: 1024,
         },
-        ClientMsg::FileChunk(Chunk::Start { total: 999 }),
-        ClientMsg::FileChunk(Chunk::End),
+        ClientMsg::FileReply {
+            req: 2,
+            result: FileReadResult::Data(vec![1, 2, 3]),
+        },
+        ClientMsg::FileReply {
+            req: 3,
+            result: FileReadResult::Err(FileReadError::Changed),
+        },
         ClientMsg::KeepAlive,
     ]
 }
@@ -95,11 +104,21 @@ fn all_server_msgs() -> Vec<ServerMsg> {
             seq: 1,
             chunk: Chunk::Data(vec![0xAA; 1000]),
         },
-        ServerMsg::FileOffer {
-            name: "archive.zip".into(),
-            size: u64::MAX,
+        ServerMsg::FileRead {
+            seq: u64::MAX,
+            req: 1,
+            index: u32::MAX,
+            offset: u64::MAX,
+            len: u32::MAX,
         },
-        ServerMsg::FileChunk(Chunk::Data(vec![9; 32 * 1024])),
+        ServerMsg::FileReply {
+            req: 1,
+            result: FileReadResult::Data(vec![9; 32 * 1024]),
+        },
+        ServerMsg::FileReply {
+            req: 1,
+            result: FileReadResult::Err(FileReadError::Superseded),
+        },
         ServerMsg::SetOptions(Options::default()),
         ServerMsg::Close(CloseReason::ProtocolError),
         ServerMsg::KeepAlive,

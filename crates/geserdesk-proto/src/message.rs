@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::clipboard::{Chunk, ClipboardId};
+use crate::clipboard::{Chunk, ClipboardId, FileReadResult};
 use crate::geometry::ScreenInfo;
 use crate::input::{KeyEvent, ModMask, MouseEvent};
 use crate::version::Version;
@@ -33,10 +33,18 @@ pub enum ClientMsg {
         seq: u64,
         chunk: Chunk,
     },
-    /// Offer to send a file (drag-and-drop from the client).
-    FileOffer { name: String, size: u64 },
-    /// A chunk of an in-progress file transfer.
-    FileChunk(Chunk),
+    /// Read `len` bytes at `offset` of entry `index` of the file manifest this
+    /// peer announced as transfer `seq` (see [`ClipboardId`]'s file manifest in
+    /// [`crate::clipboard::ClipboardContent`]). Answered with [`FileReply`].
+    FileRead {
+        seq: u64,
+        req: u64,
+        index: u32,
+        offset: u64,
+        len: u32,
+    },
+    /// The answer to a [`ServerMsg::FileRead`] this peer sent.
+    FileReply { req: u64, result: FileReadResult },
     /// Reply to [`ServerMsg::KeepAlive`].
     KeepAlive,
 }
@@ -90,11 +98,20 @@ pub enum ServerMsg {
         chunk: Chunk,
     },
 
-    FileOffer {
-        name: String,
-        size: u64,
+    /// Read a chunk of a file a client announced on its clipboard. Answered
+    /// with [`ClientMsg::FileReply`].
+    FileRead {
+        seq: u64,
+        req: u64,
+        index: u32,
+        offset: u64,
+        len: u32,
     },
-    FileChunk(Chunk),
+    /// The answer to a [`ClientMsg::FileRead`] this client sent.
+    FileReply {
+        req: u64,
+        result: FileReadResult,
+    },
 
     /// Push a new set of runtime options.
     SetOptions(Options),
@@ -146,6 +163,12 @@ pub struct Options {
     pub screensaver_sync: bool,
     /// Send relative mouse motion instead of absolute while on a client.
     pub relative_mouse_moves: bool,
+    /// Whether files copied (not dragged) on one machine's clipboard can be
+    /// pulled by another when the cursor arrives there.
+    pub clipboard_files: bool,
+    /// Cap on the total size of files pulled for one copy, in bytes (0 = the
+    /// built-in ceiling; see [`crate::clipboard`]).
+    pub clipboard_files_max_bytes: u64,
 }
 
 impl Default for Options {
@@ -156,6 +179,8 @@ impl Default for Options {
             scroll_lock_locks: true,
             screensaver_sync: false,
             relative_mouse_moves: true,
+            clipboard_files: true,
+            clipboard_files_max_bytes: 0,
         }
     }
 }
