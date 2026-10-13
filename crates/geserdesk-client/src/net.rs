@@ -1031,7 +1031,7 @@ mod tests {
     mod tls {
         use super::*;
         use geserdesk_server::net::{accept_loop_tls, bind, TlsContext};
-        use geserdesk_server::{Config, Hub};
+        use geserdesk_server::{files::FileRouter, Config, Hub};
         use std::collections::{BTreeMap, HashMap};
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Mutex;
@@ -1082,12 +1082,14 @@ mod tests {
             let (_h, listener) = bind(&config).await.unwrap();
             let addr = listener.local_addr().unwrap();
             let (_, never) = tokio::sync::watch::channel(false);
+            let file_router = FileRouter::new(Arc::clone(&hub));
             tokio::spawn(accept_loop_tls(
                 config,
                 listener,
                 Arc::clone(&hub),
                 never,
                 Some(Arc::clone(&ctx)),
+                file_router,
             ));
             Rig {
                 addr,

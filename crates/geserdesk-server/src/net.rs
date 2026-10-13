@@ -28,6 +28,7 @@ use tracing::{info, warn};
 use crate::admin::DeskState;
 use crate::clipboard;
 use crate::config::Config;
+use crate::files::FileRouter;
 use crate::hub::{Hub, Registration};
 use crate::layout::Layout;
 use crate::router::{self, Core};
@@ -252,7 +253,8 @@ pub async fn run_server_with(
 ) -> anyhow::Result<()> {
     // The desktop's clipboard is shared whenever its input is captured; a server
     // that only runs the network side leaves it alone.
-    let clipboard: Option<Box<dyn Clipboard>> = if capture && config.options.clipboard_sharing {
+    let sharing_anything = config.options.clipboard_sharing || config.options.clipboard_files;
+    let clipboard: Option<Box<dyn Clipboard>> = if capture && sharing_anything {
         match SystemClipboard::new() {
             Ok(c) => Some(Box::new(c)),
             Err(e) => {
@@ -276,6 +278,7 @@ pub async fn run_server_shared(
     clipboard: Option<Box<dyn Clipboard>>,
 ) -> anyhow::Result<()> {
     let hub = Hub::new();
+    let file_router = FileRouter::new(Arc::clone(&hub));
     let mut background = Vec::new();
 
     let local = if capture {
@@ -309,16 +312,20 @@ pub async fn run_server_shared(
     let from_clients = hub
         .take_clipboard()
         .expect("a fresh hub has its clipboard stream");
-    if let (Some(clipboard), true) = (clipboard, config.options.clipboard_sharing) {
+    let sharing_anything = config.options.clipboard_sharing || config.options.clipboard_files;
+    if let (Some(clipboard), true) = (clipboard, sharing_anything) {
         background.push(tokio::spawn(clipboard::run(
             Arc::clone(&hub),
             ClipboardSync::new(clipboard),
             from_clients,
             config.options.clipboard_max_bytes,
+            Arc::clone(&file_router),
+            config.options.clipboard_files,
+            config.options.clipboard_files_max_bytes,
         )));
     } // else nobody relays: dropped, so a client's pushes are discarded
 
-    let result = serve_with_hub(config, hub, local, shutdown, ready).await;
+    let result = serve_with_hub(config, hub, local, shutdown, ready, file_router).await;
     for task in background {
         task.abort();
     }
@@ -331,6 +338,7 @@ async fn serve_with_hub(
     local_monitors: Vec<Rect>,
     shutdown: watch::Receiver<bool>,
     ready: Option<oneshot::Sender<Arc<DeskState>>>,
+    file_router: Arc<FileRouter>,
 ) -> anyhow::Result<()> {
     let tls = tls_for(&config)?;
     let (_handle, listener) = bind(&config).await?;
@@ -346,7 +354,7 @@ async fn serve_with_hub(
         );
         let _ = ready.send(desk); // the front end may have stopped waiting
     }
-    accept_loop_tls(config, listener, hub, shutdown, tls).await
+    accept_loop_tls(config, listener, hub, shutdown, tls, file_router).await
 }
 
 /// Bind the listener and return a handle plus the socket, without accepting yet.
@@ -366,22 +374,30 @@ pub async fn accept_loop(config: Config, listener: TcpListener) -> anyhow::Resul
 }
 
 /// The accept loop with an explicit [`Hub`] and shutdown signal, without TLS.
+/// File sharing between its clients works (routed through a fresh
+/// [`FileRouter`]); the server's own desktop plays no part, as there is no
+/// clipboard here to announce from or pull into.
 pub async fn accept_loop_with(
     config: Config,
     listener: TcpListener,
     hub: Arc<Hub>,
     shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    accept_loop_tls(config, listener, hub, shutdown, None).await
+    let file_router = FileRouter::new(Arc::clone(&hub));
+    accept_loop_tls(config, listener, hub, shutdown, None, file_router).await
 }
 
-/// The accept loop, optionally wrapping every connection in TLS.
+/// The accept loop, optionally wrapping every connection in TLS. `file_router`
+/// should be the same one, if any, that [`crate::clipboard::run`] was started
+/// with, so a client's files can be routed to whoever (another client, or this
+/// server's own screen) pulls them.
 pub async fn accept_loop_tls(
     config: Config,
     listener: TcpListener,
     hub: Arc<Hub>,
     mut shutdown: watch::Receiver<bool>,
     tls: Option<Arc<TlsContext>>,
+    file_router: Arc<FileRouter>,
 ) -> anyhow::Result<()> {
     let config = Arc::new(config);
     // Every connection runs in this set so that stopping the server can close
@@ -411,9 +427,10 @@ pub async fn accept_loop_tls(
         let config = Arc::clone(&config);
         let hub = Arc::clone(&hub);
         let tls = tls.clone();
+        let file_router = Arc::clone(&file_router);
         sessions.spawn(async move {
             let result = match tls {
-                None => handle_client(stream, peer, None, config, hub, None).await,
+                None => handle_client(stream, peer, None, config, hub, None, file_router).await,
                 Some(ctx) => {
                     let accepted = tokio::time::timeout(
                         TLS_HANDSHAKE_TIMEOUT,
@@ -432,7 +449,7 @@ pub async fn accept_loop_tls(
                         }
                     };
                     let fp = peer_fingerprint(secured.get_ref().1.peer_certificates());
-                    handle_client(secured, peer, fp, config, hub, Some(ctx)).await
+                    handle_client(secured, peer, fp, config, hub, Some(ctx), file_router).await
                 }
             };
             if let Err(e) = result {
@@ -463,6 +480,7 @@ async fn handle_client<S>(
     config: Arc<Config>,
     hub: Arc<Hub>,
     tls: Option<Arc<TlsContext>>,
+    file_router: Arc<FileRouter>,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -525,10 +543,12 @@ where
     } else {
         VecDeque::new()
     };
-    let result = session_loop(&mut ms, demo, &mut registration, &config.options).await;
+    let result = session_loop(&mut ms, demo, &mut registration, &config.options, &file_router).await;
     ms.send(&ServerMsg::Close(CloseReason::ServerShutdown))
         .await
         .ok();
+    // Whatever this client owned or was owed an answer for is now nobody's.
+    file_router.on_disconnected(registration.name());
     result
 }
 
@@ -599,6 +619,7 @@ async fn session_loop<S>(
     mut demo: VecDeque<ServerMsg>,
     registration: &mut Registration,
     options: &Options,
+    file_router: &Arc<FileRouter>,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -643,21 +664,39 @@ where
                         missed = 0;
                     }
                     Ok(ClientMsg::ClipboardGrab { id, seq }) => {
-                        if options.clipboard_sharing {
+                        // Whether this turns out to be files or data (text/HTML/
+                        // picture) is only known once it is fully decoded below;
+                        // either option being on is enough to reassemble it.
+                        if options.clipboard_sharing || options.clipboard_files {
                             pushed.grab(id, seq, max_bytes);
                         }
                         missed = 0;
                     }
                     Ok(ClientMsg::ClipboardData { id, seq, chunk }) => {
-                        if options.clipboard_sharing {
+                        if options.clipboard_sharing || options.clipboard_files {
                             match pushed.data(id, seq, chunk) {
                                 Ok(Some(content)) => {
-                                    registration.hub().clipboard_in(registration.name(), content)
+                                    let allowed = if content.files().is_some() {
+                                        options.clipboard_files
+                                    } else {
+                                        options.clipboard_sharing
+                                    };
+                                    if allowed {
+                                        registration.hub().clipboard_in(registration.name(), content);
+                                    }
                                 }
                                 Ok(None) => {}
                                 Err(e) => warn!(client = registration.name(), "dropped a clipboard push: {e}"),
                             }
                         }
+                        missed = 0;
+                    }
+                    Ok(ClientMsg::FileRead { seq, req, index, offset, len }) => {
+                        file_router.request_for_client(registration.name(), seq, req, index, offset, len);
+                        missed = 0;
+                    }
+                    Ok(ClientMsg::FileReply { req, result }) => {
+                        file_router.reply_from_client(registration.name(), req, result);
                         missed = 0;
                     }
                     Ok(other) => {
@@ -959,12 +998,15 @@ mod tests {
             let (_h, listener) = bind(&config).await.unwrap();
             let addr = listener.local_addr().unwrap();
             let (_, never) = watch::channel(false);
+            let hub = Hub::new();
+            let file_router = FileRouter::new(Arc::clone(&hub));
             tokio::spawn(accept_loop_tls(
                 config,
                 listener,
-                Hub::new(),
+                hub,
                 never,
                 Some(Arc::clone(&ctx)),
+                file_router,
             ));
             Rig {
                 addr,

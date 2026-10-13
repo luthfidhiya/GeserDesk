@@ -46,7 +46,7 @@ pub struct FileRouter {
     hub: Arc<Hub>,
     /// This server's own files, when it is the owner.
     local_owner: Arc<FileOwner>,
-    owner: Mutex<Option<Owner>>,
+    current: Mutex<Option<(Owner, u64)>>,
     pending: Mutex<HashMap<u64, Pending>>,
     next_req: AtomicU64,
 }
@@ -56,7 +56,7 @@ impl FileRouter {
         Arc::new(Self {
             hub,
             local_owner: Arc::new(FileOwner::new()),
-            owner: Mutex::new(None),
+            current: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             next_req: AtomicU64::new(1),
         })
@@ -68,25 +68,33 @@ impl FileRouter {
         &self.local_owner
     }
 
-    /// `owner` just announced a fresh files manifest (at some `seq` only the
-    /// owner itself needs to know). Replaces whoever owned files before.
-    pub fn announce(&self, owner: Owner) {
-        *self.owner.lock().unwrap() = Some(owner);
+    /// `owner` just announced a fresh files manifest as transfer `seq`.
+    /// Replaces whoever owned files before. `seq` is whatever every consumer
+    /// will see on the `ClipboardGrab` that carries this manifest, so a
+    /// would-be puller (including this server, for its own screen) can tell
+    /// there is something new to fetch without decoding the manifest itself.
+    pub fn announce(&self, owner: Owner, seq: u64) {
+        *self.current.lock().unwrap() = Some((owner, seq));
     }
 
-    pub fn current_owner(&self) -> Option<Owner> {
-        self.owner.lock().unwrap().clone()
+    /// Who owns files now, and at what `seq`, if anyone.
+    pub fn current(&self) -> Option<(Owner, u64)> {
+        self.current.lock().unwrap().clone()
+    }
+
+    fn current_owner(&self) -> Option<Owner> {
+        self.current.lock().unwrap().clone().map(|(o, _)| o)
     }
 
     /// `name` disconnected: if it was the owner, nobody is now (so a pull in
     /// flight fails cleanly rather than hanging); any request already sent to
     /// it is answered [`FileReadError::NotFound`].
     pub fn on_disconnected(&self, name: &str) {
-        let mut owner = self.owner.lock().unwrap();
-        if matches!(owner.as_ref(), Some(Owner::Client(n)) if n == name) {
-            *owner = None;
+        let mut current = self.current.lock().unwrap();
+        if matches!(current.as_ref(), Some((Owner::Client(n), _)) if n == name) {
+            *current = None;
         }
-        drop(owner);
+        drop(current);
         let stale: Vec<u64> = self
             .pending
             .lock()
@@ -246,6 +254,7 @@ mod tests {
     async fn with_no_owner_a_request_is_refused_at_once() {
         let hub = Hub::new();
         let router = FileRouter::new(Arc::clone(&hub));
+        assert_eq!(router.current(), None);
         assert_eq!(
             router.request_local(1, 0, 0, 10).await,
             FileReadResult::Err(FileReadError::NotFound)
@@ -271,7 +280,7 @@ mod tests {
         router
             .local_owner()
             .set(7, manifest, vec![dir.join("f.txt")]);
-        router.announce(Owner::Server);
+        router.announce(Owner::Server, 7);
 
         router.request_for_client("a", 7, 42, 0, 0, 10);
         let reply = tokio::time::timeout(Duration::from_secs(2), client.outbox.recv())
@@ -294,7 +303,8 @@ mod tests {
         let mut consumer = hub.register("a", mons()).unwrap();
         let mut owner_client = hub.register("b", mons()).unwrap();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()));
+        router.announce(Owner::Client("b".into()), 1);
+        assert_eq!(router.current(), Some((Owner::Client("b".into()), 1)));
 
         router.request_for_client("a", 9, 5, 2, 100, 50);
         let forwarded = tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
@@ -335,7 +345,7 @@ mod tests {
         let hub = Hub::new();
         let mut owner_client = hub.register("b", mons()).unwrap();
         let router = Arc::clone(&FileRouter::new(Arc::clone(&hub)));
-        router.announce(Owner::Client("b".into()));
+        router.announce(Owner::Client("b".into()), 1);
 
         let router2 = Arc::clone(&router);
         let pulling = tokio::spawn(async move { router2.request_local(3, 0, 0, 5).await });
@@ -359,7 +369,7 @@ mod tests {
         let _owner_client = hub.register("b", mons()).unwrap();
         let _impostor = hub.register("c", mons()).unwrap();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()));
+        router.announce(Owner::Client("b".into()), 1);
 
         router.request_for_client("a", 1, 10, 0, 0, 1);
         // Guess the req (it starts at 1 and this is the first request routed).
@@ -383,7 +393,7 @@ mod tests {
         let mut consumer = hub.register("a", mons()).unwrap();
         let owner_client = hub.register("b", mons()).unwrap();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()));
+        router.announce(Owner::Client("b".into()), 1);
 
         router.request_for_client("a", 1, 10, 0, 0, 1);
         drop(owner_client); // "b" disconnects with the request unanswered
@@ -400,23 +410,26 @@ mod tests {
                 result: FileReadResult::Err(FileReadError::NotFound)
             }
         );
-        assert_eq!(router.current_owner(), None);
+        assert_eq!(router.current().map(|(o, _)| o), None);
     }
 
     #[tokio::test]
     async fn disconnecting_a_machine_that_is_not_the_owner_leaves_ownership_alone() {
         let hub = Hub::new();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("b".into()));
+        router.announce(Owner::Client("b".into()), 1);
         router.on_disconnected("someone-else");
-        assert_eq!(router.current_owner(), Some(Owner::Client("b".into())));
+        assert_eq!(
+            router.current().map(|(o, _)| o),
+            Some(Owner::Client("b".into()))
+        );
     }
 
     #[tokio::test]
     async fn sending_to_a_client_that_already_vanished_resolves_the_request_at_once() {
         let hub = Hub::new();
         let router = FileRouter::new(Arc::clone(&hub));
-        router.announce(Owner::Client("ghost".into()));
+        router.announce(Owner::Client("ghost".into()), 1);
         assert_eq!(
             router.request_local(1, 0, 0, 1).await,
             FileReadResult::Err(FileReadError::NotFound)

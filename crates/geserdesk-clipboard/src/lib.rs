@@ -8,8 +8,10 @@
 //! between them forever.
 //!
 //! Plain text, HTML (what carries a copied web page's style into Word) and
-//! pictures (PNG, so screenshots) are shared. Files and the X11 primary
-//! selection are not.
+//! pictures (PNG, so screenshots) are shared. A copy of files or folders (not
+//! dragged -- an ordinary Copy) announces its names and sizes the same way;
+//! the bytes themselves are pulled separately, when and if a consumer needs
+//! them (see [`files`] and [`pull`]). The X11 primary selection is not shared.
 //!
 //! * [`Clipboard`] -- the OS clipboard, as little as this needs of it.
 //!   [`SystemClipboard`] is the real one, [`MemoryClipboard`] is for tests.
@@ -33,9 +35,13 @@ pub use system::{MemoryClipboard, SystemClipboard};
 use geserdesk_proto::clipboard::Chunk;
 pub use geserdesk_proto::clipboard::ClipboardContent;
 
-/// The most a single shared clipboard payload may be, whatever the options
-/// say. `clipboard_max_bytes = 0` ("unlimited") means this.
+/// The most a single shared clipboard payload (text/HTML/picture) may be,
+/// whatever the options say. `clipboard_max_bytes = 0` ("unlimited") means this.
 pub const HARD_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The most a single copy of files may add up to, whatever the options say.
+/// `clipboard_files_max_bytes = 0` ("unlimited") means this.
+pub const HARD_FILES_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// How often the local clipboard is looked at.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -45,6 +51,14 @@ pub fn effective_max(configured: u64) -> u64 {
     match configured {
         0 => HARD_MAX_BYTES,
         n => n.min(HARD_MAX_BYTES),
+    }
+}
+
+/// The limit that applies for a configured `clipboard_files_max_bytes`.
+pub fn effective_files_max(configured: u64) -> u64 {
+    match configured {
+        0 => HARD_FILES_MAX_BYTES,
+        n => n.min(HARD_FILES_MAX_BYTES),
     }
 }
 
@@ -126,6 +140,9 @@ mod tests {
         assert_eq!(effective_max(0), HARD_MAX_BYTES);
         assert_eq!(effective_max(100), 100);
         assert_eq!(effective_max(u64::MAX), HARD_MAX_BYTES);
+        assert_eq!(effective_files_max(0), HARD_FILES_MAX_BYTES);
+        assert_eq!(effective_files_max(100), 100);
+        assert_eq!(effective_files_max(u64::MAX), HARD_FILES_MAX_BYTES);
     }
 
     #[test]
