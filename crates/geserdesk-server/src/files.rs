@@ -261,23 +261,39 @@ pub fn staging_dir(seq: u64) -> PathBuf {
         .join(seq.to_string())
 }
 
-/// Pull `manifest` (transfer `seq`, owned by someone else right now) through
-/// `router` into `dest`, and on success put the top-level results on `sync`'s
-/// clipboard -- what this server's own screen should paste. Runs in its own
-/// task, so nothing else the router does waits on it; any failure is logged
-/// and abandoned, leaving the clipboard exactly as it was.
-pub fn spawn_local_pull(
-    router: Arc<FileRouter>,
-    sync: ClipboardSync,
-    seq: u64,
-    manifest: FileManifest,
-    dest: PathBuf,
-    files_max_bytes: u64,
-    on_progress: Option<pull::ProgressSink>,
-) {
+/// What one call to [`spawn_local_pull`] needs.
+pub struct LocalPullJob {
+    pub router: Arc<FileRouter>,
+    pub sync: ClipboardSync,
+    /// The owning client's screen name, for progress reports.
+    pub peer: String,
+    pub seq: u64,
+    pub manifest: FileManifest,
+    pub dest: PathBuf,
+    pub files_max_bytes: u64,
+    pub on_progress: Option<pull::ProgressSink>,
+}
+
+/// Pull `job.manifest` (transfer `job.seq`, owned by someone else right now)
+/// through `job.router` into `job.dest`, and on success put the top-level
+/// results on `job.sync`'s clipboard -- what this server's own screen should
+/// paste. Runs in its own task, so nothing else the router does waits on it;
+/// any failure is logged and abandoned, leaving the clipboard exactly as it was.
+pub fn spawn_local_pull(job: LocalPullJob) {
+    let LocalPullJob {
+        router,
+        sync,
+        peer,
+        seq,
+        manifest,
+        dest,
+        files_max_bytes,
+        on_progress,
+    } = job;
     tokio::spawn(async move {
         let max = effective_files_max(files_max_bytes);
         let progress_sink = on_progress.clone();
+        let progress_peer = peer.clone();
         let result = pull::pull_with_progress(
             &manifest,
             &dest,
@@ -289,7 +305,10 @@ pub fn spawn_local_pull(
             },
             move |p| {
                 if let Some(cb) = &progress_sink {
-                    cb(pull::PullEvent::Progress(p));
+                    cb(pull::PullReport {
+                        peer: progress_peer.clone(),
+                        event: pull::PullEvent::Progress(p),
+                    });
                 }
             },
         )
@@ -303,18 +322,27 @@ pub fn spawn_local_pull(
                 if let Err(e) = sync.apply_files(top).await {
                     warn!(error = %e, "could not set the clipboard to the pulled files");
                     if let Some(cb) = &on_progress {
-                        cb(pull::PullEvent::Failed(e.to_string()));
+                        cb(pull::PullReport {
+                            peer: peer.clone(),
+                            event: pull::PullEvent::Failed(e.to_string()),
+                        });
                     }
                     return;
                 }
                 if let Some(cb) = &on_progress {
-                    cb(pull::PullEvent::Done);
+                    cb(pull::PullReport {
+                        peer: peer.clone(),
+                        event: pull::PullEvent::Done,
+                    });
                 }
             }
             Err(e) => {
                 warn!(error = %e, "could not pull files for this screen");
                 if let Some(cb) = &on_progress {
-                    cb(pull::PullEvent::Failed(e.to_string()));
+                    cb(pull::PullReport {
+                        peer: peer.clone(),
+                        event: pull::PullEvent::Failed(e.to_string()),
+                    });
                 }
             }
         }
@@ -544,15 +572,16 @@ mod tests {
         let dest = staging_dir(424_242);
         let _ = std::fs::remove_dir_all(&dest);
 
-        spawn_local_pull(
-            Arc::clone(&router),
+        spawn_local_pull(LocalPullJob {
+            router: Arc::clone(&router),
             sync,
-            1,
+            peer: "b".into(),
+            seq: 1,
             manifest,
-            dest.clone(),
-            0,
-            None,
-        );
+            dest: dest.clone(),
+            files_max_bytes: 0,
+            on_progress: None,
+        });
 
         let forwarded = tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
             .await
@@ -599,15 +628,16 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen2 = Arc::clone(&seen);
         let sink: pull::ProgressSink = Arc::new(move |e| seen2.lock().unwrap().push(e));
-        spawn_local_pull(
-            Arc::clone(&router),
+        spawn_local_pull(LocalPullJob {
+            router: Arc::clone(&router),
             sync,
-            1,
+            peer: "b".into(),
+            seq: 1,
             manifest,
-            dest.clone(),
-            0,
-            Some(sink),
-        );
+            dest: dest.clone(),
+            files_max_bytes: 0,
+            on_progress: Some(sink),
+        });
 
         let req = match tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
             .await
@@ -625,8 +655,9 @@ mod tests {
         }
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
-        assert!(matches!(seen[0], PullEvent::Progress(_)));
-        assert_eq!(seen[1], PullEvent::Done);
+        assert!(seen.iter().all(|r| r.peer == "b"));
+        assert!(matches!(seen[0].event, PullEvent::Progress(_)));
+        assert_eq!(seen[1].event, PullEvent::Done);
         let _ = std::fs::remove_dir_all(&dest);
     }
 }

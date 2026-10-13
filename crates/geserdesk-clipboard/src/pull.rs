@@ -59,9 +59,18 @@ pub enum PullEvent {
     Failed(String),
 }
 
+/// A [`PullEvent`] plus who the files are coming from (the server's own name
+/// for it, or a connected client's screen name) -- `Progress` itself does not
+/// say, since one sink serves pulls from different peers over a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullReport {
+    pub peer: String,
+    pub event: PullEvent,
+}
+
 /// Where a pull's lifecycle goes, for a front end to show. Whoever starts a
 /// client or server builds this; pulling itself only ever calls it.
-pub type ProgressSink = std::sync::Arc<dyn Fn(PullEvent) + Send + Sync>;
+pub type ProgressSink = std::sync::Arc<dyn Fn(PullReport) + Send + Sync>;
 
 /// Pull every file in `manifest` into a fresh `dest` (created if needed) and
 /// return the *top-level* paths under it -- what a paste of the original copy

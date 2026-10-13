@@ -536,18 +536,19 @@ pub async fn run_shared(
         // other screen currently owns files, pull them for a paste here.
         if was_remote && core.active_remote().is_none() {
             if let Some(lf) = files.as_ref().filter(|lf| lf.enabled) {
-                if let Some((Owner::Client(_), seq, manifest)) = lf.router.current() {
+                if let Some((Owner::Client(name), seq, manifest)) = lf.router.current() {
                     if last_pulled_seq != Some(seq) {
                         last_pulled_seq = Some(seq);
-                        files::spawn_local_pull(
-                            Arc::clone(&lf.router),
-                            lf.sync.clone(),
+                        files::spawn_local_pull(files::LocalPullJob {
+                            router: Arc::clone(&lf.router),
+                            sync: lf.sync.clone(),
+                            peer: name,
                             seq,
                             manifest,
-                            files::staging_dir(seq),
-                            lf.max_bytes,
-                            lf.progress.clone(),
-                        );
+                            dest: files::staging_dir(seq),
+                            files_max_bytes: lf.max_bytes,
+                            on_progress: lf.progress.clone(),
+                        });
                     }
                 }
             }

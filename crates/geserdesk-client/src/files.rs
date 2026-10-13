@@ -98,6 +98,14 @@ pub fn spawn_pull(
     on_progress: Option<ProgressSink>,
 ) {
     tokio::spawn(async move {
+        // The client only ever pulls from the server itself.
+        const PEER: &str = "server";
+        let report = move |cb: &ProgressSink, event: PullEvent| {
+            cb(pull::PullReport {
+                peer: PEER.to_string(),
+                event,
+            })
+        };
         let max = effective_files_max(files_max_bytes);
         let progress_sink = on_progress.clone();
         let result = pull::pull_with_progress(
@@ -111,7 +119,7 @@ pub fn spawn_pull(
             },
             move |p| {
                 if let Some(cb) = &progress_sink {
-                    cb(PullEvent::Progress(p));
+                    report(cb, PullEvent::Progress(p));
                 }
             },
         )
@@ -125,18 +133,18 @@ pub fn spawn_pull(
                 if let Err(e) = sync.apply_files(top).await {
                     warn!(error = %e, "could not set the clipboard to the pulled files");
                     if let Some(cb) = &on_progress {
-                        cb(PullEvent::Failed(e.to_string()));
+                        report(cb, PullEvent::Failed(e.to_string()));
                     }
                     return;
                 }
                 if let Some(cb) = &on_progress {
-                    cb(PullEvent::Done);
+                    report(cb, PullEvent::Done);
                 }
             }
             Err(e) => {
                 warn!(error = %e, "could not pull files from the server");
                 if let Some(cb) = &on_progress {
-                    cb(PullEvent::Failed(e.to_string()));
+                    report(cb, PullEvent::Failed(e.to_string()));
                 }
             }
         }
@@ -281,14 +289,15 @@ mod tests {
         }
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
-        match &seen[0] {
+        assert!(seen.iter().all(|r| r.peer == "server"));
+        match &seen[0].event {
             PullEvent::Progress(p) => {
                 assert_eq!(p.seq, 99);
                 assert_eq!(p.bytes_done, 3);
             }
             other => panic!("unexpected {other:?}"),
         }
-        assert_eq!(seen[1], PullEvent::Done);
+        assert_eq!(seen[1].event, PullEvent::Done);
         let _ = std::fs::remove_dir_all(&dest);
     }
 }
