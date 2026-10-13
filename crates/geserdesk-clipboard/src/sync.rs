@@ -5,20 +5,20 @@ use std::sync::{Arc, Mutex};
 
 use tracing::{debug, warn};
 
-use crate::{Clipboard, ClipboardError};
+use crate::{fit, Clipboard, ClipboardContent, ClipboardError};
 
-fn fingerprint(text: &str) -> u64 {
+fn fingerprint(content: &ClipboardContent) -> u64 {
     let mut h = DefaultHasher::new();
-    text.hash(&mut h);
+    content.hash(&mut h);
     h.finish()
 }
 
 struct Inner {
     clipboard: Box<dyn Clipboard>,
-    /// What the clipboard held when we last looked or wrote: text that is not
-    /// news. Only a different text counts as a change by a local application.
+    /// What the clipboard held when we last looked or wrote: contents that are
+    /// not news. Only a different one counts as a change by a local application.
     seen: Option<u64>,
-    /// The text that was too large to share, so it is warned about once.
+    /// The contents that were too large to share, so it is warned about once.
     refused: Option<u64>,
 }
 
@@ -52,18 +52,18 @@ impl ClipboardSync {
         let this = self.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let mut inner = this.0.lock().unwrap();
-            inner.seen = match inner.clipboard.get_text() {
-                Ok(Some(t)) => Some(fingerprint(&t)),
+            inner.seen = match inner.clipboard.get() {
+                Ok(Some(c)) => Some(fingerprint(&c)),
                 _ => None,
             };
         })
         .await;
     }
 
-    /// The text a local application has put on the clipboard since the last
-    /// call, if it is worth sharing: not empty, not our own write, and no longer
-    /// than `max_bytes`.
-    pub async fn poll(&self, max_bytes: u64) -> Option<String> {
+    /// What a local application has put on the clipboard since the last call,
+    /// if it is worth sharing: not empty, not our own write, and within
+    /// `max_bytes` (a style that would not fit is left out, the text is kept).
+    pub async fn poll(&self, max_bytes: u64) -> Option<ClipboardContent> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || this.poll_blocking(max_bytes))
             .await
@@ -71,47 +71,54 @@ impl ClipboardSync {
             .flatten()
     }
 
-    fn poll_blocking(&self, max_bytes: u64) -> Option<String> {
+    fn poll_blocking(&self, max_bytes: u64) -> Option<ClipboardContent> {
         let mut inner = self.0.lock().unwrap();
-        let text = match inner.clipboard.get_text() {
-            Ok(Some(t)) => t,
-            Ok(None) => return None, // empty or not text: keep what we knew
+        let content = match inner.clipboard.get() {
+            Ok(Some(c)) => c,
+            Ok(None) => return None, // empty or not shareable: keep what we knew
             Err(e) => {
                 debug!(error = %e, "could not read the clipboard");
                 return None;
             }
         };
-        let id = fingerprint(&text);
+        let id = fingerprint(&content);
         if inner.seen == Some(id) {
             return None;
         }
         inner.seen = Some(id);
-        if text.is_empty() {
+        if content.is_empty() {
             return None;
         }
-        if text.len() as u64 > max_bytes {
-            if inner.refused != Some(id) {
-                inner.refused = Some(id);
-                warn!(
-                    bytes = text.len(),
-                    max_bytes, "the clipboard is too large to share; keeping it local"
-                );
+        match fit(&content, max_bytes) {
+            Some(fitted) => Some(fitted),
+            None => {
+                if inner.refused != Some(id) {
+                    inner.refused = Some(id);
+                    warn!(
+                        bytes = content.data_len(),
+                        max_bytes, "the clipboard is too large to share; keeping it local"
+                    );
+                }
+                None
             }
-            return None;
         }
-        Some(text)
     }
 
-    /// Put text a peer sent on the local clipboard. It is remembered, so the next
+    /// Put what a peer sent on the local clipboard. It is remembered, so the next
     /// [`poll`](Self::poll) does not offer it back.
-    pub async fn apply(&self, text: String) -> Result<(), ClipboardError> {
+    pub async fn apply(&self, content: ClipboardContent) -> Result<(), ClipboardError> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
             let mut inner = this.0.lock().unwrap();
-            // Mark it first: even if the write is slow, the poll that follows it
-            // must see it as ours.
-            inner.seen = Some(fingerprint(&text));
-            inner.clipboard.set_text(&text)
+            inner.clipboard.set(&content)?;
+            // Remember what the clipboard now reports, not what was written: a
+            // platform may hand HTML back slightly changed, and that must not
+            // look like a new copy to send on.
+            inner.seen = Some(match inner.clipboard.get() {
+                Ok(Some(now)) => fingerprint(&now),
+                _ => fingerprint(&content),
+            });
+            Ok(())
         })
         .await
         .map_err(|e| ClipboardError(e.to_string()))?
@@ -123,6 +130,10 @@ mod tests {
     use super::*;
     use crate::MemoryClipboard;
 
+    fn text(s: &str) -> ClipboardContent {
+        ClipboardContent::new(Some(s.into()), None)
+    }
+
     #[tokio::test]
     async fn only_a_local_copy_after_priming_is_reported_once() {
         let mem = MemoryClipboard::new();
@@ -132,25 +143,39 @@ mod tests {
 
         assert_eq!(sync.poll(100).await, None, "what was there is not news");
         mem.copy("new");
-        assert_eq!(sync.poll(100).await.as_deref(), Some("new"));
+        assert_eq!(sync.poll(100).await, Some(text("new")));
         assert_eq!(sync.poll(100).await, None, "reported once");
     }
 
     #[tokio::test]
-    async fn text_written_by_apply_is_not_offered_back() {
+    async fn the_same_text_with_another_style_is_a_new_copy() {
+        let mem = MemoryClipboard::new();
+        mem.copy("same");
+        let sync = ClipboardSync::new(mem.clone());
+        sync.prime().await;
+
+        mem.copy_html("same", "<b>same</b>");
+        let got = sync.poll(100).await.unwrap();
+        assert_eq!(got.html(), Some("<b>same</b>"));
+    }
+
+    #[tokio::test]
+    async fn contents_written_by_apply_are_not_offered_back() {
         let mem = MemoryClipboard::new();
         let sync = ClipboardSync::new(mem.clone());
         sync.prime().await;
 
-        sync.apply("from the peer".into()).await.unwrap();
-        assert_eq!(mem.contents().as_deref(), Some("from the peer"));
+        let from_peer =
+            ClipboardContent::new(Some("from the peer".into()), Some("<i>x</i>".into()));
+        sync.apply(from_peer.clone()).await.unwrap();
+        assert_eq!(mem.content(), Some(from_peer));
         assert_eq!(sync.poll(100).await, None);
         mem.copy("something else");
         assert!(sync.poll(100).await.is_some());
     }
 
     #[tokio::test]
-    async fn too_large_and_empty_text_are_not_shared() {
+    async fn too_large_contents_are_not_shared_but_a_large_style_only_costs_the_style() {
         let mem = MemoryClipboard::new();
         let sync = ClipboardSync::new(mem.clone());
         sync.prime().await;
@@ -160,7 +185,8 @@ mod tests {
         assert_eq!(sync.poll(5).await, None, "and not retried every tick");
         mem.copy("");
         assert_eq!(sync.poll(5).await, None);
-        mem.copy("ok");
-        assert_eq!(sync.poll(5).await.as_deref(), Some("ok"));
+
+        mem.copy_html("ok", &"<p>".repeat(100));
+        assert_eq!(sync.poll(5).await, Some(text("ok")));
     }
 }

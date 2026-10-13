@@ -7,14 +7,14 @@
 //! and never reported back, which is what stops two machines echoing one copy
 //! between them forever.
 //!
-//! Only plain text is shared for now. Images, files and the X11 primary
-//! selection are not.
+//! Plain text and HTML are shared (the HTML is what carries a copied web page's
+//! style into Word). Images, files and the X11 primary selection are not.
 //!
 //! * [`Clipboard`] -- the OS clipboard, as little as this needs of it.
 //!   [`SystemClipboard`] is the real one, [`MemoryClipboard`] is for tests.
 //! * [`ClipboardSync`] -- change detection and loop suppression.
 //! * [`Inbound`] -- reassembles what a peer sends, with a size limit.
-//! * [`outbound`] -- the messages' payload for one piece of text.
+//! * [`outbound`] -- the chunk stream that carries one [`ClipboardContent`].
 
 mod inbound;
 mod sync;
@@ -25,6 +25,7 @@ pub use sync::{ClipboardSync, SharedClipboard};
 pub use system::{MemoryClipboard, SystemClipboard};
 
 use geserdesk_proto::clipboard::Chunk;
+pub use geserdesk_proto::clipboard::ClipboardContent;
 
 /// The most a single shared clipboard payload may be, whatever the options
 /// say. `clipboard_max_bytes = 0` ("unlimited") means this.
@@ -41,26 +42,37 @@ pub fn effective_max(configured: u64) -> u64 {
     }
 }
 
-/// The chunk stream that carries `text`.
-pub fn outbound(text: &str) -> impl Iterator<Item = Chunk> + '_ {
-    Chunk::stream(text.as_bytes())
+/// What a size limit lets through of `content`: all of it, or just its plain text
+/// when the style would make it too large, or nothing when even the text would.
+pub fn fit(content: &ClipboardContent, max_bytes: u64) -> Option<ClipboardContent> {
+    if content.data_len() as u64 <= max_bytes {
+        return Some(content.clone());
+    }
+    let plain = content.text_only();
+    (!plain.is_empty() && plain.data_len() as u64 <= max_bytes).then_some(plain)
 }
 
-/// The OS clipboard, as far as sharing text needs it. Calls may block (the OS
-/// is asked), so async code runs them on a blocking thread.
+/// The chunk stream that carries `content`.
+pub fn outbound(content: &ClipboardContent) -> Vec<Chunk> {
+    Chunk::stream(&content.encode()).collect()
+}
+
+/// The OS clipboard, as far as sharing needs it. Calls may block (the OS is
+/// asked), so async code runs them on a blocking thread.
 pub trait Clipboard: Send + 'static {
-    /// The text on the clipboard; `None` if it is empty or holds something that
-    /// is not text.
-    fn get_text(&mut self) -> Result<Option<String>, ClipboardError>;
-    fn set_text(&mut self, text: &str) -> Result<(), ClipboardError>;
+    /// What is on the clipboard in the formats shared; `None` if it is empty or
+    /// holds only something else (an image, files).
+    fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError>;
+    /// Replace the clipboard with `content`.
+    fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError>;
 }
 
 impl Clipboard for Box<dyn Clipboard> {
-    fn get_text(&mut self) -> Result<Option<String>, ClipboardError> {
-        (**self).get_text()
+    fn get(&mut self) -> Result<Option<ClipboardContent>, ClipboardError> {
+        (**self).get()
     }
-    fn set_text(&mut self, text: &str) -> Result<(), ClipboardError> {
-        (**self).set_text(text)
+    fn set(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
+        (**self).set(content)
     }
 }
 
@@ -77,5 +89,15 @@ mod tests {
         assert_eq!(effective_max(0), HARD_MAX_BYTES);
         assert_eq!(effective_max(100), 100);
         assert_eq!(effective_max(u64::MAX), HARD_MAX_BYTES);
+    }
+
+    #[test]
+    fn a_large_style_is_dropped_before_the_text_is() {
+        let c = ClipboardContent::new(Some("abc".into()), Some("<p>".repeat(50)));
+        assert_eq!(fit(&c, 1000), Some(c.clone()));
+        assert_eq!(fit(&c, 10), Some(c.text_only()));
+        assert_eq!(fit(&c, 2), None);
+        let html_only = ClipboardContent::new(None, Some("<p>".repeat(50)));
+        assert_eq!(fit(&html_only, 10), None);
     }
 }
