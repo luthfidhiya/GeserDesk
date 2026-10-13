@@ -512,15 +512,13 @@ async fn a_client_without_reconnect_ends_with_its_connection() {
 #[tokio::test]
 async fn a_client_that_cannot_reach_the_server_without_reconnect_fails_the_daemon() {
     let dir = scratch("refused");
-    // Nothing listens on this port.
-    let port = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        probe.local_addr().unwrap().port()
-    };
+    // Port 0 is never connectable and every OS rejects it at once. A freed
+    // port would not do: Windows takes ~2 s to refuse it, and a parallel test
+    // may take the port over.
     let (endpoint, daemon) = start_daemon(&dir, true).await;
     let remote = Remote::connect(&endpoint).await.unwrap();
     remote
-        .start(plain_client(&format!("127.0.0.1:{port}"), false))
+        .start(plain_client("127.0.0.1:0", false))
         .await
         .unwrap();
     let result = timeout(Duration::from_secs(10), daemon)

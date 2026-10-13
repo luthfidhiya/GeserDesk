@@ -54,6 +54,7 @@ impl Endpoint {
         &self.dir
     }
 
+    #[cfg(unix)]
     fn socket_path(&self) -> PathBuf {
         self.dir.join("control.sock")
     }
