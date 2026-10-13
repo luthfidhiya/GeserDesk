@@ -23,7 +23,7 @@ moves them to a client by pushing the cursor against a screen edge (or
 | Multi-monitor detection + layout editor | ✅ done, detection confirmed on Windows (2 monitors, one above the other); re-reporting after a monitor is plugged or unplugged while running not yet exercised |
 | M8 — TLS 1.3, certificate pinning, trust-on-first-use | ✅ done, confirmed Linux server <-> Windows client |
 | Desktop app (Tauri + React) with tray | ✅ built; on Windows it starts, spawns its daemon detached, attaches over the named pipe and leaves the daemon running when the app dies; the window itself (layout editor, tray, dialogs) is still to be driven on Windows |
-| M9 — clipboard sync (text) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); an X11 clipboard on the Linux side not yet tried |
+| M9 — clipboard sync (text and HTML) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); an X11 clipboard on the Linux side not yet tried |
 | M7, M10+ — Windows capture, files | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
@@ -174,15 +174,18 @@ opened. See *Daemon and controllers* below.
 
 ## Clipboard
 
-Plain text is kept equal on the server and every client: whoever copies last wins,
-within about half a second, with no screen switch needed. Images, files and the
-X11 middle-click selection are not shared. A client connecting later is not sent
+Plain text and HTML are kept equal on the server and every client: whoever copies
+last wins, within about half a second, with no screen switch needed. The HTML is
+what carries a copied web page's style into Word or a mail client; programs that
+only take text get the text. Images, files and the X11 middle-click selection are
+not shared. A client connecting later is not sent
 what was copied before it came; its own clipboard is left alone until the next copy.
 
 * Off for everyone: `clipboard_sharing = false` under `[options]` in the server
   config. Off for one machine: `geserdesk client --no-clipboard`.
 * `clipboard_max_bytes` under `[options]` caps one copy (0 = the built-in ceiling,
-  16 MiB). A larger copy stays where it was made.
+  16 MiB). A copy whose style makes it too large is sent as plain text; one whose
+  text is too large stays where it was made.
 * The server shares its desktop's clipboard only while it captures that desktop's
   input (so not with `--no-capture`), and a client only when it injects real input
   (so not with `--dry-run`): trial runs never rewrite your clipboard.

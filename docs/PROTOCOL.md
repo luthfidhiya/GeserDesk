@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # GeserDesk Wire Protocol
 
-Version 2.0. This is a new protocol; it does **not** interoperate with Input
+Version 3.0. This is a new protocol; it does **not** interoperate with Input
 Leap / Barrier / Synergy.
 
 Source of truth: `crates/geserdesk-proto`. This document describes the shape;
@@ -148,18 +148,30 @@ Sharing is push-on-change, not ownership handover, so no request message exists:
    whose `seq` is not the current one are ignored.
 3. The server writes a client's text onto its own clipboard and relays it, as its own
    transfer, to every other client (never back to the sender).
-4. The text is UTF-8. A receiver refuses more than `clipboard_max_bytes` (0 means
-   16 MiB) as soon as `Start.total` or the bytes received exceed it, and drops a
-   transfer that breaks the grammar or is not UTF-8. The connection stays up.
-5. `Options.clipboard_sharing = false` turns it off: the server ignores clipboard
+4. The bytes of that stream are a postcard-encoded `ClipboardContent`: a list of
+   `(mime, data)` items. `text/plain` and `text/html` (UTF-8) are shared today; a
+   receiver skips any other MIME type, so formats can be added without a new
+   version. Plain text is what every program pastes; the HTML is what carries a
+   copied web page's style into Word or a mail client. A receiver writes the
+   formats it has and reads back only those.
+5. A receiver refuses more than `clipboard_max_bytes` of data (0 means 16 MiB) as
+   soon as `Start.total` or the bytes received exceed it (plus a few KiB of
+   encoding), and drops a transfer that breaks the grammar or does not decode. A
+   sender whose copy exceeds the limit sends the plain text alone when that fits,
+   and nothing otherwise. The connection stays up either way.
+6. `Options.clipboard_sharing = false` turns it off: the server ignores clipboard
    messages and sends none, and a client stops reading and pushing. A client takes
    the options from the handshake's `SetOptions` and from later ones.
-6. Only `ClipboardId::Clipboard` is shared; `Primary` is ignored.
+7. Only `ClipboardId::Clipboard` is shared; `Primary` is ignored.
 
-A peer that predates this logs and ignores clipboard messages, so the wire format
-and version are unchanged.
+A peer that predates clipboard sharing logs and ignores these messages.
 
 ## Changes
+
+- **3.0** — a clipboard transfer carries a `ClipboardContent` (several formats)
+  instead of bare UTF-8 text. The message shapes did not change, but a 2.x peer
+  would read the new bytes as text, so this is a major bump: a 2.x peer is
+  answered with `Incompatible`.
 
 - **2.0** — `ScreenInfo` gained `monitors`. The wire format is positional
   (postcard), so this is a major bump: a 1.x peer is answered with
