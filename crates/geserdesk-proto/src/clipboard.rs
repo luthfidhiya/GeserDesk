@@ -13,6 +13,86 @@ use serde::{Deserialize, Serialize};
 /// `StreamChunker` `g_chunkSize`).
 pub const CHUNK_SIZE: usize = 32 * 1024;
 
+/// The MIME types of the clipboard formats that are shared today. A peer skips
+/// the ones it does not know, so more can be added (an image, say) without
+/// changing the wire format.
+pub const MIME_TEXT: &str = "text/plain";
+pub const MIME_HTML: &str = "text/html";
+
+/// One format of a clipboard's contents.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClipboardItem {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+/// What a clipboard holds, in every format shared: plain text for anything that
+/// can paste, and HTML for a program that can paste the style too. It travels as
+/// the bytes of a [`Chunk`] stream, encoded with [`encode`](Self::encode).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ClipboardContent {
+    pub items: Vec<ClipboardItem>,
+}
+
+/// The bytes of a clipboard transfer could not be read back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("malformed clipboard contents")]
+pub struct ContentError;
+
+impl ClipboardContent {
+    /// Text and HTML, either of which may be missing. Empty ones are left out.
+    pub fn new(text: Option<String>, html: Option<String>) -> Self {
+        let item = |mime: &str, s: Option<String>| {
+            s.filter(|s| !s.is_empty()).map(|s| ClipboardItem {
+                mime: mime.to_string(),
+                data: s.into_bytes(),
+            })
+        };
+        Self {
+            items: [item(MIME_TEXT, text), item(MIME_HTML, html)]
+                .into_iter()
+                .flatten()
+                .collect(),
+        }
+    }
+
+    fn string(&self, mime: &str) -> Option<&str> {
+        let item = self.items.iter().find(|i| i.mime == mime)?;
+        std::str::from_utf8(&item.data).ok()
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        self.string(MIME_TEXT)
+    }
+
+    pub fn html(&self) -> Option<&str> {
+        self.string(MIME_HTML)
+    }
+
+    /// Whether there is nothing a clipboard here could hold.
+    pub fn is_empty(&self) -> bool {
+        self.text().is_none() && self.html().is_none()
+    }
+
+    /// The bytes of the formats themselves, which is what a size limit counts.
+    pub fn data_len(&self) -> usize {
+        self.items.iter().map(|i| i.data.len()).sum()
+    }
+
+    /// Only the plain text.
+    pub fn text_only(&self) -> Self {
+        Self::new(self.text().map(str::to_string), None)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("a vector of strings and bytes always encodes")
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ContentError> {
+        postcard::from_bytes(bytes).map_err(|_| ContentError)
+    }
+}
+
 /// Which clipboard a message refers to. Most platforms only have `Clipboard`;
 /// X11 also has the middle-click `Primary` selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -139,6 +219,40 @@ impl ChunkAssembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_roundtrips_and_leaves_out_empty_formats() {
+        let c = ClipboardContent::new(Some("halo".into()), Some("<b>halo</b>".into()));
+        assert_eq!(ClipboardContent::decode(&c.encode()).unwrap(), c);
+        assert_eq!(c.text(), Some("halo"));
+        assert_eq!(c.html(), Some("<b>halo</b>"));
+        assert_eq!(c.data_len(), 4 + 11);
+
+        let only_text = ClipboardContent::new(Some("x".into()), Some(String::new()));
+        assert_eq!(only_text.items.len(), 1);
+        assert!(ClipboardContent::new(None, None).is_empty());
+        assert_eq!(
+            c.text_only(),
+            ClipboardContent::new(Some("halo".into()), None)
+        );
+    }
+
+    #[test]
+    fn a_format_nobody_knows_is_carried_but_not_read() {
+        let mut c = ClipboardContent::new(Some("t".into()), None);
+        c.items.push(ClipboardItem {
+            mime: "image/png".into(),
+            data: vec![1, 2, 3],
+        });
+        let back = ClipboardContent::decode(&c.encode()).unwrap();
+        assert_eq!(back.text(), Some("t"));
+        assert_eq!(back.html(), None);
+    }
+
+    #[test]
+    fn garbage_is_not_contents() {
+        assert!(ClipboardContent::decode(&[0xff; 16]).is_err());
+    }
 
     #[test]
     fn stream_then_assemble_roundtrips() {
