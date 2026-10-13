@@ -15,6 +15,7 @@ pub mod admin;
 pub mod clipboard;
 pub mod config;
 pub mod desk;
+pub mod files;
 pub mod hub;
 pub mod layout;
 pub mod net;
