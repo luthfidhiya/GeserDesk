@@ -549,6 +549,28 @@ impl ClientClipboard {
     }
 }
 
+/// Did the peer simply go away? A server that stops closes its sockets with a
+/// FIN, or with an RST when our last message was still in flight (Windows
+/// does this readily, and drops its goodbye with it). Both mean the same.
+fn hung_up(e: &geserdesk_proto::CodecError) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset};
+    matches!(
+        e,
+        geserdesk_proto::CodecError::Io(io) if matches!(io.kind(), ConnectionReset | ConnectionAborted | BrokenPipe)
+    )
+}
+
+/// How a send or receive failure ends the session: the peer going away is a
+/// normal end, anything else is an error.
+fn session_ended(e: geserdesk_proto::CodecError) -> Result<(), ConnectError> {
+    if hung_up(&e) {
+        info!("server closed the connection ({e})");
+        Ok(())
+    } else {
+        Err(e.into())
+    }
+}
+
 async fn session_loop<S>(
     ms: &mut MessageStream<S>,
     sink: &mut impl InputSink,
@@ -575,13 +597,17 @@ where
         let msg = tokio::select! {
             _ = monitor_tick.tick() => {
                 if let Some(changed) = watch.check().await {
-                    ms.send(&changed).await?;
+                    if let Err(e) = ms.send(&changed).await {
+                        return session_ended(e);
+                    }
                 }
                 continue;
             }
             _ = clip_tick.tick(), if clip.active() => {
                 for msg in clip.changed().await {
-                    ms.send(&msg).await?;
+                    if let Err(e) = ms.send(&msg).await {
+                        return session_ended(e);
+                    }
                 }
                 continue;
             }
@@ -594,7 +620,7 @@ where
                     info!("server closed the connection");
                     return Ok(());
                 }
-                Ok(Err(e)) => return Err(e.into()),
+                Ok(Err(e)) => return session_ended(e),
                 Ok(Ok(msg)) => msg,
             },
         };
@@ -603,7 +629,9 @@ where
         match msg {
             ServerMsg::KeepAlive => {
                 tracing::trace!("keep-alive from server; replying");
-                ms.send(&ClientMsg::KeepAlive).await?;
+                if let Err(e) = ms.send(&ClientMsg::KeepAlive).await {
+                    return session_ended(e);
+                }
             }
             ServerMsg::Enter { x, y, .. } => sink.enter(Point::new(x, y)),
             ServerMsg::Leave => sink.leave(),
@@ -643,6 +671,22 @@ mod tests {
             monitors: vec![Rect::new(0, 0, 1920, 1080)],
             cursor: Point::new(0, 0),
         }
+    }
+
+    #[test]
+    fn a_reset_ends_the_session_like_a_close_but_other_errors_do_not() {
+        use geserdesk_proto::CodecError;
+        use std::io::{Error, ErrorKind};
+
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+        ] {
+            assert!(session_ended(CodecError::Io(Error::from(kind))).is_ok());
+        }
+        assert!(session_ended(CodecError::Io(Error::from(ErrorKind::PermissionDenied))).is_err());
+        assert!(session_ended(CodecError::FrameTooLarge { size: 2, max: 1 }).is_err());
     }
 
     #[tokio::test]
