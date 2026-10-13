@@ -8,8 +8,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use geserdesk_clipboard::{effective_max, outbound, Inbound, SharedClipboard, POLL_INTERVAL};
+use geserdesk_proto::clipboard::ClipboardId;
 use geserdesk_proto::{
-    ClientMsg, MessageStream, Point, Rect, ScreenInfo, ServerMsg, Version, PROTOCOL_VERSION,
+    ClientMsg, MessageStream, Options, Point, Rect, ScreenInfo, ServerMsg, Version,
+    PROTOCOL_VERSION,
 };
 use geserdesk_tls::rustls::pki_types::ServerName;
 use geserdesk_tls::tokio_rustls::TlsConnector;
@@ -71,6 +74,9 @@ pub struct ClientConfig {
     /// abandoned (and retried). A peer that never answers must not hold the
     /// client forever.
     pub handshake_timeout: Duration,
+    /// This machine's clipboard, to keep equal to the server's. `None` shares
+    /// nothing (the server's `clipboard_sharing` option is the other switch).
+    pub clipboard: SharedClipboard,
 }
 
 /// The default for [`ClientConfig::handshake_timeout`].
@@ -122,6 +128,8 @@ impl MonitorWatch {
 pub struct Connected {
     pub version: Version,
     pub keepalive: Duration,
+    /// The options the server started this session with.
+    pub options: Options,
 }
 
 /// Handshake failures.
@@ -173,8 +181,12 @@ where
     })
     .await?;
 
-    let connected = match ms.recv::<ServerMsg>().await? {
-        ServerMsg::Welcome { version, keepalive } => Connected { version, keepalive },
+    let mut connected = match ms.recv::<ServerMsg>().await? {
+        ServerMsg::Welcome { version, keepalive } => Connected {
+            version,
+            keepalive,
+            options: Options::default(),
+        },
         ServerMsg::Incompatible { server_version } => {
             return Err(ConnectError::Incompatible(server_version))
         }
@@ -183,7 +195,7 @@ where
     };
 
     match ms.recv::<ServerMsg>().await? {
-        ServerMsg::SetOptions(_) => {}
+        ServerMsg::SetOptions(options) => connected.options = options,
         _ => return Err(ConnectError::Unexpected("expected SetOptions")),
     }
 
@@ -430,7 +442,111 @@ where
         detect: config.detect,
         reported: screen.monitors.clone(),
     };
-    session_loop(&mut ms, &mut sink, connected.keepalive, &mut watch).await
+    let mut clip = ClientClipboard::new(config.clipboard.clone(), connected.options);
+    clip.prime().await;
+    session_loop(
+        &mut ms,
+        &mut sink,
+        connected.keepalive,
+        &mut watch,
+        &mut clip,
+    )
+    .await
+}
+
+/// The clipboard side of one connection: what to push, and how to take a push.
+struct ClientClipboard {
+    sync: SharedClipboard,
+    options: Options,
+    inbound: Inbound,
+    /// Numbers this client's pushes, so a peer can tell their chunks apart.
+    seq: u64,
+}
+
+impl ClientClipboard {
+    fn new(sync: SharedClipboard, options: Options) -> Self {
+        Self {
+            sync,
+            options,
+            inbound: Inbound::new(),
+            seq: 0,
+        }
+    }
+
+    /// A connection that shares nothing.
+    #[cfg(test)]
+    fn off() -> Self {
+        Self::new(None, Options::default())
+    }
+
+    fn active(&self) -> bool {
+        self.sync.is_some() && self.options.clipboard_sharing
+    }
+
+    fn max_bytes(&self) -> u64 {
+        effective_max(self.options.clipboard_max_bytes)
+    }
+
+    /// What is on the clipboard now is not something to push.
+    async fn prime(&self) {
+        if let (Some(sync), true) = (&self.sync, self.options.clipboard_sharing) {
+            sync.prime().await;
+        }
+    }
+
+    /// The messages that push a copy made on this machine since the last look.
+    async fn changed(&mut self) -> Vec<ClientMsg> {
+        let Some(sync) = self
+            .sync
+            .as_ref()
+            .filter(|_| self.options.clipboard_sharing)
+        else {
+            return Vec::new();
+        };
+        let Some(text) = sync.poll(self.max_bytes()).await else {
+            return Vec::new();
+        };
+        self.seq += 1;
+        let (id, seq) = (ClipboardId::Clipboard, self.seq);
+        tracing::debug!(bytes = text.len(), "the clipboard changed; sending it");
+        std::iter::once(ClientMsg::ClipboardGrab { id, seq })
+            .chain(outbound(&text).map(|chunk| ClientMsg::ClipboardData { id, seq, chunk }))
+            .collect()
+    }
+
+    fn grab(&mut self, id: ClipboardId, seq: u64) {
+        if self.active() {
+            self.inbound.grab(id, seq, self.max_bytes());
+        }
+    }
+
+    async fn data(&mut self, id: ClipboardId, seq: u64, chunk: geserdesk_proto::clipboard::Chunk) {
+        let Some(sync) = self
+            .sync
+            .as_ref()
+            .filter(|_| self.options.clipboard_sharing)
+        else {
+            return;
+        };
+        match self.inbound.data(id, seq, chunk) {
+            Ok(Some(text)) => {
+                tracing::debug!(bytes = text.len(), "the server sent its clipboard");
+                if let Err(e) = sync.apply(text).await {
+                    warn!(error = %e, "could not set the clipboard");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => warn!("dropped the server's clipboard: {e}"),
+        }
+    }
+
+    async fn set_options(&mut self, options: Options) {
+        let was = self.options.clipboard_sharing;
+        self.options = options;
+        if options.clipboard_sharing && !was {
+            self.prime().await; // what is there now was not copied since
+        }
+    }
 }
 
 async fn session_loop<S>(
@@ -438,10 +554,13 @@ async fn session_loop<S>(
     sink: &mut impl InputSink,
     keepalive: Duration,
     watch: &mut MonitorWatch,
+    clip: &mut ClientClipboard,
 ) -> Result<(), ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut clip_tick = tokio::time::interval(POLL_INTERVAL);
+    clip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // If we hear nothing for this long, assume the link is dead.
     let silence_timeout = keepalive.saturating_mul(3).max(Duration::from_secs(5));
     let mut last_heard = tokio::time::Instant::now();
@@ -457,6 +576,12 @@ where
             _ = monitor_tick.tick() => {
                 if let Some(changed) = watch.check().await {
                     ms.send(&changed).await?;
+                }
+                continue;
+            }
+            _ = clip_tick.tick(), if clip.active() => {
+                for msg in clip.changed().await {
+                    ms.send(&msg).await?;
                 }
                 continue;
             }
@@ -488,7 +613,9 @@ where
                 info!(%reason, "server closed the connection");
                 return Ok(());
             }
-            ServerMsg::SetOptions(_) => { /* applied on reconnect only for now */ }
+            ServerMsg::ClipboardGrab { id, seq } => clip.grab(id, seq),
+            ServerMsg::ClipboardData { id, seq, chunk } => clip.data(id, seq, chunk).await,
+            ServerMsg::SetOptions(options) => clip.set_options(options).await,
             other => tracing::debug!(?other, "ignoring server message (not implemented yet)"),
         }
     }
@@ -609,9 +736,15 @@ mod tests {
                 .unwrap();
         });
 
-        session_loop(&mut client, &mut sink, Duration::from_secs(3), &mut off())
-            .await
-            .unwrap();
+        session_loop(
+            &mut client,
+            &mut sink,
+            Duration::from_secs(3),
+            &mut off(),
+            &mut ClientClipboard::off(),
+        )
+        .await
+        .unwrap();
         server_task.await.unwrap();
 
         assert_eq!(sink.enters, vec![Point::new(5, 6)]);
@@ -643,6 +776,7 @@ mod tests {
             detect: None,
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            clipboard: None,
         };
 
         // Run the client briefly; it should handshake and answer a keep-alive.
@@ -729,6 +863,7 @@ mod tests {
             detect: None,
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            clipboard: None,
         }
     }
 
@@ -922,6 +1057,7 @@ mod tests {
                     trust,
                 }),
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+                clipboard: None,
             }
         }
 
@@ -1043,6 +1179,7 @@ mod tests {
                 // The plaintext server waits for a frame the TLS hello never
                 // completes, so only the timeout ends this.
                 handshake_timeout: Duration::from_millis(300),
+                clipboard: None,
             };
             let err = tokio::time::timeout(
                 Duration::from_secs(5),
@@ -1112,6 +1249,7 @@ mod tests {
                     trust: Arc::clone(&trust) as Arc<dyn ServerTrust>,
                 }),
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+                clipboard: None,
             };
             let err = connect(&config, RecordingSink::default())
                 .await

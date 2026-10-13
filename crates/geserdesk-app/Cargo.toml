@@ -19,6 +19,7 @@ geserdesk-tls.workspace = true
 geserdesk-platform.workspace = true
 geserdesk-server.workspace = true
 geserdesk-client.workspace = true
+geserdesk-clipboard.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

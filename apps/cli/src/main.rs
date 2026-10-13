@@ -95,6 +95,9 @@ enum Command {
         /// (for unattended setups). Check it on the server first.
         #[arg(long)]
         server_fingerprint: Option<String>,
+        /// Do not share this machine's clipboard with the server.
+        #[arg(long)]
+        no_clipboard: bool,
         /// Override monitor detection: comma-separated `WxH+X+Y`, e.g.
         /// `1920x1080+0+0,1280x1024+1920+0`.
         #[arg(long)]
@@ -151,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
             no_tls,
             identity_dir,
             server_fingerprint,
+            no_clipboard,
             monitors: forced,
         } => {
             let monitors = forced
@@ -180,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
                 tls: !no_tls,
                 identity_dir: identity_dir.clone(),
                 monitors,
+                clipboard: !no_clipboard,
             };
             // The terminal asks about a server seen for the first time (or
             // `--server-fingerprint` answers it up front), as it always has.

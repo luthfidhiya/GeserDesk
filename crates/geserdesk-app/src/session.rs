@@ -11,6 +11,7 @@ use geserdesk_client::{
     connect_observed, connect_with_status, ClientConfig, ClientStatus, ClientTls, InputSink,
     KnownServers, NullSink, ReconnectPolicy, ServerTrust, DEFAULT_HANDSHAKE_TIMEOUT,
 };
+use geserdesk_clipboard::{ClipboardSync, SystemClipboard};
 use geserdesk_server::{Config, DeskState};
 use geserdesk_tls::Identity;
 use serde::{Deserialize, Serialize};
@@ -177,6 +178,17 @@ impl Session {
         })?;
         let log_only = opts.log_only;
         let reconnect = opts.reconnect;
+        let mut cfg = cfg;
+        // A session that only logs input is a trial run: it must not rewrite the
+        // clipboard of the machine it runs on.
+        if opts.clipboard && !log_only {
+            match SystemClipboard::new() {
+                Ok(c) => cfg.clipboard = Some(ClipboardSync::new(c)),
+                Err(e) => {
+                    warn!(error = %e, "the clipboard is not available; it will not be shared")
+                }
+            }
+        }
         let this = Arc::clone(self);
         info!(server = %cfg.server, name = %cfg.name, reconnect, "starting client");
         self.started.fetch_add(1, Ordering::SeqCst);
@@ -348,6 +360,8 @@ fn client_config(
         },
         tls,
         handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+        // Opening the desktop's clipboard is left to whoever starts the session.
+        clipboard: None,
     })
 }
 

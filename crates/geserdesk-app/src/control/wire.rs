@@ -48,6 +48,10 @@ pub struct ClientOptions {
     pub identity_dir: Option<PathBuf>,
     /// Report these monitors instead of detecting them (VMs, testing).
     pub monitors: Option<Vec<Rect>>,
+    /// Keep this machine's clipboard equal to the server's (text only). Off
+    /// here, or by the server's `clipboard_sharing` option, shares nothing. A
+    /// session that only logs input never touches the clipboard either.
+    pub clipboard: bool,
 }
 
 impl Default for ClientOptions {
@@ -60,6 +64,7 @@ impl Default for ClientOptions {
             tls: true,
             identity_dir: None,
             monitors: None,
+            clipboard: true,
         }
     }
 }
@@ -258,6 +263,7 @@ mod tests {
                     tls: false,
                     identity_dir: Some("/tmp/id".into()),
                     monitors: Some(vec![Rect::new(0, 0, 1280, 1024)]),
+                    clipboard: false,
                 }),
             },
         ];
