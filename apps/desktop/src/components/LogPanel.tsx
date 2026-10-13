@@ -14,9 +14,9 @@ const LEVEL_COLOR: Record<LogLine['level'], string> = {
   TRACE: 'var(--muted-foreground)',
 }
 
-export function LogPanel() {
+export function LogPanel({ daemonPid }: { daemonPid: number | undefined }) {
   const [debug, setDebug] = useState(false)
-  const { lines, clear } = useLog(debug)
+  const { lines, clear } = useLog(debug, daemonPid)
   const box = useRef<HTMLDivElement>(null)
   const stuck = useRef(true)
 

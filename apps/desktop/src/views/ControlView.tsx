@@ -105,7 +105,7 @@ export function ControlView({ settings, daemon, onChange, status, running, probl
         <Label htmlFor="tray">Tutup jendela = sembunyikan ke tray (tetap berjalan)</Label>
       </div>
 
-      <LogPanel />
+      <LogPanel daemonPid={daemon?.pid} />
     </div>
   )
 }

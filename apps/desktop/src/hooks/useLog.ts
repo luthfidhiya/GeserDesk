@@ -4,11 +4,16 @@ import type { LogLine } from '@/types'
 
 const MAX_LINES = 3000
 
-/** Recent log lines (history first, then live), filtered by detail level. */
-export function useLog(showDebug: boolean) {
+/**
+ * Recent log lines (history first, then live), filtered by detail level.
+ * `daemonPid` is the daemon being read: when a different one attaches the
+ * lines are replaced by its own, and when it goes away they stay readable.
+ */
+export function useLog(showDebug: boolean, daemonPid: number | undefined) {
   const [lines, setLines] = useState<LogLine[]>([])
 
   useEffect(() => {
+    if (daemonPid === undefined) return
     let live: LogLine[] = []
     let loaded = false
     const off = on<LogLine>(EVENTS.log, (line) => {
@@ -21,7 +26,7 @@ export function useLog(showDebug: boolean) {
       live = []
     })
     return off
-  }, [])
+  }, [daemonPid])
 
   const shown = useMemo(
     () => (showDebug ? lines : lines.filter((l) => l.level === 'ERROR' || l.level === 'WARN' || l.level === 'INFO')),
