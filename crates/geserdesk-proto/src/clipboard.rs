@@ -52,8 +52,14 @@ pub struct ChunkAssembler {
     started: bool,
     finished: bool,
     expected: u64,
+    /// Refuse a stream longer than this many bytes (0 = no limit).
+    limit: u64,
     buf: Vec<u8>,
 }
+
+/// The most memory reserved up front for a declared `total`; the peer chooses
+/// that number, so it cannot be trusted to size an allocation.
+const MAX_PREALLOCATE: u64 = 1024 * 1024;
 
 /// The chunk stream violated the `Start Data* End` grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -66,11 +72,22 @@ pub enum ChunkError {
     AfterEnd,
     #[error("declared {expected} bytes but received {actual}")]
     LengthMismatch { expected: u64, actual: u64 },
+    #[error("more than the {limit} bytes allowed")]
+    TooLarge { limit: u64 },
 }
 
 impl ChunkAssembler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An assembler that refuses a stream longer than `limit` bytes, as soon as
+    /// that is known (0 = no limit).
+    pub fn with_limit(limit: u64) -> Self {
+        Self {
+            limit,
+            ..Self::default()
+        }
     }
 
     /// Feed one chunk. Returns `Ok(Some(bytes))` when `End` completes the
@@ -84,16 +101,20 @@ impl ChunkAssembler {
                 if self.started {
                     return Err(ChunkError::DoubleStart);
                 }
+                if self.limit > 0 && total > self.limit {
+                    return Err(ChunkError::TooLarge { limit: self.limit });
+                }
                 self.started = true;
                 self.expected = total;
-                if total > 0 {
-                    self.buf.reserve(total as usize);
-                }
+                self.buf.reserve(total.min(MAX_PREALLOCATE) as usize);
                 Ok(None)
             }
             Chunk::Data(d) => {
                 if !self.started {
                     return Err(ChunkError::NotStarted);
+                }
+                if self.limit > 0 && (self.buf.len() + d.len()) as u64 > self.limit {
+                    return Err(ChunkError::TooLarge { limit: self.limit });
                 }
                 self.buf.extend_from_slice(&d);
                 Ok(None)
@@ -155,6 +176,33 @@ mod tests {
                 actual: 3
             })
         );
+    }
+
+    #[test]
+    fn a_declared_size_over_the_limit_is_refused_before_any_data() {
+        let mut asm = ChunkAssembler::with_limit(10);
+        assert_eq!(
+            asm.push(Chunk::Start { total: 11 }),
+            Err(ChunkError::TooLarge { limit: 10 })
+        );
+    }
+
+    #[test]
+    fn data_over_the_limit_is_refused_even_if_start_lied() {
+        let mut asm = ChunkAssembler::with_limit(10);
+        asm.push(Chunk::Start { total: 0 }).unwrap();
+        asm.push(Chunk::Data(vec![0; 6])).unwrap();
+        assert_eq!(
+            asm.push(Chunk::Data(vec![0; 6])),
+            Err(ChunkError::TooLarge { limit: 10 })
+        );
+    }
+
+    #[test]
+    fn a_huge_declared_size_does_not_allocate_it() {
+        let mut asm = ChunkAssembler::new();
+        asm.push(Chunk::Start { total: u64::MAX }).unwrap();
+        assert!(asm.buf.capacity() as u64 <= MAX_PREALLOCATE);
     }
 
     #[test]
