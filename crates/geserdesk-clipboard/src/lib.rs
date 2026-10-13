@@ -20,6 +20,8 @@
 pub mod files;
 mod inbound;
 pub mod picture;
+pub mod pull;
+pub mod stage;
 mod sync;
 mod system;
 mod watch;
