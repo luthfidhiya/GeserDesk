@@ -16,14 +16,14 @@ moves them to a client by pushing the cursor against a screen edge (or
 |---|---|
 | M1 — protocol, codec, framing | ✅ done — 30 unit tests + 6 integration tests |
 | M2 — TCP + tokio, handshake, keep-alive | ✅ done — verified over loopback and end-to-end |
-| M3 — input injection via `enigo` (`--features inject`) | ✅ verified on Linux/X11 |
+| M3 — input injection via `enigo` (`--features inject`) | ✅ verified on Linux/X11 and on a Windows 11 client (mouse over two monitors, all buttons, vertical wheel, keys); horizontal wheel not yet observed |
 | M4 — X11 capture + hotkey switching | ✅ done |
 | M5 — edge crossing | ✅ done |
-| M6 — full keyboard (HID, modifiers, auto-repeat) | ✅ done on Linux |
-| Multi-monitor detection + layout editor | ✅ done, detection confirmed on Windows (2 monitors) |
+| M6 — full keyboard (HID, modifiers, auto-repeat) | ✅ done on Linux; typing into a Windows client checked with a US layout (capitals, shifted symbols, the keypad, Menu and Scroll Lock needed fixes there); every key of the 104-key English layout registered on a keyboard-test page; other layouts not tried |
+| Multi-monitor detection + layout editor | ✅ done, detection confirmed on Windows (2 monitors, one above the other); re-reporting after a monitor is plugged or unplugged while running not yet exercised |
 | M8 — TLS 1.3, certificate pinning, trust-on-first-use | ✅ done, confirmed Linux server <-> Windows client |
-| Desktop app (Tauri + React) with tray | ✅ built; start/stop, layout editor and tray still to be driven end to end on a real desktop |
-| M9 — clipboard sync (text) | ✅ built and tested on loopback with in-memory clipboards; not yet tried on the real desktop clipboards or on Windows |
+| Desktop app (Tauri + React) with tray | ✅ built; on Windows it starts, spawns its daemon detached, attaches over the named pipe and leaves the daemon running when the app dies; the window itself (layout editor, tray, dialogs) is still to be driven on Windows |
+| M9 — clipboard sync (text) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); an X11 clipboard on the Linux side not yet tried |
 | M7, M10+ — Windows capture, files | ⬜ not started |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
@@ -193,8 +193,9 @@ what was copied before it came; its own clipboard is left alone until the next c
 ## Security
 
 Every machine has a self-signed certificate (created on first run, kept in
-`~/.config/geserdesk/` or `%APPDATA%\geserdesk\config`, key file readable only by
-you). Nobody is trusted until a person says so, and trust is a certificate
+`~/.config/geserdesk/` or `%APPDATA%\geserdesk\config`). On Linux the key file is
+mode 0600. On Windows GeserDesk sets no permissions of its own: the file inherits
+those of your profile folder (you, `SYSTEM` and the Administrators). Nobody is trusted until a person says so, and trust is a certificate
 **fingerprint**, which you compare by eye:
 
 * **Client -> server.** On first contact the client prints the server's
