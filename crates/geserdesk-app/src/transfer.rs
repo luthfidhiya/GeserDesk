@@ -140,7 +140,10 @@ mod tests {
         assert_eq!(got.file, "a.txt");
         assert_eq!(got.state, TransferState::Running);
 
-        sink(PullReport { peer: "windows-pc".into(), event: PullEvent::Done });
+        sink(PullReport {
+            peer: "windows-pc".into(),
+            event: PullEvent::Done,
+        });
         let got = rx.try_recv().unwrap();
         assert_eq!(got.seq, 7, "the last seen seq, carried over");
         assert_eq!(got.state, TransferState::Done);
@@ -175,8 +178,15 @@ mod tests {
                 bytes_total: 1,
             }),
         });
-        b(PullReport { peer: "b".into(), event: PullEvent::Done });
+        b(PullReport {
+            peer: "b".into(),
+            event: PullEvent::Done,
+        });
         assert_eq!(rx.try_recv().unwrap().seq, 1);
-        assert_eq!(rx.try_recv().unwrap().seq, 0, "b's own sink never saw a seq");
+        assert_eq!(
+            rx.try_recv().unwrap().seq,
+            0,
+            "b's own sink never saw a seq"
+        );
     }
 }

@@ -11,8 +11,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::broadcast::error::RecvError;
 use tracing::{info, warn};
 
-use crate::events::{DAEMON, LOG, PROMPT, STATUS};
+use crate::events::{DAEMON, LOG, PROMPT, STATUS, TRANSFER};
 use crate::state::{AppState, DaemonView};
+use crate::transfer_window;
 use crate::tray;
 
 /// How often to look for a daemon while attached to none.
@@ -89,6 +90,12 @@ async fn attached(app: &AppHandle, remote: Remote) {
                 }
                 Ok(Event::Log(line)) => {
                     let _ = app.emit(LOG, &line);
+                }
+                Ok(Event::Transfer(progress)) => {
+                    if matches!(progress.state, geserdesk_app::TransferState::Running) {
+                        transfer_window::show(app);
+                    }
+                    let _ = app.emit(TRANSFER, &progress);
                 }
                 Ok(Event::Closing) | Err(RecvError::Closed) => break,
                 Err(RecvError::Lagged(skipped)) => warn!(skipped, "daemon events fell behind"),

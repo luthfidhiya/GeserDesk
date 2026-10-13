@@ -6,3 +6,4 @@ pub const LOG: &str = "log://line";
 pub const PROMPT: &str = "trust://prompt";
 pub const DAEMON: &str = "daemon://info";
 pub const NAVIGATE: &str = "ui://navigate";
+pub const TRANSFER: &str = "transfer://progress";

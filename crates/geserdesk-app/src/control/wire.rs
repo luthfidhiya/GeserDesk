@@ -21,7 +21,7 @@ use crate::trust::TrustPrompt;
 
 /// Bumped when the messages change shape. A daemon outlives the app that
 /// started it, so the two can disagree after an upgrade.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// Longest line either side accepts, so a stray peer cannot make us buffer
 /// without end.
@@ -167,6 +167,8 @@ pub enum Event {
     Status(Status),
     Prompt(Option<TrustPrompt>),
     Log(LogLine),
+    /// A files pull is in progress, or just finished.
+    Transfer(crate::transfer::TransferProgress),
     /// The daemon is about to exit.
     Closing,
 }

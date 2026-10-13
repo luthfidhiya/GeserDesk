@@ -105,7 +105,9 @@ impl Session {
     }
 
     /// Every files pull's progress, for a front end to show.
-    pub fn subscribe_transfers(&self) -> tokio::sync::broadcast::Receiver<crate::transfer::TransferProgress> {
+    pub fn subscribe_transfers(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::transfer::TransferProgress> {
         self.transfers.subscribe()
     }
 

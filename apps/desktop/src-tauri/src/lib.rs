@@ -8,6 +8,7 @@ mod commands;
 mod events;
 mod link;
 mod state;
+mod transfer_window;
 mod tray;
 
 use tauri::{Manager, WindowEvent};

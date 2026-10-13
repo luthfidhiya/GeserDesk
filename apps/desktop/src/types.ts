@@ -58,6 +58,24 @@ export interface LogLine {
   text: string
 }
 
+export type TransferState =
+  | { kind: 'running' }
+  | { kind: 'done' }
+  | { kind: 'failed'; detail: string }
+
+/** One report of a files pull in progress, or just finished (crates/geserdesk-app/src/transfer.rs). */
+export interface TransferProgress {
+  seq: number
+  /** The other machine's screen name, or "server" when pulling from it. */
+  peer: string
+  file: string
+  file_index: number
+  file_count: number
+  bytes_done: number
+  bytes_total: number
+  state: TransferState
+}
+
 export interface Screen {
   name: string
   local: boolean

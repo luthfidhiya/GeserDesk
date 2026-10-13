@@ -260,6 +260,7 @@ impl Service {
                     status: self.session.subscribe_status(),
                     prompt: self.session.subscribe_prompt(),
                     log: self.log.subscribe(),
+                    transfer: self.session.subscribe_transfers(),
                 };
                 // Changes from now on only; the controller asks for the current state itself.
                 s.status.borrow_and_update();
@@ -290,6 +291,7 @@ struct Subscriptions {
     status: watch::Receiver<Status>,
     prompt: watch::Receiver<Option<TrustPrompt>>,
     log: broadcast::Receiver<LogLine>,
+    transfer: broadcast::Receiver<crate::transfer::TransferProgress>,
 }
 
 /// The next event for a subscribed connection; never ready when not subscribed.
@@ -311,6 +313,11 @@ async fn next_event(subs: &mut Option<Subscriptions>) -> Event {
             },
             line = s.log.recv() => match line {
                 Ok(line) => return Event::Log(line),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return pending().await,
+            },
+            progress = s.transfer.recv() => match progress {
+                Ok(p) => return Event::Transfer(p),
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return pending().await,
             },

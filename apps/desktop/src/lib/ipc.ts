@@ -58,6 +58,7 @@ export const EVENTS = {
   prompt: 'trust://prompt',
   daemon: 'daemon://info',
   navigate: 'ui://navigate',
+  transfer: 'transfer://progress',
 } as const
 
 /** Error text from a rejected command (the shell rejects with a string). */
