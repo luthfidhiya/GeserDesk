@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 # GeserDesk Wire Protocol
 
-Version 3.0. This is a new protocol; it does **not** interoperate with Input
+Version 3.1. This is a new protocol; it does **not** interoperate with Input
 Leap / Barrier / Synergy.
 
 Source of truth: `crates/geserdesk-proto`. This document describes the shape;
@@ -149,7 +149,7 @@ Sharing is push-on-change, not ownership handover, so no request message exists:
 3. The server writes a client's text onto its own clipboard and relays it, as its own
    transfer, to every other client (never back to the sender).
 4. The bytes of that stream are a postcard-encoded `ClipboardContent`: a list of
-   `(mime, data)` items. `text/plain` and `text/html` (UTF-8) are shared today; a
+   `(mime, data)` items. `text/plain`, `text/html` (UTF-8) and `image/png` are shared today; a
    receiver skips any other MIME type, so formats can be added without a new
    version. Plain text is what every program pastes; the HTML is what carries a
    copied web page's style into Word or a mail client. A receiver writes the
@@ -167,6 +167,11 @@ Sharing is push-on-change, not ownership handover, so no request message exists:
 A peer that predates clipboard sharing logs and ignores these messages.
 
 ## Changes
+
+- **3.1** — clipboard contents may carry `image/png` (a screenshot, a copied picture).
+  A picture is only taken from a clipboard that holds no text, and a receiver
+  checks its dimensions from the PNG header (at most 16384 per side and 64
+  megapixels) before decoding. A 3.0 peer skips the item.
 
 - **3.0** — a clipboard transfer carries a `ClipboardContent` (several formats)
   instead of bare UTF-8 text. The message shapes did not change, but a 2.x peer
