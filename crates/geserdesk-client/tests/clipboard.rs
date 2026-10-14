@@ -55,16 +55,32 @@ struct Rig {
     stop: watch::Sender<bool>,
 }
 
+/// A free port that no other test in this process has been given. The port is
+/// only free until the probe is dropped and the server binds it a moment later,
+/// and these tests run in parallel: if two were ever handed the same port, each
+/// one's clients would connect to the other's server (and the server that lost
+/// the bind fails unseen). Seen once as exactly that: a server that does not share
+/// the clipboard leaking text to a client, while a test of one that does found
+/// its text never arriving. The collision itself was not reproduced.
+fn free_port() -> u16 {
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
+}
 async fn rig(extra_options: &str) -> Rig {
     rig_with(extra_options, true).await
 }
 
 /// `connect_a` off leaves screen "a" free for a hand-made peer.
 async fn rig_with(extra_options: &str, connect_a: bool) -> Rig {
-    let port = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        probe.local_addr().unwrap().port()
-    };
+    let port = free_port();
     let config = Config::parse(&format!(
         "[server]\nlisten = \"127.0.0.1:{port}\"\nscreen = \"desk\"\ntls = false\n\n\
          [[screens]]\nname = \"desk\"\n\n[[screens]]\nname = \"a\"\n\n[[screens]]\nname = \"b\"\n\n\

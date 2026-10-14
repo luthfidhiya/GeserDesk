@@ -427,6 +427,25 @@ async fn shutdown_stops_the_session_and_ends_the_daemon() {
     assert!(remote.status().await.is_err());
 }
 
+/// A free port that no other test in this process has been given. The port is
+/// only free until the probe is dropped and the server binds it a moment later,
+/// and these tests run in parallel: if two were ever handed the same port, each
+/// one's clients would connect to the other's server (and the server that lost
+/// the bind fails unseen). Seen once as exactly that: a server that does not share
+/// the clipboard leaking text to a client, while a test of one that does found
+/// its text never arriving. The collision itself was not reproduced.
+fn free_port() -> u16 {
+    static GIVEN: std::sync::Mutex<Vec<u16>> = std::sync::Mutex::new(Vec::new());
+    loop {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        let mut given = GIVEN.lock().unwrap();
+        if !given.contains(&port) {
+            given.push(port);
+            return port;
+        }
+    }
+}
 /// A plain-TCP server in this process for a client session to connect to.
 /// Returns its address, a way to stop it, and its desk.
 async fn local_server() -> (
@@ -434,10 +453,7 @@ async fn local_server() -> (
     tokio::sync::watch::Sender<bool>,
     std::sync::Arc<geserdesk_server::DeskState>,
 ) {
-    let port = {
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        probe.local_addr().unwrap().port()
-    };
+    let port = free_port();
     let config = Config::parse(&format!(
         "[server]\nlisten = \"127.0.0.1:{port}\"\nscreen = \"linux-pc\"\ntls = false\n\n\
          [[screens]]\nname = \"linux-pc\"\n\n[[screens]]\nname = \"win\"\n"
