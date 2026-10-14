@@ -11,7 +11,7 @@
 //!   thread);
 //! * [`CaptureCmd`]s flow in through [`CaptureHandle::send`].
 //!
-//! Backends: X11 (`x11` module, Linux). Windows capture arrives in M7.
+//! Backends: X11 (`x11` module, Linux) and low-level hooks (`windows` module).
 //!
 //! [`monitors::monitors`] lists the machine's monitors on both platforms; the
 //! client reports them to the server so the layout can be arranged exactly.
@@ -20,6 +20,8 @@ use geserdesk_proto::{Button, KeyEvent, Point, Rect};
 
 pub mod keymap;
 pub mod monitors;
+#[cfg(windows)]
+pub mod windows;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
@@ -106,7 +108,15 @@ pub fn start(
 }
 
 /// Start the platform's capture backend. Events go to `events`.
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub fn start(
+    events: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
+) -> Result<CaptureHandle, CaptureError> {
+    windows::start(events)
+}
+
+/// Start the platform's capture backend. Events go to `events`.
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn start(
     _events: tokio::sync::mpsc::UnboundedSender<CaptureEvent>,
 ) -> Result<CaptureHandle, CaptureError> {

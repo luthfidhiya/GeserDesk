@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [package]
 name = "geserdesk-platform"
-description = "OS input capture for the GeserDesk server (X11 now; Windows in M7)"
+description = "OS input capture for the GeserDesk server (X11 and Windows)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,4 +19,4 @@ tracing.workspace = true
 x11rb = { version = "0.13", features = ["xkb", "randr"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
