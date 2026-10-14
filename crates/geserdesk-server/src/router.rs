@@ -56,6 +56,10 @@ pub struct Core {
     origins: HashMap<String, Point>,
     connected: HashMap<String, Vec<Rect>>,
     state: State,
+    /// The local monitor the pointer was last seen on while the server had the
+    /// input: where it comes back to when it is taken back with no edge to say
+    /// where (the hotkey, or the client it was on going away).
+    last_local_monitor: Option<Rect>,
     switch: SwitchState,
     seq: u64,
 }
@@ -77,6 +81,7 @@ impl Core {
             origins: HashMap::new(),
             connected: HashMap::new(),
             state: State::Local,
+            last_local_monitor: None,
             switch: SwitchState::new(),
             seq: 0,
         };
@@ -191,8 +196,22 @@ impl Core {
             })
     }
 
+    /// Where input returns to on the local screen when nothing says where: the
+    /// middle of the monitor the pointer was last on, else of the primary one (the
+    /// one at the origin). Not the middle of the whole desktop, which for monitors
+    /// stacked or staggered can lie on a seam, or on no monitor at all.
     fn local_center(&self) -> Point {
-        let c = Rect::union_all(&self.local_monitors).map_or(Point::new(0, 0), |r| r.center());
+        let home = self
+            .last_local_monitor
+            .filter(|m| self.local_monitors.contains(m))
+            .or_else(|| {
+                self.local_monitors
+                    .iter()
+                    .copied()
+                    .find(|m| m.contains(Point::new(0, 0)))
+            })
+            .or_else(|| self.local_monitors.first().copied());
+        let c = home.map_or(Point::new(0, 0), |m| m.center());
         self.snap_into(&self.local.clone(), c)
     }
 
@@ -215,6 +234,7 @@ impl Core {
         let Some(m) = self.local_monitors.iter().copied().find(|m| m.contains(p)) else {
             return Vec::new();
         };
+        self.last_local_monitor = Some(m);
         let jump = self.policy.jump_zone.max(1);
         let lo = self.origin(&self.local);
 
@@ -965,6 +985,70 @@ mod tests {
             })
         );
         assert_eq!(c.active_remote(), None);
+    }
+
+    /// Two local monitors, one above the other: the middle of the whole desktop is
+    /// the seam between them (and the old return point).
+    fn stacked_core() -> Core {
+        const ABOVE: Rect = Rect::new(0, -1080, 1920, 1080);
+        let mut c = Core::new(
+            layout(),
+            SwitchPolicy::default(),
+            "linux-pc".into(),
+            vec![ABOVE, LOCAL],
+            row(),
+        );
+        c.client_connected("win", vec![REMOTE]);
+        c
+    }
+
+    fn returned_to(c: &mut Core) -> Point {
+        c.handle(CaptureEvent::Hotkey, 1); // there
+        match c.handle(CaptureEvent::Hotkey, 2).last() {
+            Some(Action::Capture(CaptureCmd::Ungrab { warp })) => *warp,
+            other => panic!("expected an Ungrab, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_hotkey_returns_to_the_middle_of_the_monitor_the_pointer_was_on() {
+        let mut c = stacked_core();
+        c.handle(CaptureEvent::Pointer(Point::new(700, -300)), 0); // the upper one
+        assert_eq!(returned_to(&mut c), Point::new(960, -540));
+
+        let mut c = stacked_core();
+        c.handle(CaptureEvent::Pointer(Point::new(700, 300)), 0); // the lower one
+        assert_eq!(returned_to(&mut c), Point::new(960, 540));
+    }
+
+    #[test]
+    fn with_no_pointer_seen_it_returns_to_the_primary_monitor_not_the_seam() {
+        let mut c = stacked_core();
+        let back = returned_to(&mut c);
+        assert_eq!(back, Point::new(960, 540), "the monitor at the origin");
+        assert_ne!(back, Point::new(960, 0), "the seam between the two");
+    }
+
+    #[test]
+    fn the_last_monitor_wins_when_the_pointer_moved_between_them() {
+        let mut c = stacked_core();
+        c.handle(CaptureEvent::Pointer(Point::new(700, -300)), 0);
+        c.handle(CaptureEvent::Pointer(Point::new(700, 300)), 1);
+        assert_eq!(returned_to(&mut c), Point::new(960, 540));
+    }
+
+    #[test]
+    fn a_client_going_away_hands_the_input_back_to_the_same_place() {
+        let mut c = stacked_core();
+        c.handle(CaptureEvent::Pointer(Point::new(700, -300)), 0);
+        c.handle(CaptureEvent::Hotkey, 1);
+        let a = c.client_disconnected("win");
+        assert_eq!(
+            a.last().unwrap(),
+            &Action::Capture(CaptureCmd::Ungrab {
+                warp: Point::new(960, -540)
+            })
+        );
     }
 
     #[test]
