@@ -61,6 +61,7 @@ export interface LogLine {
 export type TransferState =
   | { kind: 'running' }
   | { kind: 'done' }
+  | { kind: 'cancelled' }
   | { kind: 'failed'; detail: string }
 
 /** One report of a files pull in progress, or just finished (crates/geserdesk-app/src/transfer.rs). */

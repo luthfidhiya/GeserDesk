@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use geserdesk_app::control::{ConnectError, Info, StartSpec};
 use geserdesk_app::settings::config_dir;
-use geserdesk_app::{Endpoint, Mode, Remote, Settings, Status};
+use geserdesk_app::{Endpoint, Mode, Remote, Settings, Status, TransferProgress};
 use serde::Serialize;
 use tokio::sync::Notify;
 
@@ -32,6 +32,10 @@ pub struct AppState {
     remote: Mutex<Option<Remote>>,
     status: Mutex<Status>,
     info: Mutex<Option<DaemonView>>,
+    /// The latest files-pull report. The progress window is created when a pull
+    /// starts, and its page is not loaded yet when the first reports go out, so it
+    /// asks for this once it is.
+    transfer: Mutex<Option<TransferProgress>>,
     /// Wakes the link to attach right now instead of at its next poll.
     pub attach_now: Notify,
     settings: Mutex<Settings>,
@@ -60,6 +64,7 @@ impl AppState {
             remote: Mutex::new(None),
             status: Mutex::new(Status::Stopped),
             info: Mutex::new(None),
+            transfer: Mutex::new(None),
             attach_now: Notify::new(),
             settings: Mutex::new(Settings::load()),
             tray_ok: AtomicBool::new(false),
@@ -79,6 +84,14 @@ impl AppState {
     /// The daemon this app is attached to, if any.
     pub fn remote(&self) -> Option<Remote> {
         self.remote.lock().unwrap().clone()
+    }
+
+    pub fn set_transfer(&self, progress: TransferProgress) {
+        *self.transfer.lock().unwrap() = Some(progress);
+    }
+
+    pub fn transfer(&self) -> Option<TransferProgress> {
+        self.transfer.lock().unwrap().clone()
     }
 
     pub fn set_remote(&self, remote: Option<Remote>) {

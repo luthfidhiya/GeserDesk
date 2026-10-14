@@ -72,6 +72,8 @@ pub fn run() {
             commands::trust::answer_server_prompt,
             commands::log::log_snapshot,
             commands::log::clear_log,
+            commands::transfer::cancel_transfer,
+            commands::transfer::latest_transfer,
         ])
         .run(tauri::generate_context!())
         .expect("running the GeserDesk app");

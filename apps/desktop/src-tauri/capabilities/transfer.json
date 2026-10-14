@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "transfer",
+  "description": "What the small files-pull progress window may do: hear the progress events, hide itself, and ask for the pull to be cancelled",
+  "windows": ["transfer"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide"
+  ]
+}

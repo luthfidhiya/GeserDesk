@@ -92,6 +92,7 @@ async fn attached(app: &AppHandle, remote: Remote) {
                     let _ = app.emit(LOG, &line);
                 }
                 Ok(Event::Transfer(progress)) => {
+                    app.state::<AppState>().set_transfer(progress.clone());
                     if matches!(progress.state, geserdesk_app::TransferState::Running) {
                         transfer_window::show(app);
                     }

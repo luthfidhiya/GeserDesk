@@ -10,6 +10,7 @@ import type {
   Mode,
   Settings,
   Status,
+  TransferProgress,
   TrustPrompt,
 } from '@/types'
 
@@ -44,6 +45,11 @@ export const ipc = {
 
   logSnapshot: () => invoke<LogLine[]>('log_snapshot'),
   clearLog: () => invoke<void>('clear_log'),
+
+  /** Stop the files pull in progress; what it staged is removed. */
+  cancelTransfer: () => invoke<void>('cancel_transfer'),
+  /** The latest pull report, for a progress window that opened after it was sent. */
+  latestTransfer: () => invoke<TransferProgress | null>('latest_transfer'),
 }
 
 /** Subscribe to a shell event; returns the function that unsubscribes. */
