@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import appIcon from '@/assets/app-icon.png'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { TrustServerDialog } from '@/components/TrustServerDialog'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -36,7 +37,10 @@ export default function App() {
     <TooltipProvider>
       <div className="flex h-full flex-col gap-3 p-4">
         <header className="flex flex-wrap items-center gap-4">
-          <h1 className="text-lg font-semibold">GeserDesk</h1>
+          <div className="flex items-center gap-2">
+            <img src={appIcon} alt="" className="h-7 w-7 rounded-md" />
+            <h1 className="text-lg font-semibold">GeserDesk</h1>
+          </div>
           <Tabs
             value={mode}
             onValueChange={(m) => {
