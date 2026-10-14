@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use geserdesk_proto::clipboard::ClipboardContent;
-use geserdesk_proto::{Point, Rect, ServerMsg};
+use geserdesk_proto::{Point, Rect, ServerMsg, Size};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// Connection changes the router needs to know about.
@@ -24,6 +24,8 @@ pub enum HubEvent {
     Disconnected(String),
     /// The layout editor moved machines on the virtual desk.
     Positions(BTreeMap<String, Point>),
+    /// The layout editor stretched (or reset) machines on the virtual desk.
+    Sizes(BTreeMap<String, Size>),
     /// This machine's own monitors changed (one plugged, unplugged or moved).
     LocalMonitors(Vec<Rect>),
     /// A machine the config did not list was approved and joined the desk.
@@ -167,6 +169,11 @@ impl Hub {
     /// Tell the router that machines moved on the virtual desk.
     pub fn apply_positions(&self, positions: BTreeMap<String, Point>) {
         let _ = self.events.send(HubEvent::Positions(positions));
+    }
+
+    /// Tell the router the desk sizes of machines changed.
+    pub fn apply_sizes(&self, sizes: BTreeMap<String, Size>) {
+        let _ = self.events.send(HubEvent::Sizes(sizes));
     }
 
     /// A machine that was not in the config has been approved: remember it for the

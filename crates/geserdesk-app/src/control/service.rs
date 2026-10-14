@@ -219,9 +219,9 @@ impl Service {
             Command::Desk => Ok(Reply::Desk(
                 self.session.desk().map(|d| Box::new(d.snapshot())),
             )),
-            Command::SaveLayout { positions } => {
+            Command::SaveLayout { positions, sizes } => {
                 let desk = self.session.desk().ok_or("server belum berjalan")?;
-                desk.apply_layout(&positions)
+                desk.apply_layout(&positions, &sizes)
                     .map(Reply::Saved)
                     .map_err(|e| e.to_string())
             }

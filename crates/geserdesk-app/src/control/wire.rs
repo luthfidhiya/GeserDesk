@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use geserdesk_proto::{Point, Rect};
+use geserdesk_proto::{Point, Rect, Size};
 use geserdesk_server::DeskSnapshot;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
@@ -105,6 +105,9 @@ pub enum Command {
     Desk,
     SaveLayout {
         positions: BTreeMap<String, Point>,
+        /// Per machine: the desk size to stretch it to, or `None` to reset it.
+        #[serde(default)]
+        sizes: BTreeMap<String, Option<Size>>,
     },
     Approve {
         name: String,
@@ -248,7 +251,13 @@ mod tests {
             Command::Shutdown,
             Command::Status,
             Command::Desk,
-            Command::SaveLayout { positions },
+            Command::SaveLayout {
+                positions,
+                sizes: BTreeMap::from([
+                    ("win".to_string(), Some(Size::new(1920, 2160))),
+                    ("mac".to_string(), None),
+                ]),
+            },
             Command::Approve {
                 name: "a".into(),
                 fingerprint: "SHA256:00".into(),

@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 
 use geserdesk_app::DeskSnapshot;
-use geserdesk_proto::Point;
+use geserdesk_proto::{Point, Size};
 use tauri::State;
 
 use crate::state::AppState;
@@ -21,6 +21,7 @@ pub async fn desk_state(state: State<'_, AppState>) -> Result<Option<DeskSnapsho
 pub async fn save_layout(
     state: State<'_, AppState>,
     positions: BTreeMap<String, Point>,
+    sizes: BTreeMap<String, Option<Size>>,
 ) -> Result<bool, String> {
-    state.need_remote()?.save_layout(positions).await
+    state.need_remote()?.save_layout(positions, sizes).await
 }

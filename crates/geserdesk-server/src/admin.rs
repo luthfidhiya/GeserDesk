@@ -11,16 +11,19 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use geserdesk_proto::{Point, Rect};
+use geserdesk_proto::{Point, Rect, Size};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::desk::{effective_origins, DEFAULT_SIZE};
+use crate::desk::{desk_size, effective_origins, Frame, DEFAULT_SIZE};
 use crate::hub::Hub;
 use crate::layout::{valid_screen_name, Layout};
 
 /// Largest coordinate accepted, to keep arithmetic far from overflow.
 const MAX_COORD: i32 = 1_000_000;
+
+/// Smallest width or height a machine may be shrunk to on the desk.
+const MIN_SIZE: i32 = 64;
 
 /// Everything a front end needs to read and change.
 pub struct DeskState {
@@ -34,6 +37,8 @@ pub struct DeskState {
     /// The config's screens, and any approved since (see pprove).
     layout: Mutex<Layout>,
     positions: Mutex<BTreeMap<String, Point>>,
+    /// Desk sizes that differ from a machine's real one.
+    sizes: Mutex<BTreeMap<String, Size>>,
     /// Last monitors seen for each screen, so a disconnected machine keeps its
     /// real shape on screen.
     known: Mutex<HashMap<String, Vec<Rect>>>,
@@ -48,6 +53,9 @@ pub struct ScreenView {
     /// The monitors are a guess: this machine has never connected.
     pub placeholder: bool,
     pub origin: Point,
+    /// How much of the desk the machine covers: its monitors' real extent, or
+    /// what it was stretched to.
+    pub size: Size,
     pub monitors: Vec<Rect>,
     pub trusted_fingerprint: Option<String>,
 }
@@ -84,6 +92,8 @@ pub enum AdminError {
     UnknownScreen(String),
     #[error("posisi {0} di luar batas")]
     OutOfRange(String),
+    #[error("ukuran {0} tidak valid")]
+    BadSize(String),
     #[error("layar {0} dan {1} saling tumpang tindih")]
     Overlap(String, String),
     #[error("TLS mati di server ini")]
@@ -116,8 +126,14 @@ impl DeskState {
             local_monitors: Mutex::new(local_monitors),
             layout: Mutex::new(layout),
             positions: Mutex::new(positions),
+            sizes: Mutex::new(BTreeMap::new()),
             known: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Start from the desk sizes the config holds.
+    pub fn set_sizes(&self, sizes: BTreeMap<String, Size>) {
+        *self.sizes.lock().unwrap() = sizes;
     }
 
     /// This machine's monitors changed while the server runs.
@@ -152,10 +168,11 @@ impl DeskState {
             .iter()
             .map(|n| (n.clone(), self.monitors_for(n, &live)))
             .collect();
+        let sizes = self.sizes.lock().unwrap().clone();
         let size_of = |n: &str| {
-            mons.get(n)
-                .and_then(|(m, _)| Rect::union_all(m))
-                .map_or(DEFAULT_SIZE, |r| (r.w, r.h))
+            mons.get(n).map_or(DEFAULT_SIZE, |(m, _)| {
+                desk_size(m, sizes.get(n).copied())
+            })
         };
         let origins = effective_origins(
             names,
@@ -175,6 +192,10 @@ impl DeskState {
                     connected: *n == self.local || live.contains_key(n),
                     placeholder: !known,
                     origin: origins[n],
+                    size: {
+                        let (w, h) = size_of(n);
+                        Size::new(w, h)
+                    },
                     monitors,
                     trusted_fingerprint: trusted
                         .as_ref()
@@ -214,28 +235,39 @@ impl DeskState {
     /// Validate `requested`, write it to the config file, and apply it to the
     /// running router. Returns whether it was saved to a file (a server without
     /// a config file applies the layout but cannot keep it).
-    pub fn apply_layout(&self, requested: &BTreeMap<String, Point>) -> Result<bool, AdminError> {
-        let next = self.validate(requested)?;
+    ///
+    /// `resized` says, for each machine named, the desk size to stretch it to, or
+    /// `None` to put it back to its real size. Machines not named keep theirs.
+    pub fn apply_layout(
+        &self,
+        requested: &BTreeMap<String, Point>,
+        resized: &BTreeMap<String, Option<Size>>,
+    ) -> Result<bool, AdminError> {
+        let (next, sizes) = self.validate(requested, resized)?;
         let mut saved = false;
         if let Some(path) = &self.config_path {
-            write_positions(path, &next).map_err(|e| {
+            write_layout(path, &next, &sizes).map_err(|e| {
                 warn!(error = %e, "could not save the layout to the config file");
                 AdminError::Save(e.to_string())
             })?;
             saved = true;
         }
         *self.positions.lock().unwrap() = next.clone();
+        *self.sizes.lock().unwrap() = sizes.clone();
+        self.hub.apply_sizes(sizes);
         self.hub.apply_positions(next);
         info!(saved, "layout updated");
         Ok(saved)
     }
 
-    /// Validate `requested` against the current state and return the full set
-    /// of positions that should replace the stored ones.
+    /// Validate `requested` against the current state and return the full sets
+    /// of positions and of stretched sizes that should replace the stored ones.
+    #[allow(clippy::type_complexity)]
     fn validate(
         &self,
         requested: &BTreeMap<String, Point>,
-    ) -> Result<BTreeMap<String, Point>, AdminError> {
+        resized: &BTreeMap<String, Option<Size>>,
+    ) -> Result<(BTreeMap<String, Point>, BTreeMap<String, Size>), AdminError> {
         let views = self.screens();
         let mut next: BTreeMap<String, Point> =
             views.iter().map(|v| (v.name.clone(), v.origin)).collect();
@@ -249,6 +281,29 @@ impl DeskState {
             next.insert(name.clone(), *p);
         }
 
+        let mut sizes = self.sizes.lock().unwrap().clone();
+        for (name, size) in resized {
+            let Some(view) = views.iter().find(|v| &v.name == name) else {
+                return Err(AdminError::UnknownScreen(name.clone()));
+            };
+            let natural = desk_size(&view.monitors, None);
+            match size {
+                // Back to the real size, or no different from it: nothing to keep.
+                None => {
+                    sizes.remove(name);
+                }
+                Some(s) if (s.w, s.h) == natural => {
+                    sizes.remove(name);
+                }
+                Some(s) if s.w < MIN_SIZE || s.h < MIN_SIZE || s.w > MAX_COORD || s.h > MAX_COORD => {
+                    return Err(AdminError::BadSize(name.clone()));
+                }
+                Some(s) => {
+                    sizes.insert(name.clone(), *s);
+                }
+            }
+        }
+
         // No two machines may occupy the same desk pixels: the cursor would
         // have two places to go. Only machines that are connected count: the
         // others are not shown, and a stand-in for one that never connected
@@ -257,12 +312,12 @@ impl DeskState {
             .iter()
             .filter(|v| v.connected)
             .map(|v| {
-                let o = next[&v.name];
-                let moved = v
-                    .monitors
-                    .iter()
-                    .map(|m| Rect::new(m.x + o.x, m.y + o.y, m.w, m.h))
-                    .collect();
+                let frame = Frame::new(
+                    next[&v.name],
+                    Rect::union_all(&v.monitors),
+                    sizes.get(&v.name).copied(),
+                );
+                let moved = v.monitors.iter().map(|m| frame.desk_rect(m)).collect();
                 (v.name.as_str(), moved)
             })
             .collect();
@@ -273,7 +328,7 @@ impl DeskState {
                 }
             }
         }
-        Ok(next)
+        Ok((next, sizes))
     }
 
     fn tls(&self) -> Result<&Arc<crate::net::TlsContext>, AdminError> {
@@ -386,13 +441,28 @@ fn edit_screens(
     Ok(())
 }
 
-/// Write `x`/`y` into each matching `[[screens]]` table of the config file.
-pub fn write_positions(path: &Path, positions: &BTreeMap<String, Point>) -> anyhow::Result<()> {
+/// Write `x`/`y` into each matching `[[screens]]` table of the config file, and
+/// `w`/`h` for the screens in `sizes` (removing them from the others).
+pub fn write_layout(
+    path: &Path,
+    positions: &BTreeMap<String, Point>,
+    sizes: &BTreeMap<String, Size>,
+) -> anyhow::Result<()> {
     use toml_edit::value;
     edit_screens(path, |name, table| {
         if let Some(p) = positions.get(name) {
             table["x"] = value(i64::from(p.x));
             table["y"] = value(i64::from(p.y));
+        }
+        match sizes.get(name) {
+            Some(s) => {
+                table["w"] = value(i64::from(s.w));
+                table["h"] = value(i64::from(s.h));
+            }
+            None => {
+                table.remove("w");
+                table.remove("h");
+            }
         }
     })
 }
@@ -475,6 +545,14 @@ mod tests {
             .iter()
             .map(|(n, x, y)| (n.to_string(), Point::new(*x, *y)))
             .collect()
+    }
+
+    fn none() -> BTreeMap<String, Option<Size>> {
+        BTreeMap::new()
+    }
+
+    fn stretch(name: &str, w: i32, h: i32) -> BTreeMap<String, Option<Size>> {
+        BTreeMap::from([(name.to_string(), Some(Size::new(w, h)))])
     }
 
     fn temp_file(name: &str, content: &str) -> PathBuf {
@@ -567,10 +645,10 @@ mod tests {
             .hub
             .register("win", vec![Rect::new(0, 0, 1920, 1080)])
             .unwrap();
-        let ok = st.validate(&req(&[("win", 1920, 200)])).unwrap();
+        let (ok, _) = st.validate(&req(&[("win", 1920, 200)]), &none()).unwrap();
         assert_eq!(ok["win"], Point::new(1920, 200));
         assert_eq!(
-            st.validate(&req(&[("win", 1000, 0)])).unwrap_err(),
+            st.validate(&req(&[("win", 1000, 0)]), &none()).unwrap_err(),
             AdminError::Overlap("linux-pc".into(), "win".into())
         );
     }
@@ -579,11 +657,12 @@ mod tests {
     fn validation_rejects_unknown_screens_and_huge_values() {
         let st = state_with(None);
         assert_eq!(
-            st.validate(&req(&[("ghost", 0, 0)])).unwrap_err(),
+            st.validate(&req(&[("ghost", 0, 0)]), &none()).unwrap_err(),
             AdminError::UnknownScreen("ghost".into())
         );
         assert_eq!(
-            st.validate(&req(&[("win", 2_000_000, 0)])).unwrap_err(),
+            st.validate(&req(&[("win", 2_000_000, 0)]), &none())
+                .unwrap_err(),
             AdminError::OutOfRange("win".into())
         );
     }
@@ -597,7 +676,7 @@ mod tests {
         let mut p = BTreeMap::new();
         p.insert("linux-pc".to_string(), Point::new(0, 0));
         p.insert("win".to_string(), Point::new(1920, -150));
-        write_positions(&path, &p).unwrap();
+        write_layout(&path, &p, &BTreeMap::new()).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my setup"));
@@ -620,7 +699,9 @@ mod tests {
             .register("win", vec![Rect::new(0, 0, 1920, 1080)])
             .unwrap();
 
-        let saved = st.apply_layout(&req(&[("win", 1920, 100)])).unwrap();
+        let saved = st
+            .apply_layout(&req(&[("win", 1920, 100)]), &none())
+            .unwrap();
         assert!(saved);
         assert_eq!(read_config(&path).positions["win"], Point::new(1920, 100));
         // Skip the connection event from registering "win"; the layout follows.
@@ -636,23 +717,75 @@ mod tests {
 
         // An overlapping layout is refused and leaves the file alone.
         assert_eq!(
-            st.apply_layout(&req(&[("win", 10, 10)])).unwrap_err(),
+            st.apply_layout(&req(&[("win", 10, 10)]), &none())
+                .unwrap_err(),
             AdminError::Overlap("linux-pc".into(), "win".into())
         );
         assert_eq!(read_config(&path).positions["win"], Point::new(1920, 100));
     }
 
     #[test]
+    fn a_stretched_size_is_validated_saved_applied_and_resettable() {
+        let path = temp_file(
+            "stretch",
+            "[[screens]]\nname = \"linux-pc\"\n\n[[screens]]\nname = \"win\"\n",
+        );
+        let st = state_with(Some(path.clone()));
+        let _win = st
+            .hub
+            .register("win", vec![Rect::new(0, 0, 1920, 1080)])
+            .unwrap();
+        let at = req(&[("win", 1920, 0)]);
+
+        // Absurd sizes and unknown screens are refused.
+        assert_eq!(
+            st.validate(&at, &stretch("win", 10, 2160)).unwrap_err(),
+            AdminError::BadSize("win".into())
+        );
+        assert_eq!(
+            st.validate(&at, &stretch("ghost", 1920, 2160)).unwrap_err(),
+            AdminError::UnknownScreen("ghost".into())
+        );
+        // Stretched, it would reach back over the server's own screen.
+        assert!(matches!(
+            st.validate(&req(&[("win", 1000, 0)]), &stretch("win", 1920, 2160)),
+            Err(AdminError::Overlap(..))
+        ));
+
+        st.apply_layout(&at, &stretch("win", 1920, 2160)).unwrap();
+        assert_eq!(read_config(&path).sizes["win"], Size::new(1920, 2160));
+        let win = &st.snapshot().screens[1];
+        assert_eq!(win.size, Size::new(1920, 2160));
+        assert_eq!(win.monitors[0].h, 1080, "its real monitors are untouched");
+
+        // Machines not named keep their size.
+        st.apply_layout(&at, &none()).unwrap();
+        assert_eq!(read_config(&path).sizes["win"], Size::new(1920, 2160));
+
+        // Reset: the size leaves the file and the snapshot.
+        let reset = BTreeMap::from([("win".to_string(), None)]);
+        st.apply_layout(&at, &reset).unwrap();
+        assert!(read_config(&path).sizes.is_empty());
+        assert_eq!(st.snapshot().screens[1].size, Size::new(1920, 1080));
+
+        // Setting it to its real size is the same as no size at all.
+        st.apply_layout(&at, &stretch("win", 1920, 1080)).unwrap();
+        assert!(read_config(&path).sizes.is_empty());
+    }
+
+    #[test]
     fn a_machine_that_is_not_connected_never_blocks_a_layout() {
         let st = state_with(None);
         // "win" has not connected, so a layout over its stand-in is accepted.
-        assert!(st.validate(&req(&[("win", 100, 100)])).is_ok());
+        assert!(st.validate(&req(&[("win", 100, 100)]), &none()).is_ok());
     }
 
     #[test]
     fn without_a_config_file_the_layout_applies_but_is_not_saved() {
         let st = state_with(None);
-        assert!(!st.apply_layout(&req(&[("win", 1920, 0)])).unwrap());
+        assert!(!st
+            .apply_layout(&req(&[("win", 1920, 0)]), &none())
+            .unwrap());
     }
 
     #[test]

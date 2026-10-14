@@ -11,12 +11,88 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
-use geserdesk_proto::{Edge, Point, Rect};
+use geserdesk_proto::{Edge, Point, Rect, Size};
 
 use crate::layout::Layout;
 
 /// Assumed size of a machine whose monitors are not known yet.
 pub const DEFAULT_SIZE: (i32, i32) = (1920, 1080);
+
+/// How a machine's own coordinates map onto the desk: its origin, and a stretch.
+///
+/// A machine may be given a desk size other than its real one (a 1080p client
+/// stretched to the height of two server monitors, say). Its monitors then cover
+/// that much of the desk, and a cursor crossing onto it lands at the
+/// proportionally matching spot. With no size set the map is the plain shift by
+/// the origin.
+#[derive(Debug, Clone, Copy)]
+pub struct Frame {
+    origin: Point,
+    /// Top-left of the machine's monitors; the stretch is about this point.
+    base: Point,
+    sx: f64,
+    sy: f64,
+}
+
+impl Frame {
+    /// `bounds` is the union of the machine's monitors, `size` its desk size.
+    pub fn new(origin: Point, bounds: Option<Rect>, size: Option<Size>) -> Self {
+        let b = bounds.unwrap_or(Rect::new(0, 0, DEFAULT_SIZE.0, DEFAULT_SIZE.1));
+        let ratio = |want: i32, have: i32| {
+            if want > 0 && have > 0 {
+                f64::from(want) / f64::from(have)
+            } else {
+                1.0
+            }
+        };
+        let (sx, sy) = size.map_or((1.0, 1.0), |s| (ratio(s.w, b.w), ratio(s.h, b.h)));
+        Self {
+            origin,
+            base: Point::new(b.x, b.y),
+            sx,
+            sy,
+        }
+    }
+
+    /// Where the machine's own point `p` is on the desk.
+    pub fn to_desk(&self, p: Point) -> Point {
+        let at = |v: i32, base: i32, origin: i32, s: f64| {
+            origin + base + (f64::from(v - base) * s).round() as i32
+        };
+        Point::new(
+            at(p.x, self.base.x, self.origin.x, self.sx),
+            at(p.y, self.base.y, self.origin.y, self.sy),
+        )
+    }
+
+    /// The machine's own point under the desk point `v`.
+    pub fn to_local(&self, v: Point) -> Point {
+        let at = |d: i32, base: i32, origin: i32, s: f64| {
+            base + (f64::from(d - origin - base) / s).floor() as i32
+        };
+        Point::new(
+            at(v.x, self.base.x, self.origin.x, self.sx),
+            at(v.y, self.base.y, self.origin.y, self.sy),
+        )
+    }
+
+    /// A monitor of the machine, as it lies on the desk.
+    pub fn desk_rect(&self, m: &Rect) -> Rect {
+        let a = self.to_desk(Point::new(m.left(), m.top()));
+        let b = self.to_desk(Point::new(m.right(), m.bottom()));
+        Rect::new(a.x, a.y, b.x - a.x, b.y - a.y)
+    }
+}
+
+/// The desk size of a machine with these monitors: `size` if one is set, else the
+/// monitors' real extent.
+pub fn desk_size(monitors: &[Rect], size: Option<Size>) -> (i32, i32) {
+    match (size, Rect::union_all(monitors)) {
+        (Some(s), _) => (s.w, s.h),
+        (None, Some(r)) => (r.w, r.h),
+        (None, None) => DEFAULT_SIZE,
+    }
+}
 
 /// Work out an origin for every screen in `order`.
 ///

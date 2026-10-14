@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use geserdesk_proto::Point;
+use geserdesk_proto::{Point, Size};
 
 use crate::layout::{Layout, LinkError, SwitchPolicy};
 
@@ -43,6 +43,9 @@ pub struct Config {
     /// its monitors' coordinate space). Screens without an entry are placed
     /// automatically, following `[links]` where present.
     pub positions: BTreeMap<String, Point>,
+    /// A size on the desk other than a machine's real one (`w` and `h` of its
+    /// `[[screens]]` entry): the machine's monitors are stretched to cover it.
+    pub sizes: BTreeMap<String, Size>,
     /// The file this config was loaded from, so the layout editor can save
     /// back to it.
     pub path: Option<PathBuf>,
@@ -149,6 +152,16 @@ impl Config {
             })
             .collect();
 
+        // Only a complete, positive size counts; anything else means "as it is".
+        let sizes: BTreeMap<String, Size> = raw
+            .screens
+            .iter()
+            .filter_map(|s| match (s.w, s.h) {
+                (Some(w), Some(h)) if w > 0 && h > 0 => Some((s.name.clone(), Size::new(w, h))),
+                _ => None,
+            })
+            .collect();
+
         let mut trusted = BTreeMap::new();
         for s in &raw.screens {
             if let Some(text) = &s.fingerprint {
@@ -195,6 +208,7 @@ impl Config {
             listen,
             local_screen,
             positions,
+            sizes,
             path: None,
             tls: raw.server.as_ref().and_then(|s| s.tls).unwrap_or(true),
             identity_dir: None,
@@ -241,6 +255,9 @@ struct ScreenEntry {
     /// Position on the virtual desk (see [`Config::positions`]).
     x: Option<i32>,
     y: Option<i32>,
+    /// Size on the desk (see [`Config::sizes`]).
+    w: Option<i32>,
+    h: Option<i32>,
     /// Fingerprint of the certificate approved for this screen.
     fingerprint: Option<String>,
 }
@@ -430,6 +447,30 @@ mod tests {
 
         let default = Config::parse("[[screens]]\nname = \"a\"\n").unwrap();
         assert!(default.positions.is_empty());
+    }
+
+    #[test]
+    fn a_desk_size_needs_both_sides_and_both_positive() {
+        let cfg = Config::parse(
+            r#"
+            [[screens]]
+            name = "a"
+            [[screens]]
+            name = "b"
+            w = 1920
+            h = 2160
+            [[screens]]
+            name = "c"
+            w = 1920
+            [[screens]]
+            name = "d"
+            w = 0
+            h = 100
+        "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.sizes.len(), 1);
+        assert_eq!(cfg.sizes["b"], Size::new(1920, 2160));
     }
 
     #[test]

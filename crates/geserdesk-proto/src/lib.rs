@@ -30,7 +30,7 @@ pub mod version;
 
 pub use clipboard::{Chunk, ClipboardId, FileEntry, FileManifest, FileReadError, FileReadResult};
 pub use codec::{CodecError, MessageStream};
-pub use geometry::{Edge, EdgeSet, Point, Rect, ScreenInfo};
+pub use geometry::{Edge, EdgeSet, Point, Rect, ScreenInfo, Size};
 pub use input::{Button, KeyAction, KeyEvent, ModMask, MouseEvent};
 pub use message::{ClientMsg, CloseReason, Options, ServerMsg};
 pub use version::{Version, VersionError, PROTOCOL_VERSION};

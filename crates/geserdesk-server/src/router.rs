@@ -18,11 +18,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use geserdesk_platform::{CaptureCmd, CaptureEvent, CaptureHandle};
-use geserdesk_proto::{Edge, ModMask, MouseEvent, Point, Rect, ServerMsg};
+use geserdesk_proto::{Edge, ModMask, MouseEvent, Point, Rect, ServerMsg, Size};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
-use crate::desk::{effective_origins, inset_clamp, nearest_point, DEFAULT_SIZE};
+use crate::desk::{desk_size, effective_origins, inset_clamp, nearest_point, Frame};
 use crate::files::{self, LocalFiles, Owner};
 use crate::hub::{Hub, HubEvent};
 use crate::layout::{Decision, Layout, SwitchPolicy, SwitchState};
@@ -52,6 +52,8 @@ pub struct Core {
     local: String,
     local_monitors: Vec<Rect>,
     positions: BTreeMap<String, Point>,
+    /// Desk sizes that differ from a machine's real one (see [`Frame`]).
+    sizes: BTreeMap<String, Size>,
     /// Effective origin of every configured screen on the virtual desk.
     origins: HashMap<String, Point>,
     connected: HashMap<String, Vec<Rect>>,
@@ -78,6 +80,7 @@ impl Core {
             local,
             local_monitors,
             positions,
+            sizes: BTreeMap::new(),
             origins: HashMap::new(),
             connected: HashMap::new(),
             state: State::Local,
@@ -87,6 +90,13 @@ impl Core {
         };
         core.refresh_origins();
         core
+    }
+
+    /// Start with these desk sizes instead of every machine's real one.
+    pub fn with_sizes(mut self, sizes: BTreeMap<String, Size>) -> Self {
+        self.sizes = sizes;
+        self.refresh_origins();
+        self
     }
 
     /// The remote screen currently holding the input, if any.
@@ -133,6 +143,12 @@ impl Core {
         self.refresh_origins();
     }
 
+    /// The layout editor stretched or reset machines.
+    pub fn set_sizes(&mut self, sizes: BTreeMap<String, Size>) {
+        self.sizes = sizes;
+        self.refresh_origins();
+    }
+
     /// A client went away. If it held the input, take it back.
     pub fn client_disconnected(&mut self, name: &str) -> Vec<Action> {
         self.connected.remove(name);
@@ -173,13 +189,7 @@ impl Core {
 
     fn refresh_origins(&mut self) {
         let size_of = |name: &str| -> (i32, i32) {
-            let mons = if name == self.local {
-                Some(&self.local_monitors)
-            } else {
-                self.connected.get(name)
-            };
-            mons.and_then(|m| Rect::union_all(m))
-                .map_or(DEFAULT_SIZE, |r| (r.w, r.h))
+            desk_size(self.monitors_of(name), self.sizes.get(name).copied())
         };
         self.origins = effective_origins(
             self.layout.screens(),
@@ -192,6 +202,15 @@ impl Core {
 
     fn origin(&self, name: &str) -> Point {
         self.origins.get(name).copied().unwrap_or(Point::new(0, 0))
+    }
+
+    /// How `name`'s own coordinates map onto the desk.
+    fn frame(&self, name: &str) -> Frame {
+        Frame::new(
+            self.origin(name),
+            Rect::union_all(self.monitors_of(name)),
+            self.sizes.get(name).copied(),
+        )
     }
 
     fn monitors_of(&self, name: &str) -> &[Rect] {
@@ -212,8 +231,7 @@ impl Core {
             .into_iter()
             .filter(|n| n.as_str() != exclude)
             .find_map(|n| {
-                let o = self.origin(n);
-                let q = Point::new(v.x - o.x, v.y - o.y);
+                let q = self.frame(n).to_local(v);
                 self.monitors_of(n)
                     .iter()
                     .any(|m| m.contains(q))
@@ -261,7 +279,7 @@ impl Core {
         };
         self.last_local_monitor = Some(m);
         let jump = self.policy.jump_zone.max(1);
-        let lo = self.origin(&self.local);
+        let local_frame = self.frame(&self.local);
 
         let mut hit = None;
         for edge in Edge::ALL {
@@ -272,7 +290,7 @@ impl Core {
             if self.local_monitors.iter().any(|x| x.contains(probe)) {
                 continue; // a seam between two of our own monitors
             }
-            let desk = Point::new(probe.x + lo.x, probe.y + lo.y);
+            let desk = local_frame.to_desk(probe);
             if let Some((name, q)) = self.locate(desk, &self.local) {
                 hit = Some((edge, name, q));
                 break;
@@ -302,19 +320,15 @@ impl Core {
             }
             State::Local => {
                 // The nearest connected machine on the desk.
-                let lo = self.origin(&self.local);
-                let lc =
-                    Rect::union_all(&self.local_monitors).map_or(Point::new(0, 0), |r| r.center());
+                let lc = self.frame(&self.local).to_desk(
+                    Rect::union_all(&self.local_monitors).map_or(Point::new(0, 0), |r| r.center()),
+                );
                 let target = self
                     .connected
                     .iter()
                     .filter_map(|(n, mons)| {
-                        let o = self.origin(n);
-                        let c = Rect::union_all(mons)?.center();
-                        let (dx, dy) = (
-                            i64::from(o.x + c.x - lo.x - lc.x),
-                            i64::from(o.y + c.y - lo.y - lc.y),
-                        );
+                        let c = self.frame(n).to_desk(Rect::union_all(mons)?.center());
+                        let (dx, dy) = (i64::from(c.x - lc.x), i64::from(c.y - lc.y));
                         Some((dx * dx + dy * dy, n.clone()))
                     })
                     .min()
@@ -372,8 +386,7 @@ impl Core {
         } else {
             // Leaving this machine's monitors: is another machine's monitor
             // there on the desk?
-            let o = self.origin(&screen);
-            let desk = Point::new(moved.x + o.x, moved.y + o.y);
+            let desk = self.frame(&screen).to_desk(moved);
             if let Some((next, q)) = self.locate(desk, &screen) {
                 // The move that crosses the edge is never sent as a position,
                 // so after a fast flick the client's cursor would be left
@@ -555,6 +568,11 @@ pub async fn run_shared(
                     core.set_positions(positions);
                     VecDeque::new()
                 }
+                Some(HubEvent::Sizes(sizes)) => {
+                    info!(stretched = sizes.len(), "desk sizes updated");
+                    core.set_sizes(sizes);
+                    VecDeque::new()
+                }
                 Some(HubEvent::ScreenAdded(name)) => {
                     info!(%name, "a new screen joined the desk");
                     core.add_screen(&name);
@@ -697,6 +715,59 @@ mod tests {
             sends(&a)[0],
             ("win", ServerMsg::Enter { x: 0, y: 200, .. })
         ));
+    }
+
+    /// Two server monitors stacked, and win (1920x1080) stretched to their height.
+    fn stretched_core() -> Core {
+        let mut c = Core::new(
+            layout(),
+            SwitchPolicy::default(),
+            "linux-pc".into(),
+            vec![LOCAL, Rect::new(0, 1080, 1920, 1080)],
+            pos(&[("linux-pc", 0, 0), ("win", 1920, 0)]),
+        )
+        .with_sizes(BTreeMap::from([("win".to_string(), Size::new(1920, 2160))]));
+        c.client_connected("win", vec![Rect::new(0, 0, 1920, 1080)]);
+        c
+    }
+
+    #[test]
+    fn a_stretched_client_is_reached_from_both_server_monitors_at_the_matching_height() {
+        for (y, lands) in [(540, 270), (1620, 810), (1079, 539), (1080, 540)] {
+            let mut c = stretched_core();
+            let a = c.handle(CaptureEvent::Pointer(Point::new(1919, y)), 0);
+            assert!(
+                matches!(sends(&a)[0], ("win", ServerMsg::Enter { x: 0, y: ey, .. }) if *ey == lands),
+                "server y {y}: {a:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_a_stretched_client_lands_where_it_covers_on_the_desk() {
+        let mut c = stretched_core();
+        // In at server y 1620 (client y 810); push left out of the client.
+        c.handle(CaptureEvent::Pointer(Point::new(1919, 1620)), 0);
+        let a = c.handle(CaptureEvent::Motion { dx: -50, dy: 0 }, 1);
+        assert_eq!(
+            a.last().unwrap(),
+            &Action::Capture(CaptureCmd::Ungrab {
+                warp: Point::new(1920 - 50, 1620)
+            })
+        );
+    }
+
+    #[test]
+    fn resetting_the_size_puts_the_client_back_to_its_real_extent() {
+        let mut c = stretched_core();
+        c.set_sizes(BTreeMap::new());
+        // Below its real 1080px, the lower server monitor no longer touches it.
+        assert!(c
+            .handle(CaptureEvent::Pointer(Point::new(1919, 1620)), 0)
+            .is_empty());
+        assert!(!c
+            .handle(CaptureEvent::Pointer(Point::new(1919, 540)), 1)
+            .is_empty());
     }
 
     #[test]

@@ -17,6 +17,19 @@ impl Point {
     }
 }
 
+/// A width and a height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Size {
+    pub w: i32,
+    pub h: i32,
+}
+
+impl Size {
+    pub const fn new(w: i32, h: i32) -> Self {
+        Self { w, h }
+    }
+}
+
 /// An axis-aligned rectangle, `[x, x+w)` by `[y, y+h)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {

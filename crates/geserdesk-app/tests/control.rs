@@ -276,7 +276,10 @@ async fn a_server_runs_through_the_channel_and_stopping_ends_the_daemon() {
     // A saved layout reaches the config file.
     let mut positions = std::collections::BTreeMap::new();
     positions.insert("win".to_string(), Point::new(1920, 0));
-    assert!(remote.save_layout(positions).await.unwrap());
+    assert!(remote
+        .save_layout(positions, std::collections::BTreeMap::new())
+        .await
+        .unwrap());
     assert!(std::fs::read_to_string(&config)
         .unwrap()
         .contains("x = 1920"));

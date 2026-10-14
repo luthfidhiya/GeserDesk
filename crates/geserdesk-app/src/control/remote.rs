@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use geserdesk_proto::Point;
+use geserdesk_proto::{Point, Size};
 use geserdesk_server::DeskSnapshot;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -227,8 +227,15 @@ impl Remote {
         }
     }
 
-    pub async fn save_layout(&self, positions: BTreeMap<String, Point>) -> Result<bool, String> {
-        match self.request(Command::SaveLayout { positions }).await? {
+    pub async fn save_layout(
+        &self,
+        positions: BTreeMap<String, Point>,
+        sizes: BTreeMap<String, Option<Size>>,
+    ) -> Result<bool, String> {
+        match self
+            .request(Command::SaveLayout { positions, sizes })
+            .await?
+        {
             Reply::Saved(saved) => Ok(saved),
             other => Err(format!("jawaban tak terduga: {other:?}")),
         }

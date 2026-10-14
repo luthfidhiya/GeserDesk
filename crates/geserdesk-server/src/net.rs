@@ -346,7 +346,8 @@ pub async fn run_server_shared(
             config.local_screen.clone(),
             local.clone(),
             config.positions.clone(),
-        );
+        )
+        .with_sizes(config.sizes.clone());
         let files_for_router = local_sync.clone().map(|sync| crate::files::LocalFiles {
             router: Arc::clone(&file_router),
             sync,
@@ -413,6 +414,7 @@ async fn serve_with_hub(
             config.positions.clone(),
             tls.clone(),
         );
+        desk.set_sizes(config.sizes.clone());
         let _ = ready.send(Arc::clone(&desk)); // the front end may have stopped waiting
         desk
     });
