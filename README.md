@@ -25,7 +25,7 @@ machine only (see M7 below); it has not yet served a second machine.
 | M8 — TLS 1.3, certificate pinning, trust-on-first-use | ✅ done, confirmed Linux server <-> Windows client |
 | Desktop app (Tauri + React) with tray | ✅ built; on Windows it starts, spawns its daemon detached, attaches over the named pipe and leaves the daemon running when the app dies; the window itself (layout editor, tray, dialogs) is still to be driven on Windows |
 | M9 — clipboard sync (text, HTML, pictures) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); the real X11 clipboard checked on this desktop (text, HTML, a picture, a file list, a change signal) and the real Windows clipboard too (the same five, including GetClipboardSequenceNumber) |
-| M10 — clipboard files (names/sizes announced at once, bytes pulled on arrival) | ✅ built and unit/component tested (manifest collection, path sanitising, the pull itself, routing a request to whichever machine owns the files, pulling for the server's own screen); Nautilus accepts and offers a file list from `arboard` with no extra code; a small always-on-top window shows a pull's progress; the Windows build compiles and passes its tests and the Windows clipboard holds a file list, but it was not yet tried with a real Windows client pulling files, nor pasted into a real Explorer/Nautilus from across the network, nor the progress window actually opened on screen |
+| M10 — clipboard files (names/sizes announced at once, bytes pulled on arrival) | ✅ built and unit/component tested (manifest collection, path sanitising, the pull itself, routing a request to whichever machine owns the files, pulling for the server's own screen); Nautilus accepts and offers a file list from `arboard` with no extra code; a small always-on-top window shows a pull's progress and can cancel it (seen running on Windows with made-up reports, since a real pull needs a second machine); the Windows build compiles and passes its tests and the Windows clipboard holds a file list, but it was not yet tried with a real Windows client pulling files, nor pasted into a real Explorer/Nautilus from across the network, nor the cancel button against a real pull |
 | M7 — Windows capture (Windows as the server) | ✅ built: low-level keyboard and mouse hooks, a message pump on a dedicated thread, a transparent window that hides the cursor while grabbed. Tested with real hooks on Windows 11 (`SendInput` as the user: pointer, motion deltas, buttons, wheel, keys, auto-repeat, the hotkey, release) and end to end over loopback with a `--dry-run` client (edge push, hand-over, motion, a key, the wheel, `Ctrl+Alt+Home` back). Not yet served a second machine, typed on a non-US layout, or run against an elevated window (Windows does not deliver those) |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
@@ -212,8 +212,11 @@ pulled to whichever one the cursor actually arrives on, into a temporary folder,
 and only then does **Paste** there find anything. Pasting on the machine that
 copied them needs nothing pulled; it already has them. Nothing is pulled to a
 machine the cursor never visits. The desktop app shows a small always-on-top
-window while a pull is under way (it has no Cancel yet; closing it only hides
-it, the pull keeps going).
+window while a pull is under way, with a **Batal** (cancel) button: cancelling
+stops the pull, removes what it had staged and leaves the clipboard as it was.
+The window's own ✕ only hides it; the pull keeps going. A chunk that does not
+arrive within 30 seconds ends the pull as failed, and the window hides itself a
+few seconds after a pull ends (and if it never hears of one).
 
 * Off for everyone: `clipboard_files = false` under `[options]`. Off for one
   machine (it can still share text/HTML/pictures): `geserdesk client
