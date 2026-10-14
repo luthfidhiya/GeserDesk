@@ -8,9 +8,10 @@ Barrier/Synergy), with a fresh, clean wire protocol.
 
 **Targets:** Linux (X11) and Windows 11. macOS and Wayland are deferred.
 
-**Status:** early. On Linux/X11 the server captures the keyboard and mouse and
-moves them to a client by pushing the cursor against a screen edge (or
-`Ctrl+Alt+Home`). Windows is client-only so far.
+**Status:** early. On Linux/X11 and on Windows the server captures the keyboard and
+mouse and moves them to a client by pushing the cursor against a screen edge (or
+`Ctrl+Alt+Home`). A Windows server was driven end to end against a client on the same
+machine only (see M7 below); it has not yet served a second machine.
 
 | Milestone | Status |
 |---|---|
@@ -25,7 +26,7 @@ moves them to a client by pushing the cursor against a screen edge (or
 | Desktop app (Tauri + React) with tray | ✅ built; on Windows it starts, spawns its daemon detached, attaches over the named pipe and leaves the daemon running when the app dies; the window itself (layout editor, tray, dialogs) is still to be driven on Windows |
 | M9 — clipboard sync (text, HTML, pictures) | ✅ built; the real Windows clipboard checked in both directions through a real client (Unicode, CRLF, 900 KB, no echo, `--no-clipboard`); the real X11 clipboard checked on this desktop (text, HTML, a picture, a file list, a change signal) and the real Windows clipboard too (the same five, including GetClipboardSequenceNumber) |
 | M10 — clipboard files (names/sizes announced at once, bytes pulled on arrival) | ✅ built and unit/component tested (manifest collection, path sanitising, the pull itself, routing a request to whichever machine owns the files, pulling for the server's own screen); Nautilus accepts and offers a file list from `arboard` with no extra code; a small always-on-top window shows a pull's progress; the Windows build compiles and passes its tests and the Windows clipboard holds a file list, but it was not yet tried with a real Windows client pulling files, nor pasted into a real Explorer/Nautilus from across the network, nor the progress window actually opened on screen |
-| M7 — Windows capture (Windows as the server) | ⬜ not started |
+| M7 — Windows capture (Windows as the server) | ✅ built: low-level keyboard and mouse hooks, a message pump on a dedicated thread, a transparent window that hides the cursor while grabbed. Tested with real hooks on Windows 11 (`SendInput` as the user: pointer, motion deltas, buttons, wheel, keys, auto-repeat, the hotkey, release) and end to end over loopback with a `--dry-run` client (edge push, hand-over, motion, a key, the wheel, `Ctrl+Alt+Home` back). Not yet served a second machine, typed on a non-US layout, or run against an elevated window (Windows does not deliver those) |
 
 The full plan is in [`docs/PLAN.md`](docs/PLAN.md); the wire protocol is described
 in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
@@ -84,14 +85,20 @@ immediately and writes `x`/`y` into the config file. The CLI has no layout edito
 edit `x`/`y` in the config by hand there. Old `[links]` configs still work, and a
 leftover `[server] ui = ...` key is ignored with a warning.
 
-On Linux the server captures this machine's keyboard and mouse. Push the cursor
+On Linux and on Windows the server captures this machine's keyboard and mouse. Push the cursor
 against the edge linked to a connected client (see `[links]`), or press
 **Ctrl+Alt+Home**, to send input to it; push back (or press the hotkey again) to
 return. `--no-capture` runs the network side only; `--demo` makes the server
 drive a connected client's cursor in a square without capturing anything.
 
 > Don't run the capturing server and an *injecting* client on the same X
-> display — the injected input would be captured again. Use `--dry-run` there.
+> display (or the same Windows desktop) — the injected input would be captured again.
+> Use `--dry-run` there.
+
+> On Windows the grab is Windows' own low-level hooks, so two limits are Windows':
+> a server that is not elevated receives nothing meant for an elevated window, and
+> the secure desktop (UAC prompt, lock screen, `Ctrl+Alt+Del`) cannot be seen or taken
+> over. Run the server elevated if you need the first.
 
 ## Try it (Linux ↔ Windows, two machines)
 
@@ -247,7 +254,7 @@ those of your profile folder (you, `SYSTEM` and the Administrators). Nobody is t
 ```
 crates/geserdesk-proto     message types, postcard codec, length-prefixed framing
 crates/geserdesk-tls       TLS identities, certificate pinning, fingerprints
-crates/geserdesk-platform  input capture: X11 backend, evdev->HID key table
+crates/geserdesk-platform  input capture: X11 and Windows backends, evdev and scan code->HID key tables
 crates/geserdesk-server    TOML config, layout + switch policy, client hub, router, listener,
                            admin (what a front end reads and changes while it runs)
 crates/geserdesk-client    connection + handshake, the InputSink trait + enigo backend
