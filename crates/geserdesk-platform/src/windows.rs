@@ -37,7 +37,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyState, GetKeyboardLayout, ToUnicodeEx,
+    GetAsyncKeyState, GetKeyState, GetKeyboardLayout, ToUnicodeEx, HKL,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
@@ -365,39 +365,63 @@ impl HookState {
                 std::ptr::null_mut(),
             ))
         };
-        let shift = self.is_held(0xE1) || self.is_held(0xE5);
-        let attempt = |alt_gr: bool| -> Option<char> {
-            let mut keys = [0u8; 256];
-            if shift {
-                keys[VK_SHIFT as usize] = 0x80;
-            }
-            if self.caps.get() {
-                keys[VK_CAPITAL as usize] = 1;
-            }
-            if self.num.get() {
-                keys[VK_NUMLOCK as usize] = 1;
-            }
-            if alt_gr {
-                keys[VK_CONTROL as usize] = 0x80;
-                keys[VK_MENU as usize] = 0x80;
-            }
-            let mut buf = [0u16; 8];
-            // Bit 2 of the flags (Windows 10 1607+): do not change the keyboard
-            // state, so asking never disturbs a dead key waiting for its letter.
-            // SAFETY: `keys` is 256 bytes and `buf` has the 8 units promised.
-            let n =
-                unsafe { ToUnicodeEx(vk, scan, keys.as_ptr(), buf.as_mut_ptr(), 8, 0x4, layout) };
-            if n < 1 {
-                return None; // dead key (-1), or nothing
-            }
-            let c = char::decode_utf16(buf[..n as usize].iter().copied())
-                .next()?
-                .ok()?;
-            (!c.is_control()).then_some(c)
+        let state = Typing {
+            shift: self.is_held(0xE1) || self.is_held(0xE5),
+            caps: self.caps.get(),
+            num: self.num.get(),
+            alt_gr: self.is_held(0xE6),
         };
-        let alt_gr = self.is_held(0xE6);
-        attempt(alt_gr).or_else(|| if alt_gr { attempt(false) } else { None })
+        translate(vk, scan, layout, state)
     }
+}
+
+/// The modifiers a character is typed under.
+#[derive(Debug, Clone, Copy, Default)]
+struct Typing {
+    shift: bool,
+    caps: bool,
+    num: bool,
+    /// Right Alt, which stands for AltGr.
+    alt_gr: bool,
+}
+
+/// What key `vk` (scan code `scan`) types in `layout` under `typing`: `None` for a
+/// dead key (it types nothing until the next letter, which the other machine's own
+/// layout would have to combine) and for keys that type no character.
+///
+/// AltGr is how a layout reaches `@`, `{`, `€`; Windows models it as Ctrl+Alt, so
+/// that is what is asked. If that types nothing (a layout with no AltGr level, a
+/// US one) the key is asked again without it.
+fn translate(vk: u32, scan: u32, layout: HKL, typing: Typing) -> Option<char> {
+    let attempt = |alt_gr: bool| -> Option<char> {
+        let mut keys = [0u8; 256];
+        if typing.shift {
+            keys[VK_SHIFT as usize] = 0x80;
+        }
+        if typing.caps {
+            keys[VK_CAPITAL as usize] = 1;
+        }
+        if typing.num {
+            keys[VK_NUMLOCK as usize] = 1;
+        }
+        if alt_gr {
+            keys[VK_CONTROL as usize] = 0x80;
+            keys[VK_MENU as usize] = 0x80;
+        }
+        let mut buf = [0u16; 8];
+        // Bit 2 of the flags (Windows 10 1607+): do not change the keyboard
+        // state, so asking never disturbs a dead key waiting for its letter.
+        // SAFETY: `keys` is 256 bytes and `buf` has the 8 units promised.
+        let n = unsafe { ToUnicodeEx(vk, scan, keys.as_ptr(), buf.as_mut_ptr(), 8, 0x4, layout) };
+        if n < 1 {
+            return None; // dead key (-1), or nothing
+        }
+        let c = char::decode_utf16(buf[..n as usize].iter().copied())
+            .next()?
+            .ok()?;
+        (!c.is_control()).then_some(c)
+    };
+    attempt(typing.alt_gr).or_else(|| if typing.alt_gr { attempt(false) } else { None })
 }
 
 /// The bit a modifier's HID usage (0xE0..=0xE7) has in [`HookState::held`].
@@ -964,6 +988,138 @@ mod tests {
             !seen.iter().any(|e| matches!(e, CaptureEvent::Key(_))),
             "after the release nothing is captured: {seen:?}"
         );
+    }
+
+    /// A touchpad scrolls in steps smaller than a notch, and either way. The server
+    /// forwards them as they are; the client rounds a small one up to a notch.
+    #[test]
+    #[ignore = "grabs the real keyboard and mouse for a moment"]
+    fn smooth_scrolling_passes_through_in_small_and_negative_steps() {
+        crate::monitors::init_process();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = start(tx).expect("hooks install");
+        assert!(handle.send(CaptureCmd::Grab));
+        let _ = drain(&mut rx, Duration::from_millis(150));
+
+        send_mouse(0, 0, 30, MOUSEEVENTF_WHEEL); // a quarter notch up
+        send_mouse(0, 0, (-60i32) as u32, MOUSEEVENTF_WHEEL); // half a notch down
+        send_mouse(0, 0, (-240i32) as u32, MOUSEEVENTF_WHEEL); // two notches down at once
+        send_mouse(0, 0, (-30i32) as u32, MOUSEEVENTF_HWHEEL); // a little to the left
+        let seen = drain(&mut rx, Duration::from_millis(250));
+        let wheels: Vec<(i32, i32)> = seen
+            .iter()
+            .filter_map(|e| match e {
+                CaptureEvent::Wheel { dx, dy } => Some((*dx, *dy)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            wheels,
+            vec![(0, 30), (0, -60), (0, -240), (-30, 0)],
+            "{seen:?}"
+        );
+
+        assert!(handle.send(CaptureCmd::Ungrab {
+            warp: cursor_pos().unwrap()
+        }));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    /// What a key types depends on the layout, and on more than shift: AltGr
+    /// reaches `@` and `€` on a German or French layout, and a dead key types
+    /// nothing by itself. `ToUnicodeEx` takes the layout as an argument, so this
+    /// needs no change to the keyboard the person is using.
+    #[test]
+    #[ignore = "loads keyboard layouts into this process"]
+    fn a_key_types_what_its_layout_says_including_altgr_and_dead_keys() {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            LoadKeyboardLayoutW, MapVirtualKeyExW,
+        };
+        const NO_SHELL: u32 = 0x80; // KLF_NOTELLSHELL: do not announce it
+        const SCAN_TO_VK: u32 = 3; // MAPVK_VSC_TO_VK_EX
+
+        let plain = Typing::default();
+        let shift = Typing {
+            shift: true,
+            ..plain
+        };
+        let alt_gr = Typing {
+            alt_gr: true,
+            ..plain
+        };
+        // (layout id, what it is, [(scan code, typing, expected)])
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(&str, &str, Vec<(u32, Typing, Option<char>)>)> = vec![
+            (
+                "00000409",
+                "US",
+                vec![
+                    (0x1E, plain, Some('a')),
+                    (0x1E, shift, Some('A')),
+                    (0x02, shift, Some('!')),
+                    (0x28, plain, Some('\'')),
+                    // No AltGr level: asked again without it.
+                    (0x10, alt_gr, Some('q')),
+                ],
+            ),
+            (
+                "00000407",
+                "German",
+                vec![
+                    (0x2C, plain, Some('y')), // where Z is on a US keyboard
+                    (0x15, plain, Some('z')),
+                    (0x03, shift, Some('"')),
+                    (0x10, alt_gr, Some('@')),
+                    (0x12, alt_gr, Some('€')),
+                    (0x08, alt_gr, Some('{')),
+                    (0x1A, plain, Some('ü')),
+                    (0x0D, plain, None), // the acute accent: a dead key
+                ],
+            ),
+            (
+                "0000040C",
+                "French",
+                vec![
+                    (0x10, plain, Some('a')), // where Q is on a US keyboard
+                    (0x1E, plain, Some('q')),
+                    (0x02, plain, Some('&')), // the digit row needs shift
+                    (0x02, shift, Some('1')),
+                    (0x0B, alt_gr, Some('@')),
+                    (0x1A, plain, None), // the circumflex: a dead key
+                ],
+            ),
+            (
+                "00020409",
+                "US International",
+                vec![
+                    (0x1E, plain, Some('a')),
+                    (0x1E, alt_gr, Some('á')),
+                    (0x28, plain, None), // the apostrophe is a dead key here
+                ],
+            ),
+        ];
+
+        let mut checked = 0;
+        for (id, name, keys) in cases {
+            let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+            // SAFETY: a NUL-terminated layout id.
+            let layout = unsafe { LoadKeyboardLayoutW(wide.as_ptr(), NO_SHELL) };
+            if layout.is_null() {
+                eprintln!("the {name} layout is not available here; skipped");
+                continue;
+            }
+            for (scan, typing, want) in keys {
+                // The virtual key the layout gives that scan code: what the hook
+                // would be handed with this layout active.
+                // SAFETY: plain arguments.
+                let vk = unsafe { MapVirtualKeyExW(scan, SCAN_TO_VK, layout) };
+                let got = translate(vk, scan, layout, typing);
+                assert_eq!(got, want, "{name}, scan {scan:#x}, vk {vk:#x}, {typing:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no layout could be loaded at all");
+        eprintln!("{checked} key/layout checks");
     }
 
     #[test]
