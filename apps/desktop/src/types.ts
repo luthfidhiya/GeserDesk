@@ -93,6 +93,8 @@ export interface Pending {
   addr: string
   replaces: string | null
   age_s: number
+  /** The config does not list this name: approving adds it as a new screen. */
+  new_screen?: boolean
 }
 
 export interface DeskSnapshot {

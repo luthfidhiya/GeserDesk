@@ -24,6 +24,12 @@ export function PendingApprovals({ pending, onTrust, onDismiss }: Props) {
                 Sertifikat BERBEDA dari yang dipercaya sebelumnya untuk &quot;{p.name}&quot;. Hanya
                 setujui kalau Anda memang mengganti/menginstal ulang komputer itu.
               </p>
+            ) : p.new_screen ? (
+              <p className="my-1 text-xs text-muted-foreground">
+                Komputer baru, belum ada di konfigurasi. Meminta tersambung sebagai &quot;{p.name}&quot; dari{' '}
+                {p.addr}. Kalau dipercayai, ia ditambahkan sebagai layar baru di sebelah kanan (bisa digeser di
+                tab susunan layar) dan konfigurasi diperbarui.
+              </p>
             ) : (
               <p className="my-1 text-xs text-muted-foreground">
                 Meminta tersambung sebagai &quot;{p.name}&quot; dari {p.addr}.
@@ -32,7 +38,7 @@ export function PendingApprovals({ pending, onTrust, onDismiss }: Props) {
             <code className="mb-2 block break-all font-mono text-xs">{p.fingerprint}</code>
             <div className="flex gap-2">
               <Button size="sm" onClick={() => onTrust(p)}>
-                Percayai
+                {p.new_screen ? 'Percayai dan tambahkan' : 'Percayai'}
               </Button>
               <Button size="sm" variant="outline" onClick={() => onDismiss(p)}>
                 Abaikan
