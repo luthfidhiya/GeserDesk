@@ -3,9 +3,9 @@ import { Button } from '@/components/ui/button'
 import { PendingApprovals } from '@/components/PendingApprovals'
 import { RevokeButton, ScreenList } from '@/components/ScreenList'
 import { ScreenStage } from '@/components/ScreenStage'
-import { autoArrange, overlapping } from '@/lib/geometry'
+import { autoArrange, deskSize, MIN_DESK_SIZE, overlapping, union, unstretched } from '@/lib/geometry'
 import { errorText, ipc } from '@/lib/ipc'
-import type { DeskSnapshot, Draft, Pending } from '@/types'
+import type { DeskSnapshot, Draft, Pending, Placement, Point, Size } from '@/types'
 
 type Msg = { text: string; kind: 'ok' | 'err' | 'info' } | null
 
@@ -40,7 +40,8 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   useEffect(() => {
     setDraft((prev) => {
       const next: Draft = {}
-      for (const s of screens) next[s.name] = dirty && prev[s.name] ? prev[s.name] : { ...s.origin }
+      for (const s of screens)
+        next[s.name] = dirty && prev[s.name] ? prev[s.name] : { ...s.origin, w: s.size.w, h: s.size.h }
       return next
     })
     setSelected((cur) => (cur && screens.some((s) => s.name === cur) ? cur : desk.local))
@@ -50,9 +51,28 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   const bad = useMemo(() => (complete ? overlapping(screens, draft) : new Set<string>()), [screens, draft, complete])
 
   const move = useCallback((name: string, to: { x: number; y: number }) => {
-    setDraft((d) => ({ ...d, [name]: { x: Math.round(to.x), y: Math.round(to.y) } }))
+    setDraft((d) => ({ ...d, [name]: { ...d[name], x: Math.round(to.x), y: Math.round(to.y) } }))
     setDirty(true)
   }, [])
+
+  const resize = useCallback((name: string, to: Placement) => {
+    setDraft((d) => ({ ...d, [name]: to }))
+    setDirty(true)
+  }, [])
+
+  const setSize = (name: string, axis: 'w' | 'h', v: number) => {
+    const s = screens.find((x) => x.name === name)
+    const n = s && union(s.monitors)
+    if (!s || !n || v < MIN_DESK_SIZE) return
+    setDraft((d) => ({ ...d, [name]: { ...d[name], w: d[name].w ?? n.w, h: d[name].h ?? n.h, [axis]: v } }))
+    setDirty(true)
+  }
+
+  const resetSize = (name: string) => {
+    setDraft((d) => ({ ...d, [name]: unstretched(d[name]) }))
+    setDirty(true)
+    setMsg({ text: `Ukuran "${name}" dikembalikan. Klik Simpan untuk menerapkan.`, kind: 'info' })
+  }
 
   // Arrow keys nudge the selected machine; Shift = 1 px.
   useEffect(() => {
@@ -62,7 +82,7 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
       const delta = { ArrowLeft: [-d, 0], ArrowRight: [d, 0], ArrowUp: [0, -d], ArrowDown: [0, d] }[ev.key]
       if (!delta) return
       ev.preventDefault()
-      setDraft((cur) => (cur[selected] ? { ...cur, [selected]: { x: cur[selected].x + delta[0], y: cur[selected].y + delta[1] } } : cur))
+      setDraft((cur) => (cur[selected] ? { ...cur, [selected]: { ...cur[selected], x: cur[selected].x + delta[0], y: cur[selected].y + delta[1] } } : cur))
       setDirty(true)
     }
     window.addEventListener('keydown', onKey)
@@ -82,7 +102,14 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   const save = async () => {
     setMsg({ text: 'Menyimpan…', kind: 'info' })
     try {
-      const saved = await ipc.saveLayout(draft)
+      // Every machine's size is sent: a real size is `null`, which also undoes a stretch.
+      const positions: Record<string, Point> = {}
+      const sizes: Record<string, Size | null> = {}
+      for (const s of screens) {
+        positions[s.name] = { x: draft[s.name].x, y: draft[s.name].y }
+        sizes[s.name] = deskSize(s, draft[s.name])
+      }
+      const saved = await ipc.saveLayout(positions, sizes)
       await refresh() // fetch the applied positions before the draft lets go
       setDirty(false)
       setMsg({
@@ -140,12 +167,14 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
               bad={bad}
               onSelect={setSelected}
               onMove={move}
+              onResize={resize}
               onDragging={setDragging}
             />
           </div>
           <p className="p-2 text-xs text-muted-foreground">
-            Seret kotak untuk menggeser komputer. Kotak menempel otomatis ke tepi layar lain. Tahan{' '}
-            <kbd>Alt</kbd> untuk tanpa tempel; panah menggeser 10 px (<kbd>Shift</kbd> = 1 px).
+            Seret kotak untuk menggeser komputer; tarik kotak-kotak kecil di tepinya (pada komputer yang
+            dipilih) untuk meregangkannya, misalnya setinggi dua monitor server. Tepi menempel otomatis ke
+            layar lain. Tahan <kbd>Alt</kbd> untuk tanpa tempel; panah menggeser 10 px (<kbd>Shift</kbd> = 1 px).
           </p>
         </div>
         <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
@@ -156,6 +185,8 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
             selected={selected}
             onSelect={setSelected}
             onNumber={(name, axis, v) => move(name, { ...draft[name], [axis]: v })}
+            onSize={setSize}
+            onResetSize={resetSize}
             onRevoke={(n) => void revoke(n)}
             onEditing={setTyping}
           />

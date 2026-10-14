@@ -3,7 +3,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { neighbours } from '@/lib/geometry'
+import { isStretched, neighbours, union } from '@/lib/geometry'
 import { screenColor } from '@/components/ScreenStage'
 import type { Draft, Screen } from '@/types'
 
@@ -13,11 +13,13 @@ interface Props {
   selected: string | null
   onSelect: (name: string) => void
   onNumber: (name: string, axis: 'x' | 'y', value: number) => void
+  onSize: (name: string, axis: 'w' | 'h', value: number) => void
+  onResetSize: (name: string) => void
   onRevoke: (name: string) => void
   onEditing: (editing: boolean) => void
 }
 
-export function ScreenList({ screens, draft, selected, onSelect, onNumber, onRevoke, onEditing }: Props) {
+export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSize, onResetSize, onRevoke, onEditing }: Props) {
   return (
     <div className="space-y-2">
       {screens.map((s, i) => {
@@ -75,6 +77,35 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onRev
                 </div>
               ))}
             </div>
+            <div className="mt-2 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
+              {(['w', 'h'] as const).map((axis) => (
+                <div key={axis}>
+                  <Label className="text-xs text-muted-foreground">{axis === 'w' ? 'Lebar' : 'Tinggi'}</Label>
+                  <Input
+                    type="number"
+                    step={10}
+                    aria-label={`${s.name} ${axis === 'w' ? 'lebar' : 'tinggi'}`}
+                    value={draft[s.name]?.[axis] ?? union(s.monitors)[axis]}
+                    onFocus={() => onEditing(true)}
+                    onBlur={() => onEditing(false)}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (Number.isFinite(v)) onSize(s.name, axis, v)
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+            {isStretched(s, draft[s.name]) && (
+              <div className="mt-1 flex items-center justify-between gap-2" onClick={(e) => e.stopPropagation()}>
+                <span className="text-xs text-muted-foreground">
+                  Diregangkan dari {union(s.monitors).w}×{union(s.monitors).h}
+                </span>
+                <Button variant="outline" size="sm" onClick={() => onResetSize(s.name)}>
+                  Reset ukuran
+                </Button>
+              </div>
+            )}
           </div>
         )
       })}

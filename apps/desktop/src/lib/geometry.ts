@@ -1,12 +1,80 @@
 // Pure geometry for the screen-arrangement stage: no DOM, no React.
 
-import type { Draft, Point, Rect, Screen } from '@/types'
+import type { Draft, Placement, Point, Rect, Screen } from '@/types'
 
 type Placed = Pick<Screen, 'name' | 'monitors'>
 
-/** `s`'s monitors on the shared desk when its origin is `o`. */
-export function deskRects(s: Pick<Screen, 'monitors'>, o: Point): Rect[] {
-  return s.monitors.map((m) => ({ x: m.x + o.x, y: m.y + o.y, w: m.w, h: m.h }))
+/** Smallest width or height a machine may be shrunk to on the desk. */
+export const MIN_DESK_SIZE = 64
+
+/**
+ * `s`'s monitors on the shared desk when it is placed at `o`. A machine given a
+ * size is stretched about the top-left of its monitors, the way the server does.
+ */
+export function deskRects(s: Pick<Screen, 'monitors'>, o: Placement): Rect[] {
+  if (s.monitors.length === 0) return []
+  const n = union(s.monitors)
+  const sx = o.w && n.w > 0 ? o.w / n.w : 1
+  const sy = o.h && n.h > 0 ? o.h / n.h : 1
+  const edge = (v: number, base: number, origin: number, k: number) => origin + base + Math.round((v - base) * k)
+  return s.monitors.map((m) => {
+    const x = edge(m.x, n.x, o.x, sx)
+    const y = edge(m.y, n.y, o.y, sy)
+    return { x, y, w: edge(m.x + m.w, n.x, o.x, sx) - x, h: edge(m.y + m.h, n.y, o.y, sy) - y }
+  })
+}
+
+/** Whether `o` gives the machine a desk size different from its real one. */
+export function isStretched(s: Pick<Screen, 'monitors'>, o: Placement | undefined): boolean {
+  if (!o || s.monitors.length === 0) return false
+  const n = union(s.monitors)
+  return (o.w !== undefined && o.w !== n.w) || (o.h !== undefined && o.h !== n.h)
+}
+
+/** `o` without a desk size: the machine is its real size again. */
+export function unstretched(o: Placement): Placement {
+  return { x: o.x, y: o.y }
+}
+
+/** The desk size to send for `s`: `null` for its real size. */
+export function deskSize(s: Pick<Screen, 'monitors'>, o: Placement): { w: number; h: number } | null {
+  if (!isStretched(s, o)) return null
+  const n = union(s.monitors)
+  return { w: o.w ?? n.w, h: o.h ?? n.h }
+}
+
+export type Grip = { fx: -1 | 0 | 1; fy: -1 | 0 | 1 }
+
+/**
+ * `s` placed at `start`, with the side(s) named by `grip` dragged by `(dx, dy)`.
+ * The opposite sides stay where they are. A side near an edge of another machine
+ * (within `thr`) is pulled onto it; `thr` of 0 turns that off.
+ */
+export function resized(
+  s: Pick<Screen, 'monitors'>,
+  start: Placement,
+  grip: Grip,
+  dx: number,
+  dy: number,
+  others: Rect[],
+  thr: number,
+): Placement {
+  const n = union(s.monitors)
+  const box = union(deskRects(s, start))
+  const pull = (v: number, edges: number[]) => {
+    let best = v
+    for (const e of edges) if (Math.abs(e - v) <= thr && (best === v || Math.abs(e - v) < Math.abs(best - v))) best = e
+    return best
+  }
+  const xs = others.flatMap((r) => [r.x, r.x + r.w])
+  const ys = others.flatMap((r) => [r.y, r.y + r.h])
+  let [l, t, r, b] = [box.x, box.y, box.x + box.w, box.y + box.h]
+  if (grip.fx === 1) r = Math.max(l + MIN_DESK_SIZE, pull(Math.round(r + dx), xs))
+  if (grip.fx === -1) l = Math.min(r - MIN_DESK_SIZE, pull(Math.round(l + dx), xs))
+  if (grip.fy === 1) b = Math.max(t + MIN_DESK_SIZE, pull(Math.round(b + dy), ys))
+  if (grip.fy === -1) t = Math.min(b - MIN_DESK_SIZE, pull(Math.round(t + dy), ys))
+  // The box's top-left sits at origin + the monitors' top-left, so give that back.
+  return { x: l - n.x, y: t - n.y, w: r - l, h: b - t }
 }
 
 export function union(rects: Rect[]): Rect {
@@ -76,7 +144,7 @@ export function neighbours(screens: Placed[], draft: Draft, name: string): strin
 export function snap(screens: Placed[], draft: Draft, name: string, o: Point, thr: number): Point {
   const self = screens.find((s) => s.name === name)
   if (!self) return o
-  const me = deskRects(self, o)
+  const me = deskRects(self, { ...draft[name], ...o })
   const others = screens.filter((s) => s.name !== name).flatMap((s) => deskRects(s, draft[s.name]))
   let bestX: number | null = null
   let bestY: number | null = null

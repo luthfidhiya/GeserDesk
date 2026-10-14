@@ -13,6 +13,11 @@ export interface Point {
   y: number
 }
 
+export interface Size {
+  w: number
+  h: number
+}
+
 export type Mode = 'client' | 'server'
 export type Theme = 'system' | 'light' | 'dark'
 
@@ -83,6 +88,8 @@ export interface Screen {
   connected: boolean
   placeholder: boolean
   origin: Point
+  /** How much of the desk it covers: its real extent, or what it was stretched to. */
+  size: Size
   monitors: Rect[]
   trusted_fingerprint: string | null
 }
@@ -106,7 +113,14 @@ export interface DeskSnapshot {
   pending: Pending[]
 }
 
-/** Positions being edited, by screen name. */
-export type Draft = Record<string, Point>
+/** Where a machine sits on the desk and, when stretched, how big it is there. */
+export interface Placement extends Point {
+  /** Desk size; both absent means the machine's real size. */
+  w?: number
+  h?: number
+}
+
+/** Placements being edited, by screen name. */
+export type Draft = Record<string, Placement>
 
 export type Tab = 'control' | 'layout'

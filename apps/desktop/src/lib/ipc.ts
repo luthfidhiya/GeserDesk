@@ -5,10 +5,11 @@ import { listen } from '@tauri-apps/api/event'
 import type {
   DaemonInfo,
   DeskSnapshot,
-  Draft,
   LogLine,
   Mode,
+  Point,
   Settings,
+  Size,
   Status,
   TransferProgress,
   TrustPrompt,
@@ -33,7 +34,8 @@ export const ipc = {
   /** `null` while no server is running. */
   deskState: () => invoke<DeskSnapshot | null>('desk_state'),
   /** Resolves to whether the layout was written to the config file. */
-  saveLayout: (positions: Draft) => invoke<boolean>('save_layout', { positions }),
+  saveLayout: (positions: Record<string, Point>, sizes: Record<string, Size | null>) =>
+    invoke<boolean>('save_layout', { positions, sizes }),
   approveClient: (name: string, fingerprint: string) =>
     invoke<void>('approve_client', { name, fingerprint }),
   dismissClient: (name: string, fingerprint: string) =>
