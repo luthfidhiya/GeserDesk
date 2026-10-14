@@ -245,6 +245,16 @@ fn read_at(path: &Path, entry: &FileEntry, offset: u64, len: u32) -> FileReadRes
 mod tests {
     use super::*;
 
+    /// Whether the link could be made: Windows only allows it with Developer
+    /// Mode or an elevated process, and a test cannot assume either.
+    fn make_symlink(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(target, link);
+        made.is_ok()
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "gd-clipboard-files-{}-{name}-{}",
@@ -302,7 +312,9 @@ mod tests {
     fn a_symlink_is_left_out_entirely() {
         let dir = scratch("symlink");
         std::fs::write(dir.join("real.txt"), "x").unwrap();
-        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link.txt")).unwrap();
+        if !make_symlink(&dir.join("real.txt"), &dir.join("link.txt")) {
+            return; // Windows without Developer Mode or admin rights
+        }
         let (manifest, _) = collect(std::slice::from_ref(&dir), 0).unwrap();
         let paths: Vec<&str> = manifest.entries.iter().map(|e| e.path.as_str()).collect();
         assert!(!paths.iter().any(|p| p.ends_with("link.txt")));
@@ -483,7 +495,9 @@ mod tests {
     fn a_symlink_cannot_be_read_even_if_it_sneaks_into_the_manifest() {
         let dir = scratch("symlinkread");
         std::fs::write(dir.join("real.txt"), "secret").unwrap();
-        std::os::unix::fs::symlink(dir.join("real.txt"), dir.join("link.txt")).unwrap();
+        if !make_symlink(&dir.join("real.txt"), &dir.join("link.txt")) {
+            return; // Windows without Developer Mode or admin rights
+        }
         let entry = FileEntry {
             path: "link.txt".into(),
             size: 6,
