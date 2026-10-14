@@ -27,6 +27,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
 
 use geserdesk_proto::{Button, KeyAction, KeyEvent, ModMask, Point, Rect};
 use tokio::sync::mpsc::UnboundedSender;
@@ -56,9 +57,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::keymap::{hid_is_printable, win_key_to_hid};
 use crate::{CaptureCmd, CaptureError, CaptureEvent, CaptureHandle};
 
-/// How long the backend waits for input when there was nothing to do.
+/// How long the backend waits for input when there was nothing to do. (Windows
+/// rounds a wait up to its timer tick, about 15 ms unless a program asks for
+/// finer, so this is a ceiling on how often it wakes, not a promise.)
 const IDLE_WAIT_MS: u32 = 2;
-
+/// How often the held modifiers are read back from Windows, to correct a release
+/// the hook never saw. They are tracked from the hook's own events in between;
+/// asking every pass (ten calls each) was most of this thread's cost.
+const RESYNC_EVERY: Duration = Duration::from_millis(100);
 const WM_KEYUP: u32 = 0x0101;
 const LLKHF_EXTENDED: u32 = 0x01;
 /// Windows reports AltGr as a Right Alt press preceded by a made-up Left Ctrl
@@ -541,6 +547,7 @@ struct Capture {
     keyboard_hook: HHOOK,
     window: HWND,
     last_local: Option<Point>,
+    last_resync: Instant,
 }
 
 impl Capture {
@@ -598,6 +605,7 @@ impl Capture {
             keyboard_hook,
             window,
             last_local: None,
+            last_resync: Instant::now(),
         })
     }
 
@@ -636,8 +644,12 @@ impl Capture {
                 }
             }
 
-            if !self.state.grabbed.get() {
-                self.state.resync();
+            let grabbed = self.state.grabbed.get();
+            if !grabbed {
+                if self.last_resync.elapsed() >= RESYNC_EVERY {
+                    self.state.resync();
+                    self.last_resync = Instant::now();
+                }
                 if let Some(pos) = cursor_pos() {
                     if self.last_local != Some(pos) {
                         self.last_local = Some(pos);
@@ -1122,6 +1134,48 @@ mod tests {
         eprintln!("{checked} key/layout checks");
     }
 
+    /// How soon the pointer moving is reported. Windows rounds the backend's wait up
+    /// to its timer tick (about 15 ms), so a move is seen within a tick or two;
+    /// this measures it and keeps it from creeping up. The figures print with
+    /// `--nocapture`.
+    #[test]
+    #[ignore = "moves the real pointer a pixel at a time"]
+    fn a_pointer_move_is_reported_within_a_few_frames() {
+        crate::monitors::init_process();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _handle = start(tx).expect("hooks install");
+        let origin = cursor_pos().unwrap();
+        let mut waited = Vec::new();
+        for i in 0..30i32 {
+            std::thread::sleep(Duration::from_millis(120));
+            while rx.try_recv().is_ok() {}
+            let p = Point::new(origin.x + 1 + (i % 2), origin.y);
+            let t = Instant::now();
+            // SAFETY: SetCursorPos takes plain coordinates.
+            unsafe { SetCursorPos(p.x, p.y) };
+            let seen = loop {
+                match rx.try_recv() {
+                    Ok(CaptureEvent::Pointer(q)) if q == p => break Some(t.elapsed()),
+                    _ if t.elapsed() > Duration::from_millis(500) => break None,
+                    _ => std::thread::sleep(Duration::from_micros(200)),
+                }
+            };
+            waited.push(seen.expect("the pointer move was never reported"));
+        }
+        // SAFETY: as above.
+        unsafe { SetCursorPos(origin.x, origin.y) };
+        waited.sort();
+        eprintln!(
+            "pointer move reported after: median {:?}, worst {:?}",
+            waited[waited.len() / 2],
+            waited[waited.len() - 1]
+        );
+        assert!(
+            waited[waited.len() - 1] < Duration::from_millis(60),
+            "a pointer move took {:?} to be reported",
+            waited[waited.len() - 1]
+        );
+    }
     #[test]
     #[ignore = "installs real low-level hooks for a moment"]
     fn dropping_the_handle_removes_the_hooks() {
