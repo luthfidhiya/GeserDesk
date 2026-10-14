@@ -238,6 +238,9 @@ mod config_tests {
     #[test]
     fn the_starting_config_is_valid_and_never_overwrites() {
         let dir = std::env::temp_dir().join(format!("geserdesk-app-{}", std::process::id()));
+        // A process id comes round again (Windows reuses them quickly), and this
+        // test leaves its "mine" file behind, which the default would not replace.
+        let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("server.toml");
         create_default_config(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -248,5 +251,6 @@ mod config_tests {
         std::fs::write(&path, "# mine").unwrap();
         create_default_config(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

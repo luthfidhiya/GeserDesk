@@ -250,7 +250,9 @@ mod tests {
         let mem = geserdesk_clipboard::MemoryClipboard::new();
         let sync = ClipboardSync::new(mem);
         let (channel, mut rx) = FileChannel::new();
-        let dest = staging_dir(99).join(std::process::id().to_string());
+        // Its own seq: another test in this process (net.rs) clears `staging_dir(99)`
+        // whole, which deleted this one's folder mid-pull and made it time out.
+        let dest = staging_dir(4243).join(std::process::id().to_string());
         let _ = std::fs::remove_dir_all(&dest);
         let manifest = FileManifest {
             entries: vec![FileEntry {
@@ -266,7 +268,7 @@ mod tests {
         spawn_pull(
             channel.clone(),
             sync,
-            99,
+            4243,
             manifest,
             dest.clone(),
             0,
@@ -292,7 +294,7 @@ mod tests {
         assert!(seen.iter().all(|r| r.peer == "server"));
         match &seen[0].event {
             PullEvent::Progress(p) => {
-                assert_eq!(p.seq, 99);
+                assert_eq!(p.seq, 4243);
                 assert_eq!(p.bytes_done, 3);
             }
             other => panic!("unexpected {other:?}"),

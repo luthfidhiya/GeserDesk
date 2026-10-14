@@ -87,6 +87,8 @@ mod tests {
     fn trust_in_temp(name: &str) -> PromptTrust {
         let dir =
             std::env::temp_dir().join(format!("geserdesk-trust-{}-{name}", std::process::id()));
+        // A recycled process id must not inherit the servers an earlier run pinned.
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         PromptTrust {
             known: KnownServers::in_dir(&dir),
