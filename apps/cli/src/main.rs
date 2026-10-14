@@ -71,7 +71,9 @@ enum Command {
     Stop,
     /// Run as a client (a machine receiving synthesized input).
     Client {
-        /// This machine's screen name; must match the server config.
+        /// This machine's screen name. With TLS a name the server does not list yet is
+        /// offered to the person at the server for approval; with --no-tls it must
+        /// already be in the server config.
         #[arg(short, long)]
         name: String,
         /// Server address, `host:port`.

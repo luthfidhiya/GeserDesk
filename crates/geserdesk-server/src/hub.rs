@@ -26,6 +26,8 @@ pub enum HubEvent {
     Positions(BTreeMap<String, Point>),
     /// This machine's own monitors changed (one plugged, unplugged or moved).
     LocalMonitors(Vec<Rect>),
+    /// A machine the config did not list was approved and joined the desk.
+    ScreenAdded(String),
 }
 
 /// A clipboard a client pushed, for the relay to apply and pass on.
@@ -42,6 +44,8 @@ struct Entry {
 
 pub struct Hub {
     clients: Mutex<HashMap<String, Entry>>,
+    /// Screens approved while the server runs, beyond those in the config.
+    added: Mutex<Vec<String>>,
     events: UnboundedSender<HubEvent>,
     events_rx: Mutex<Option<UnboundedReceiver<HubEvent>>>,
     clipboard: UnboundedSender<SharedClip>,
@@ -54,6 +58,7 @@ impl Hub {
         let (clipboard, clipboard_rx) = unbounded_channel();
         Arc::new(Self {
             clients: Mutex::new(HashMap::new()),
+            added: Mutex::new(Vec::new()),
             events,
             events_rx: Mutex::new(Some(rx)),
             clipboard,
@@ -164,6 +169,24 @@ impl Hub {
         let _ = self.events.send(HubEvent::Positions(positions));
     }
 
+    /// A machine that was not in the config has been approved: remember it for the
+    /// next handshake and tell the router. Returns `false` if it was already added.
+    pub fn add_screen(&self, name: &str) -> bool {
+        let mut added = self.added.lock().unwrap();
+        if added.iter().any(|n| n == name) {
+            return false;
+        }
+        added.push(name.to_string());
+        drop(added);
+        let _ = self.events.send(HubEvent::ScreenAdded(name.to_string()));
+        true
+    }
+
+    /// The screens approved while the server runs.
+    pub fn added_screens(&self) -> Vec<String> {
+        self.added.lock().unwrap().clone()
+    }
+
     /// Tell the router that this machine's own monitors changed.
     pub fn apply_local_monitors(&self, monitors: Vec<Rect>) {
         let _ = self.events.send(HubEvent::LocalMonitors(monitors));
@@ -263,5 +286,20 @@ mod tests {
             Some(HubEvent::Connected { monitors, .. }) => assert_eq!(monitors.len(), 2),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn an_added_screen_is_remembered_once_and_announced_to_the_router() {
+        let hub = Hub::new();
+        let mut events = hub.take_events().unwrap();
+        assert!(hub.added_screens().is_empty());
+        assert!(hub.add_screen("akhyar-utc"));
+        assert!(!hub.add_screen("akhyar-utc"), "a second add is not news");
+        assert_eq!(hub.added_screens(), vec!["akhyar-utc".to_string()]);
+        assert_eq!(
+            events.recv().await,
+            Some(HubEvent::ScreenAdded("akhyar-utc".into()))
+        );
+        assert!(events.try_recv().is_err(), "announced once");
     }
 }

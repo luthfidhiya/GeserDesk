@@ -30,7 +30,7 @@ use crate::clipboard;
 use crate::config::Config;
 use crate::files::FileRouter;
 use crate::hub::{Hub, Registration};
-use crate::layout::Layout;
+use crate::layout::{valid_screen_name, Layout};
 use crate::router::{self, Core};
 use crate::trust::{Trust, Verdict};
 
@@ -124,6 +124,31 @@ pub async fn server_handshake<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    handshake(ms, layout, options, keepalive, authorize, name_taken, false).await
+}
+
+/// [`server_handshake`], optionally letting a name the layout does not list go as
+/// far as `authorize` (`accept_new`).
+///
+/// That is how a new machine joins: with TLS, `authorize` knows nothing of the
+/// name, so it records the request for a person to approve and refuses it for
+/// now; once approved, the name is in the layout and the next try is an ordinary
+/// one. Without TLS `authorize` lets everything through, so there a name must
+/// already be listed (the caller passes `false`). A name that is not plain text
+/// ([`valid_screen_name`]) never gets that far, so it cannot reach the approval
+/// list or, from there, the config file.
+pub(crate) async fn handshake<S>(
+    ms: &mut MessageStream<S>,
+    layout: &Layout,
+    options: &Options,
+    keepalive: Duration,
+    authorize: impl Fn(&str) -> Result<(), String>,
+    name_taken: impl Fn(&str) -> bool,
+    accept_new: bool,
+) -> Result<HandshakeOutcome, HandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let hello = ms.recv::<ClientMsg>().await?;
     let ClientMsg::Hello { version, screen } = hello else {
         ms.send(&ServerMsg::Close(CloseReason::ProtocolError))
@@ -143,7 +168,8 @@ where
         }
     };
 
-    if !layout.has_screen(&screen.name) {
+    let listed = layout.has_screen(&screen.name);
+    if !listed && !(accept_new && valid_screen_name(&screen.name)) {
         ms.send(&ServerMsg::Rejected {
             reason: format!("no screen named {:?} in the server config", screen.name),
         })
@@ -154,6 +180,16 @@ where
     if let Err(reason) = authorize(&screen.name) {
         ms.send(&ServerMsg::Rejected { reason }).await?;
         return Ok(HandshakeOutcome::Untrusted(screen.name));
+    }
+
+    // Trusted, yet not on the desk. Trust is recorded by listed name, so this is
+    // not expected; refuse rather than guess where such a screen would go.
+    if !listed {
+        ms.send(&ServerMsg::Rejected {
+            reason: format!("no screen named {:?} in the server config", screen.name),
+        })
+        .await?;
+        return Ok(HandshakeOutcome::UnknownScreen(screen.name));
     }
 
     if name_taken(&screen.name) {
@@ -588,15 +624,22 @@ where
         })
     };
 
+    // The config's screens, and those a person approved while the server runs.
+    let mut layout = config.layout.clone();
+    for name in hub.added_screens() {
+        layout.add_screen(&name);
+    }
     let outcome = tokio::time::timeout(
         HELLO_TIMEOUT,
-        server_handshake(
+        handshake(
             &mut ms,
-            &config.layout,
+            &layout,
             &config.options,
             KEEPALIVE_INTERVAL,
             authorize,
             |name| hub.contains(name),
+            // Only where there is a certificate to approve it by.
+            tls.is_some(),
         ),
     )
     .await
@@ -895,6 +938,109 @@ mod tests {
         assert!(matches!(first, Some(ServerMsg::Rejected { .. })));
     }
 
+    /// A handshake that accepts new names, against `name`; returns what the server
+    /// decided and whether `authorize` was asked.
+    async fn join_attempt(
+        name: &str,
+        accept_new: bool,
+        authorize_with: Result<(), String>,
+    ) -> (HandshakeOutcome, bool, Option<ServerMsg>) {
+        let (srv, cli) = tokio::io::duplex(64 * 1024);
+        let mut server = MessageStream::new(srv);
+        let mut client = MessageStream::new(cli);
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let asked2 = Arc::clone(&asked);
+        let server_task = tokio::spawn(async move {
+            handshake(
+                &mut server,
+                &layout(),
+                &Options::default(),
+                KEEPALIVE_INTERVAL,
+                move |_| {
+                    asked2.store(true, std::sync::atomic::Ordering::SeqCst);
+                    authorize_with.clone()
+                },
+                |_| false,
+                accept_new,
+            )
+            .await
+        });
+        let (first, _) = run_client_side(
+            &mut client,
+            ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+                screen: client_screen(name),
+            },
+        )
+        .await;
+        let outcome = server_task.await.unwrap().unwrap();
+        (
+            outcome,
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            first,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_new_name_goes_to_approval_when_the_server_can_approve_it() {
+        // With TLS the authorizer does not know the name: it files the request and
+        // refuses for now, and that refusal (with the fingerprint) is what the
+        // client is told, not "no such screen".
+        let waiting = Err("waiting for approval on the server".to_string());
+        let (outcome, asked, first) = join_attempt("akhyar-utc", true, waiting).await;
+        assert_eq!(outcome, HandshakeOutcome::Untrusted("akhyar-utc".into()));
+        assert!(asked, "the request has to reach the approval list");
+        match first {
+            Some(ServerMsg::Rejected { reason }) => {
+                assert!(reason.contains("approval"), "{reason}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_certificate_to_approve_by_a_new_name_is_turned_away() {
+        // No TLS: the authorizer lets everything through, so an unlisted name must
+        // not reach it at all.
+        let (outcome, asked, _) = join_attempt("akhyar-utc", false, Ok(())).await;
+        assert_eq!(
+            outcome,
+            HandshakeOutcome::UnknownScreen("akhyar-utc".into())
+        );
+        assert!(!asked);
+    }
+
+    #[tokio::test]
+    async fn a_name_that_is_not_plain_text_never_reaches_the_approval_list() {
+        for bad in [
+            "",
+            " padded ",
+            "line\nbreak",
+            "esc\u{1b}[2J",
+            &"x".repeat(65),
+        ] {
+            let (outcome, asked, _) =
+                join_attempt(bad, true, Err("waiting for approval".into())).await;
+            assert_eq!(
+                outcome,
+                HandshakeOutcome::UnknownScreen(bad.into()),
+                "{bad:?}"
+            );
+            assert!(!asked, "{bad:?} must not be filed for approval");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_name_that_is_somehow_trusted_is_still_not_let_in() {
+        // Trust is recorded by listed name, so this should not happen; if it does the
+        // server refuses rather than guess where the screen would sit.
+        let (outcome, asked, _) = join_attempt("akhyar-utc", true, Ok(())).await;
+        assert_eq!(
+            outcome,
+            HandshakeOutcome::UnknownScreen("akhyar-utc".into())
+        );
+        assert!(asked);
+    }
     #[tokio::test]
     async fn rejects_incompatible_major() {
         let (srv, cli) = tokio::io::duplex(64 * 1024);
@@ -1151,6 +1297,96 @@ mod tests {
             assert!(matches!(reply, ServerMsg::Welcome { .. }), "{reply:?}");
         }
 
+        #[tokio::test]
+        async fn a_machine_the_config_does_not_list_joins_with_one_approval_and_no_restart() {
+            let dir = std::env::temp_dir().join(format!("gd-join-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("server.toml");
+            std::fs::write(
+                &path,
+                "# mine\n[server]\nlisten = \"127.0.0.1:0\"\nscreen = \"linux-pc\"\n\n[[screens]]\nname = \"linux-pc\"\n",
+            )
+            .unwrap();
+            let mut config = Config::load(&path).unwrap();
+            let client = Identity::generate("c").unwrap();
+            let id = Identity::generate("server").unwrap();
+            let ctx = TlsContext::from_identity(&id, BTreeMap::new()).unwrap();
+            let (_h, listener) = bind(&config).await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            config.path = Some(path.clone());
+            let hub = Hub::new();
+            let desk = DeskState::new(
+                Arc::clone(&hub),
+                Some(path.clone()),
+                "linux-pc".into(),
+                vec![Rect::new(0, 0, 1920, 1080)],
+                config.layout.clone(),
+                config.positions.clone(),
+                Some(Arc::clone(&ctx)),
+            );
+            let (_, never) = watch::channel(false);
+            let file_router = FileRouter::new(Arc::clone(&hub));
+            tokio::spawn(accept_loop_tls(
+                config,
+                listener,
+                Arc::clone(&hub),
+                never,
+                Some(Arc::clone(&ctx)),
+                file_router,
+            ));
+            let rig = Rig {
+                addr,
+                server_fp: id.fingerprint(),
+                ctx,
+            };
+
+            // The first try is refused, and says why; nothing is on the desk yet.
+            let reply = hello_as(&rig, &client, "newbox").await;
+            match &reply {
+                ServerMsg::Rejected { reason } => {
+                    assert!(reason.contains("approval"), "{reason}");
+                    assert!(
+                        reason.contains(&client.fingerprint().to_string()),
+                        "{reason}"
+                    );
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+            let snap = desk.snapshot();
+            assert_eq!(snap.screens.len(), 1);
+            assert_eq!(snap.pending.len(), 1);
+            assert_eq!(snap.pending[0].name, "newbox");
+            assert!(
+                snap.pending[0].new_screen,
+                "the approval list says it is a new screen"
+            );
+
+            // One approval: it is on the desk, in the file, and the next try gets in.
+            desk.approve("newbox", &client.fingerprint().to_string())
+                .unwrap();
+            let snap = desk.snapshot();
+            assert_eq!(snap.screens.len(), 2);
+            assert_eq!(snap.screens[1].name, "newbox");
+            assert!(snap.pending.is_empty());
+            let on_disk = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                on_disk.starts_with("# mine"),
+                "the rest of the file is kept"
+            );
+            let reloaded = Config::load(&path).unwrap();
+            assert!(reloaded.layout.has_screen("newbox"));
+            assert_eq!(reloaded.trusted["newbox"], client.fingerprint());
+
+            let reply = hello_as(&rig, &client, "newbox").await;
+            assert!(matches!(reply, ServerMsg::Welcome { .. }), "{reply:?}");
+
+            // And a different certificate cannot take the same name afterwards.
+            let other = Identity::generate("other").unwrap();
+            let reply = hello_as(&rig, &other, "newbox").await;
+            assert!(matches!(reply, ServerMsg::Rejected { .. }), "{reply:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         #[tokio::test]
         async fn a_trusted_certificate_cannot_claim_another_screens_name() {
             let win = Identity::generate("win").unwrap();

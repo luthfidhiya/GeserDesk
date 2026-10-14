@@ -19,6 +19,17 @@ pub struct Layout {
     links: BTreeMap<String, BTreeMap<Edge, String>>,
 }
 
+/// Whether `name` is acceptable as a screen name for a machine that asks to
+/// join. A name the config lists is taken as it is; one that arrives over the
+/// network ends up in the approval list and the config file, so it must be
+/// plain: not empty, not long, no control characters, no padding.
+pub fn valid_screen_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.trim() == name
+        && !name.chars().any(char::is_control)
+}
+
 /// A link named a screen not present in `[[screens]]`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("link {from:?} -> {to:?} references undefined screen {undefined:?}")]
@@ -42,6 +53,17 @@ impl Layout {
 
     pub fn has_screen(&self, name: &str) -> bool {
         self.screens.iter().any(|s| s == name)
+    }
+
+    /// Add a screen the config did not list: one a person approved while the
+    /// server runs. It has no links; the desk places it beside the others. Returns
+    /// `false` if the name was already there.
+    pub fn add_screen(&mut self, name: &str) -> bool {
+        if self.has_screen(name) {
+            return false;
+        }
+        self.screens.push(name.to_string());
+        true
     }
 
     /// Record that crossing `edge` of `from` lands on `to`.
@@ -384,5 +406,43 @@ mod tests {
             s.evaluate(&p, 1200, Edge::Right, true, true),
             Decision::Wait
         );
+    }
+
+    #[test]
+    fn a_screen_added_later_is_known_once_and_has_no_links() {
+        let mut l = layout();
+        assert!(!l.has_screen("d"));
+        assert!(l.add_screen("d"));
+        assert!(l.has_screen("d"));
+        assert!(!l.add_screen("d"), "a second add changes nothing");
+        assert_eq!(l.screens().len(), 4);
+        assert_eq!(l.neighbor("d", Edge::Left), None);
+        assert!(l.active_edges("d").is_empty());
+    }
+
+    #[test]
+    fn only_a_plain_name_may_be_asked_for() {
+        for ok in [
+            "akhyar-utc",
+            "lenovo",
+            "PC 2",
+            "a",
+            "ünïcode-ok",
+            &"x".repeat(64),
+        ] {
+            assert!(valid_screen_name(ok), "{ok:?}");
+        }
+        for bad in [
+            "",
+            " leading",
+            "trailing ",
+            "new\nline",
+            "tab\there",
+            "nul\0",
+            "esc\u{1b}[31m",
+            &"x".repeat(65),
+        ] {
+            assert!(!valid_screen_name(bad), "{bad:?}");
+        }
     }
 }

@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::desk::{effective_origins, DEFAULT_SIZE};
 use crate::hub::Hub;
-use crate::layout::Layout;
+use crate::layout::{valid_screen_name, Layout};
 
 /// Largest coordinate accepted, to keep arithmetic far from overflow.
 const MAX_COORD: i32 = 1_000_000;
@@ -31,7 +31,8 @@ pub struct DeskState {
     local: String,
     /// This machine's monitors; replaced when they change under a running server.
     local_monitors: Mutex<Vec<Rect>>,
-    layout: Layout,
+    /// The config's screens, and any approved since (see pprove).
+    layout: Mutex<Layout>,
     positions: Mutex<BTreeMap<String, Point>>,
     /// Last monitors seen for each screen, so a disconnected machine keeps its
     /// real shape on screen.
@@ -60,6 +61,9 @@ pub struct PendingView {
     /// The fingerprint this name was trusted with before, if the certificate changed.
     pub replaces: Option<String>,
     pub age_s: u64,
+    /// The config does not list this name: approving it adds a screen.
+    #[serde(default)]
+    pub new_screen: bool,
 }
 
 /// A consistent picture of the desk for one refresh of the screen.
@@ -110,7 +114,7 @@ impl DeskState {
             config_path,
             local,
             local_monitors: Mutex::new(local_monitors),
-            layout,
+            layout: Mutex::new(layout),
             positions: Mutex::new(positions),
             known: Mutex::new(HashMap::new()),
         })
@@ -142,7 +146,8 @@ impl DeskState {
 
     fn screens(&self) -> Vec<ScreenView> {
         let live = self.hub.snapshot();
-        let names = self.layout.screens();
+        let layout = self.layout.lock().unwrap().clone();
+        let names = layout.screens();
         let mons: HashMap<String, (Vec<Rect>, bool)> = names
             .iter()
             .map(|n| (n.clone(), self.monitors_for(n, &live)))
@@ -155,7 +160,7 @@ impl DeskState {
         let origins = effective_origins(
             names,
             &self.local,
-            &self.layout,
+            &layout,
             &self.positions.lock().unwrap(),
             &size_of,
         );
@@ -181,6 +186,7 @@ impl DeskState {
 
     /// Current monitors, origins, trust and pending approvals.
     pub fn snapshot(&self) -> DeskSnapshot {
+        let layout = self.layout.lock().unwrap().clone();
         let pending = self.tls.as_ref().map_or_else(Vec::new, |t| {
             t.trust
                 .pending()
@@ -191,6 +197,7 @@ impl DeskState {
                     addr: p.addr.clone(),
                     replaces: p.replaces.map(|r| r.to_string()),
                     age_s: p.last_seen.elapsed().as_secs(),
+                    new_screen: !layout.has_screen(&p.name),
                 })
                 .collect()
         });
@@ -279,17 +286,36 @@ impl DeskState {
     pub fn approve(&self, name: &str, fingerprint: &str) -> Result<(), AdminError> {
         let tls = self.tls()?;
         let fp = parse_fingerprint(fingerprint)?;
+        let listed = self.layout.lock().unwrap().has_screen(name);
+        // A name the config does not list is a new machine asking to join: it
+        // became pending only if its name was plain text, but check again, since
+        // it is about to be written into the config file.
+        if !listed && !valid_screen_name(name) {
+            return Err(AdminError::UnknownScreen(name.to_string()));
+        }
         let previous = tls.trust.trusted().get(name).copied();
         if !tls.trust.approve(name, &fp) {
             return Err(AdminError::NotPending);
         }
         if let Some(path) = &self.config_path {
-            if let Err(e) = write_fingerprint(path, name, Some(&fp)) {
+            let saved = if listed {
+                write_fingerprint(path, name, Some(&fp))
+            } else {
+                add_screen_to_config(path, name, &fp)
+            };
+            if let Err(e) = saved {
                 // Undo, so what is trusted in memory matches what is on disk.
                 tls.trust.restore(name, previous);
                 warn!(error = %e, "could not save the trusted fingerprint");
                 return Err(AdminError::Save(e.to_string()));
             }
+        }
+        if !listed {
+            // On the desk from now on: no restart. With no position of its own it
+            // lines up beside the screens already there; the layout editor moves it.
+            self.layout.lock().unwrap().add_screen(name);
+            self.hub.add_screen(name);
+            info!(%name, "a new screen joined the desk");
         }
         info!(%name, fingerprint = %fp, "client approved");
         Ok(())
@@ -391,6 +417,42 @@ pub fn write_fingerprint(
     })
 }
 
+/// Add a `[[screens]]` table for a machine approved while the server ran, with the
+/// certificate fingerprint it was approved with, keeping the rest of the file as
+/// it was. Refuses a name already in the file.
+pub fn add_screen_to_config(
+    path: &Path,
+    screen: &str,
+    fingerprint: &geserdesk_tls::Fingerprint,
+) -> anyhow::Result<()> {
+    use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table};
+
+    let text = std::fs::read_to_string(path)?;
+    let mut doc: DocumentMut = text.parse()?;
+    if !doc.contains_key("screens") {
+        doc.insert("screens", Item::ArrayOfTables(ArrayOfTables::new()));
+    }
+    let screens = doc
+        .get_mut("screens")
+        .and_then(|i| i.as_array_of_tables_mut())
+        .ok_or_else(|| anyhow::anyhow!("`screens` in the config is not a list of tables"))?;
+    if screens
+        .iter()
+        .any(|t| t.get("name").and_then(|v| v.as_str()) == Some(screen))
+    {
+        anyhow::bail!("the config already has a screen named {screen:?}");
+    }
+    let mut table = Table::new();
+    table["name"] = value(screen);
+    table["fingerprint"] = value(fingerprint.to_string());
+    screens.push(table);
+
+    // Replace atomically so a crash never leaves a half-written config.
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,6 +662,141 @@ mod tests {
         assert_eq!(st.revoke("win").unwrap_err(), AdminError::TlsOff);
     }
 
+    /// A desk with TLS whose config lists only `linux-pc`.
+    fn desk_with_tls(name: &str) -> (Arc<DeskState>, PathBuf, Arc<crate::net::TlsContext>) {
+        use geserdesk_tls::Identity;
+        let path = temp_file(
+            name,
+            "# kept\n[server]\nscreen = \"linux-pc\"\n\n[[screens]]\nname = \"linux-pc\"\n",
+        );
+        let id = Identity::generate("server").unwrap();
+        let ctx = crate::net::TlsContext::from_identity(&id, BTreeMap::new()).unwrap();
+        let st = DeskState::new(
+            Hub::new(),
+            Some(path.clone()),
+            "linux-pc".into(),
+            vec![Rect::new(0, 0, 1920, 1080)],
+            Layout::new(vec!["linux-pc".into()]),
+            BTreeMap::new(),
+            Some(Arc::clone(&ctx)),
+        );
+        (st, path, ctx)
+    }
+
+    fn some_fingerprint() -> geserdesk_tls::Fingerprint {
+        geserdesk_tls::Identity::generate("client")
+            .unwrap()
+            .fingerprint()
+    }
+
+    #[tokio::test]
+    async fn approving_a_machine_the_config_does_not_list_puts_it_on_the_desk_and_in_the_file() {
+        let (st, path, ctx) = desk_with_tls("newscreen");
+        let mut events = st.hub.take_events().unwrap();
+        let fp = some_fingerprint();
+        ctx.trust
+            .note_pending("akhyar-utc", fp, "192.168.100.10:40000");
+
+        let pending = &st.snapshot().pending;
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].new_screen);
+        assert_eq!(st.snapshot().screens.len(), 1);
+
+        st.approve("akhyar-utc", &fp.to_string()).unwrap();
+
+        // On the desk, trusted, beside the screen that was there, no position of its own.
+        let snap = st.snapshot();
+        assert_eq!(snap.screens.len(), 2);
+        let new = &snap.screens[1];
+        assert_eq!(new.name, "akhyar-utc");
+        assert_eq!(new.trusted_fingerprint, Some(fp.to_string()));
+        assert_eq!(new.origin.x, 1920, "lines up to the right of linux-pc");
+        assert!(snap.pending.is_empty());
+        assert_eq!(st.hub.added_screens(), vec!["akhyar-utc".to_string()]);
+
+        // In the file, with the certificate it was approved with, the rest kept.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# kept"), "{text}");
+        let cfg = read_config(&path);
+        assert!(cfg.layout.has_screen("akhyar-utc"));
+        assert_eq!(cfg.trusted["akhyar-utc"], fp);
+
+        // And the router is told, so it needs no restart either.
+        let name = loop {
+            match events.recv().await {
+                Some(crate::hub::HubEvent::ScreenAdded(n)) => break n,
+                Some(_) => continue,
+                None => panic!("the hub closed before the router was told"),
+            }
+        };
+        assert_eq!(name, "akhyar-utc");
+    }
+
+    #[test]
+    fn a_listed_screen_is_approved_as_before_and_adds_nothing() {
+        let (st, path, ctx) = desk_with_tls("listedscreen");
+        let fp = some_fingerprint();
+        ctx.trust.note_pending("linux-pc", fp, "127.0.0.1:1");
+        assert!(!st.snapshot().pending[0].new_screen);
+        st.approve("linux-pc", &fp.to_string()).unwrap();
+        assert_eq!(st.snapshot().screens.len(), 1);
+        assert!(st.hub.added_screens().is_empty());
+        assert_eq!(read_config(&path).trusted["linux-pc"], fp);
+    }
+
+    #[test]
+    fn a_name_that_is_not_plain_text_is_never_written_into_the_config() {
+        let (st, path, ctx) = desk_with_tls("badname");
+        let before = std::fs::read_to_string(&path).unwrap();
+        let fp = some_fingerprint();
+        // The handshake keeps such a name out of the list; this is the second lock.
+        ctx.trust
+            .note_pending("evil\"\nname = \"x", fp, "127.0.0.1:1");
+        assert_eq!(
+            st.approve("evil\"\nname = \"x", &fp.to_string())
+                .unwrap_err(),
+            AdminError::UnknownScreen("evil\"\nname = \"x".into())
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(
+            ctx.trust.trusted().is_empty(),
+            "and it was not trusted either"
+        );
+        assert_eq!(st.snapshot().screens.len(), 1);
+    }
+
+    #[test]
+    fn if_the_file_cannot_be_written_the_screen_is_not_added_or_trusted() {
+        let (st, path, ctx) = desk_with_tls("cannotsave");
+        let fp = some_fingerprint();
+        ctx.trust.note_pending("akhyar-utc", fp, "127.0.0.1:1");
+        std::fs::remove_file(&path).unwrap(); // nothing to edit, so the save fails
+        let err = st.approve("akhyar-utc", &fp.to_string()).unwrap_err();
+        assert!(matches!(err, AdminError::Save(_)), "{err:?}");
+        assert!(
+            ctx.trust.trusted().is_empty(),
+            "what is trusted matches the file"
+        );
+        assert_eq!(st.snapshot().screens.len(), 1);
+        assert!(st.hub.added_screens().is_empty());
+    }
+
+    #[test]
+    fn adding_a_screen_to_the_file_keeps_comments_and_refuses_a_name_twice() {
+        let path = temp_file(
+            "addscreen",
+            "# top\n[server]\nscreen = \"a\"\n\n# the first\n[[screens]]\nname = \"a\"\nx = 5\n",
+        );
+        let fp = some_fingerprint();
+        add_screen_to_config(&path, "b", &fp).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# top") && text.contains("# the first") && text.contains("x = 5"));
+        let cfg = read_config(&path);
+        assert_eq!(cfg.layout.screens(), ["a".to_string(), "b".to_string()]);
+        assert_eq!(cfg.trusted["b"], fp);
+        assert!(add_screen_to_config(&path, "b", &fp).is_err());
+        assert!(add_screen_to_config(&path, "a", &fp).is_err());
+    }
     #[test]
     fn trust_approves_only_what_is_pending_and_persists_it() {
         use geserdesk_tls::Identity;

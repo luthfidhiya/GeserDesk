@@ -102,6 +102,14 @@ impl Core {
         self.refresh_origins();
     }
 
+    /// A machine the config did not list was approved and joined the desk. With no
+    /// position of its own it lines up beside the screens already there.
+    pub fn add_screen(&mut self, name: &str) {
+        if self.layout.add_screen(name) {
+            self.refresh_origins();
+        }
+    }
+
     /// This machine's own monitors changed while the server runs. Everything that
     /// was worked out from the old list (where the screens sit on the desk, which
     /// edge touches a client, where input comes back to) follows the new one.
@@ -545,6 +553,11 @@ pub async fn run_shared(
                 Some(HubEvent::Positions(positions)) => {
                     info!(screens = positions.len(), "layout updated");
                     core.set_positions(positions);
+                    VecDeque::new()
+                }
+                Some(HubEvent::ScreenAdded(name)) => {
+                    info!(%name, "a new screen joined the desk");
+                    core.add_screen(&name);
                     VecDeque::new()
                 }
                 Some(HubEvent::LocalMonitors(monitors)) => {
@@ -1093,6 +1106,30 @@ mod tests {
 
         c.set_local_monitors(vec![LOCAL, NEW]);
         let a = c.handle(CaptureEvent::Pointer(Point::new(3839, 540)), 1);
+        assert_eq!(a[0], Action::Capture(CaptureCmd::Grab));
+        assert!(matches!(
+            sends(&a)[0],
+            ("win", ServerMsg::Enter { x: 0, y: 540, .. })
+        ));
+    }
+
+    #[test]
+    fn a_screen_added_while_running_lines_up_beside_the_others_and_can_be_crossed_to() {
+        let mut c = Core::new(
+            Layout::new(vec!["linux-pc".into()]),
+            SwitchPolicy::default(),
+            "linux-pc".into(),
+            vec![LOCAL],
+            BTreeMap::new(),
+        );
+        c.add_screen("win");
+        c.add_screen("win"); // approved twice changes nothing
+        c.client_connected("win", vec![REMOTE]);
+
+        // It sits just right of linux-pc (desk x 1920), so pushing the right edge
+        // lands at its left edge, at the same height; at the origin (where a screen
+        // with no place at all would fall) it would land 1920 pixels in.
+        let a = c.handle(CaptureEvent::Pointer(Point::new(1919, 540)), 0);
         assert_eq!(a[0], Action::Capture(CaptureCmd::Grab));
         assert!(matches!(
             sends(&a)[0],
