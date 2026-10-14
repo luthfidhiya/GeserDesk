@@ -24,6 +24,8 @@ pub enum HubEvent {
     Disconnected(String),
     /// The layout editor moved machines on the virtual desk.
     Positions(BTreeMap<String, Point>),
+    /// This machine's own monitors changed (one plugged, unplugged or moved).
+    LocalMonitors(Vec<Rect>),
 }
 
 /// A clipboard a client pushed, for the relay to apply and pass on.
@@ -160,6 +162,11 @@ impl Hub {
     /// Tell the router that machines moved on the virtual desk.
     pub fn apply_positions(&self, positions: BTreeMap<String, Point>) {
         let _ = self.events.send(HubEvent::Positions(positions));
+    }
+
+    /// Tell the router that this machine's own monitors changed.
+    pub fn apply_local_monitors(&self, monitors: Vec<Rect>) {
+        let _ = self.events.send(HubEvent::LocalMonitors(monitors));
     }
 
     fn unregister(&self, name: &str) {

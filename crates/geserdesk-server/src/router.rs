@@ -102,6 +102,23 @@ impl Core {
         self.refresh_origins();
     }
 
+    /// This machine's own monitors changed while the server runs. Everything that
+    /// was worked out from the old list (where the screens sit on the desk, which
+    /// edge touches a client, where input comes back to) follows the new one.
+    pub fn set_local_monitors(&mut self, monitors: Vec<Rect>) {
+        if monitors.is_empty() || monitors == self.local_monitors {
+            return;
+        }
+        self.local_monitors = monitors;
+        if self
+            .last_local_monitor
+            .is_some_and(|m| !self.local_monitors.contains(&m))
+        {
+            self.last_local_monitor = None; // that monitor is gone
+        }
+        self.refresh_origins();
+    }
+
     /// The layout editor moved machines.
     pub fn set_positions(&mut self, positions: BTreeMap<String, Point>) {
         self.positions = positions;
@@ -528,6 +545,11 @@ pub async fn run_shared(
                 Some(HubEvent::Positions(positions)) => {
                     info!(screens = positions.len(), "layout updated");
                     core.set_positions(positions);
+                    VecDeque::new()
+                }
+                Some(HubEvent::LocalMonitors(monitors)) => {
+                    info!(monitors = monitors.len(), "this machine's monitors changed");
+                    core.set_local_monitors(monitors);
                     VecDeque::new()
                 }
                 Some(HubEvent::Disconnected(name)) => core.client_disconnected(&name).into(),
@@ -1048,6 +1070,54 @@ mod tests {
             &Action::Capture(CaptureCmd::Ungrab {
                 warp: Point::new(960, -540)
             })
+        );
+    }
+
+    #[test]
+    fn a_monitor_plugged_in_under_a_running_server_can_be_crossed_from() {
+        // One local monitor, and win to the right of where a second would be.
+        let mut c = Core::new(
+            layout(),
+            SwitchPolicy::default(),
+            "linux-pc".into(),
+            vec![LOCAL],
+            pos(&[("linux-pc", 0, 0), ("win", 3840, 0)]),
+        );
+        c.client_connected("win", vec![REMOTE]);
+        const NEW: Rect = Rect::new(1920, 0, 1920, 1080);
+
+        // The pointer on a monitor the server does not know about crosses nothing.
+        assert!(c
+            .handle(CaptureEvent::Pointer(Point::new(3839, 540)), 0)
+            .is_empty());
+
+        c.set_local_monitors(vec![LOCAL, NEW]);
+        let a = c.handle(CaptureEvent::Pointer(Point::new(3839, 540)), 1);
+        assert_eq!(a[0], Action::Capture(CaptureCmd::Grab));
+        assert!(matches!(
+            sends(&a)[0],
+            ("win", ServerMsg::Enter { x: 0, y: 540, .. })
+        ));
+    }
+
+    #[test]
+    fn a_monitor_that_goes_away_is_forgotten_as_the_place_to_return_to() {
+        let mut c = stacked_core();
+        c.handle(CaptureEvent::Pointer(Point::new(700, -300)), 0); // on the upper one
+        c.set_local_monitors(vec![LOCAL]); // which is then unplugged
+        assert_eq!(returned_to(&mut c), Point::new(960, 540));
+    }
+
+    #[test]
+    fn an_empty_or_unchanged_monitor_list_changes_nothing() {
+        let mut c = stacked_core();
+        c.handle(CaptureEvent::Pointer(Point::new(700, -300)), 0);
+        c.set_local_monitors(Vec::new()); // the OS could not say
+        c.set_local_monitors(vec![Rect::new(0, -1080, 1920, 1080), LOCAL]); // as before
+        assert_eq!(
+            returned_to(&mut c),
+            Point::new(960, -540),
+            "still the upper"
         );
     }
 

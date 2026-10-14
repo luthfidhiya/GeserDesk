@@ -680,7 +680,7 @@ impl Capture {
 
     fn grab(&mut self) -> Result<(), String> {
         self.state.resync();
-        let here = cursor_pos().unwrap_or_else(|| self.bounds.center());
+        let here = cursor_pos().unwrap_or_else(|| virtual_screen().center());
         let center = monitor_center(here);
         // SAFETY: SetCursorPos takes plain coordinates.
         if unsafe { SetCursorPos(center.x, center.y) } == 0 {
@@ -718,7 +718,7 @@ impl Capture {
             unsafe { ShowWindow(self.window, SW_HIDE) };
         }
         if let Some(p) = warp_to {
-            let p = self.bounds.clamp(p);
+            let p = virtual_screen().clamp(p);
             // SAFETY: SetCursorPos takes plain coordinates.
             unsafe { SetCursorPos(p.x, p.y) };
             self.last_local = Some(p);

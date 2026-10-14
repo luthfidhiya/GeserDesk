@@ -367,19 +367,74 @@ async fn serve_with_hub(
 ) -> anyhow::Result<()> {
     let tls = tls_for(&config)?;
     let (_handle, listener) = bind(&config).await?;
-    if let Some(ready) = ready {
+    let desk = ready.map(|ready| {
         let desk = DeskState::new(
             Arc::clone(&hub),
             config.path.clone(),
             config.local_screen.clone(),
-            local_monitors,
+            local_monitors.clone(),
             config.layout.clone(),
             config.positions.clone(),
             tls.clone(),
         );
-        let _ = ready.send(desk); // the front end may have stopped waiting
+        let _ = ready.send(Arc::clone(&desk)); // the front end may have stopped waiting
+        desk
+    });
+    // This machine's monitors can change under a running server (a dock, a cable).
+    let watcher = tokio::spawn(watch_local_monitors(
+        Arc::clone(&hub),
+        desk,
+        local_monitors,
+        detect_local_monitors,
+        LOCAL_MONITOR_POLL,
+    ));
+    let result = accept_loop_tls(config, listener, hub, shutdown, tls, file_router).await;
+    watcher.abort();
+    result
+}
+
+/// How often a running server re-reads this machine's own monitors (a client does
+/// the same every five seconds).
+const LOCAL_MONITOR_POLL: Duration = Duration::from_secs(5);
+
+fn detect_local_monitors() -> Option<Vec<Rect>> {
+    geserdesk_platform::monitors().ok()
+}
+
+/// Notice when this machine's monitors change and tell everything that went by the
+/// old list: the router (so edges, desk positions and the point input comes back
+/// to follow) and the front end's view of the desk. `detect` returns the monitors
+/// as the OS reports them now, or `None` when it cannot say.
+pub(crate) async fn watch_local_monitors(
+    hub: Arc<Hub>,
+    desk: Option<Arc<DeskState>>,
+    mut current: Vec<Rect>,
+    detect: fn() -> Option<Vec<Rect>>,
+    period: Duration,
+) {
+    let mut tick = tokio::time::interval(period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // the first tick is immediate, and the list was just read
+    loop {
+        tick.tick().await;
+        // Enumerating monitors talks to the OS; keep it off the async threads.
+        let Some(now) = tokio::task::spawn_blocking(detect).await.ok().flatten() else {
+            continue;
+        };
+        if now.is_empty() || now == current {
+            continue;
+        }
+        info!(
+            before = current.len(),
+            now = now.len(),
+            "this machine's monitors changed"
+        );
+        current = now.clone();
+        if let Some(desk) = &desk {
+            desk.set_local_monitors(now.clone());
+        }
+        hub.apply_local_monitors(now);
     }
-    accept_loop_tls(config, listener, hub, shutdown, tls, file_router).await
 }
 
 /// Bind the listener and return a handle plus the socket, without accepting yet.
@@ -1195,5 +1250,75 @@ mod tests {
         })
         .await;
         assert!(end.is_ok(), "the client session was left open");
+    }
+
+    /// What the OS says this machine's monitors are, for the test below.
+    static MONITORS_NOW: std::sync::Mutex<Option<Vec<Rect>>> = std::sync::Mutex::new(None);
+
+    fn monitors_now() -> Option<Vec<Rect>> {
+        MONITORS_NOW.lock().unwrap().clone()
+    }
+
+    /// The next hub event, or an error if none comes soon.
+    async fn next_event(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<crate::hub::HubEvent>,
+    ) -> Result<Option<crate::hub::HubEvent>, tokio::time::error::Elapsed> {
+        tokio::time::timeout(Duration::from_millis(400), events.recv()).await
+    }
+
+    #[tokio::test]
+    async fn a_running_server_notices_its_monitors_changing() {
+        let one = vec![Rect::new(0, 0, 1920, 1080)];
+        let two = vec![Rect::new(0, -1080, 1920, 1080), Rect::new(0, 0, 1920, 1080)];
+        *MONITORS_NOW.lock().unwrap() = Some(one.clone());
+
+        let hub = Hub::new();
+        let mut events = hub.take_events().unwrap();
+        let desk = DeskState::new(
+            Arc::clone(&hub),
+            None,
+            "linux-pc".into(),
+            one.clone(),
+            layout(),
+            BTreeMap::new(),
+            None,
+        );
+        let watcher = tokio::spawn(watch_local_monitors(
+            Arc::clone(&hub),
+            Some(Arc::clone(&desk)),
+            one.clone(),
+            monitors_now,
+            Duration::from_millis(30),
+        ));
+
+        // Nothing changed: nothing is said, however many polls go by.
+        assert!(
+            next_event(&mut events).await.is_err(),
+            "no event while unchanged"
+        );
+
+        // A monitor is plugged in: the router is told, and so is the desk view.
+        *MONITORS_NOW.lock().unwrap() = Some(two.clone());
+        match next_event(&mut events).await {
+            Ok(Some(crate::hub::HubEvent::LocalMonitors(m))) => assert_eq!(m, two),
+            other => panic!("expected the new monitors, got {other:?}"),
+        }
+        assert_eq!(desk.snapshot().screens[0].monitors, two);
+
+        // The OS cannot say, or says nothing: the last good list stands.
+        *MONITORS_NOW.lock().unwrap() = None;
+        assert!(next_event(&mut events).await.is_err());
+        *MONITORS_NOW.lock().unwrap() = Some(Vec::new());
+        assert!(next_event(&mut events).await.is_err());
+        assert_eq!(desk.snapshot().screens[0].monitors, two);
+
+        // And it is unplugged again.
+        *MONITORS_NOW.lock().unwrap() = Some(one.clone());
+        match next_event(&mut events).await {
+            Ok(Some(crate::hub::HubEvent::LocalMonitors(m))) => assert_eq!(m, one),
+            other => panic!("expected the old monitors back, got {other:?}"),
+        }
+        assert_eq!(desk.snapshot().screens[0].monitors, one);
+        watcher.abort();
     }
 }

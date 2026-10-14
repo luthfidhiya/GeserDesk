@@ -29,7 +29,8 @@ pub struct DeskState {
     hub: Arc<Hub>,
     config_path: Option<PathBuf>,
     local: String,
-    local_monitors: Vec<Rect>,
+    /// This machine's monitors; replaced when they change under a running server.
+    local_monitors: Mutex<Vec<Rect>>,
     layout: Layout,
     positions: Mutex<BTreeMap<String, Point>>,
     /// Last monitors seen for each screen, so a disconnected machine keeps its
@@ -108,18 +109,23 @@ impl DeskState {
             hub,
             config_path,
             local,
-            local_monitors,
+            local_monitors: Mutex::new(local_monitors),
             layout,
             positions: Mutex::new(positions),
             known: Mutex::new(HashMap::new()),
         })
     }
 
+    /// This machine's monitors changed while the server runs.
+    pub fn set_local_monitors(&self, monitors: Vec<Rect>) {
+        *self.local_monitors.lock().unwrap() = monitors;
+    }
+
     /// Monitors for `name` and whether they are real (as opposed to a
     /// placeholder for a machine that has never connected).
     fn monitors_for(&self, name: &str, live: &HashMap<String, Vec<Rect>>) -> (Vec<Rect>, bool) {
         if name == self.local {
-            return (self.local_monitors.clone(), true);
+            return (self.local_monitors.lock().unwrap().clone(), true);
         }
         if let Some(m) = live.get(name) {
             self.known
@@ -434,6 +440,26 @@ mod tests {
         // Unpositioned screens line up to the right.
         assert_eq!(snap.screens[1].origin.x, 1920);
         assert!(!snap.tls);
+    }
+
+    #[test]
+    fn this_machines_monitors_follow_a_change_and_the_screens_beside_it_move_over() {
+        let st = state_with(None);
+        assert_eq!(st.snapshot().screens[0].monitors.len(), 1);
+        assert_eq!(st.snapshot().screens[1].origin.x, 1920);
+
+        // A second, wider monitor is plugged in to the right.
+        st.set_local_monitors(vec![
+            Rect::new(0, 0, 1920, 1080),
+            Rect::new(1920, 0, 2560, 1440),
+        ]);
+        let snap = st.snapshot();
+        assert_eq!(snap.screens[0].monitors.len(), 2);
+        assert!(snap.screens[0].connected);
+        assert_eq!(
+            snap.screens[1].origin.x, 4480,
+            "an unpositioned screen lines up after the whole of this one"
+        );
     }
 
     #[test]
