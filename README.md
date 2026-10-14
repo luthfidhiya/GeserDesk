@@ -135,7 +135,10 @@ opened. See *Daemon and controllers* below.
   approve the computer.
 * **Server:** pick the config file (the app can create a starting one), press
   Start. The *Pengaturan monitor* tab then arranges the screens and approves or revokes
-  computers (a badge shows how many are waiting). Stop ends the session, and the
+  computers (a badge shows how many are waiting). A computer the config does not list
+  yet just shows up there when it connects (with TLS); approving it adds it to the
+  config and the desk, to the right of the others, with no restart and no editing of
+  the file. Stop ends the session, and the
   daemon with it, giving the keyboard and mouse back.
 * **Tray:** the icon shows whether GeserDesk is running (grey idle, green up, red
   failed) and its menu starts/stops, opens the window or the monitor tab, and quits.
@@ -247,7 +250,12 @@ those of your profile folder (you, `SYSTEM` and the Administrators). Nobody is t
   persetujuan* in the app's *Pengaturan monitor* tab with its fingerprint (the client prints the
   same one at startup). Check they match and click *Percayai*; the fingerprint
   is saved as `fingerprint = "..."` on that `[[screens]]` entry, and the client
-  gets in on its next automatic retry. A trusted name cannot be claimed by another
+  gets in on its next automatic retry. A name the config does not list yet is treated
+  the same way, marked as a new computer: *Percayai dan tambahkan* writes a new
+  [[screens]] entry with the fingerprint and puts it on the desk. (Only with TLS: with
+  --no-tls there is nothing to approve it by, so a name must already be listed. A name
+  that is not plain text -- empty, over 64 characters, with control characters -- is
+  refused outright and never listed.) A trusted name cannot be claimed by another
   certificate, and a changed certificate is flagged as a replacement.
 * Not covered: malware on either machine, and the first contact if you do not
   actually compare the fingerprints.
