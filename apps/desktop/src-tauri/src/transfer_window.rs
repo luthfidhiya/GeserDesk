@@ -24,10 +24,13 @@ pub fn show(app: &AppHandle) {
         .ok()
         .flatten()
         .map(|m| {
-            let scale = m.scale_factor();
-            let size = m.size().to_logical::<f64>(scale);
-            let margin = 16.0;
-            (size.width - WIDTH - margin, size.height - HEIGHT - margin)
+            // The work area, not the whole monitor: it leaves out the taskbar.
+            let work = m.work_area();
+            corner(
+                (work.position.x, work.position.y),
+                (work.size.width, work.size.height),
+                m.scale_factor(),
+            )
         })
         .unwrap_or((40.0, 40.0));
 
@@ -48,5 +51,44 @@ pub fn show(app: &AppHandle) {
     .build();
     if let Err(e) = built {
         warn!(error = %e, "could not open the transfer progress window");
+    }
+}
+
+/// Where the window's top-left goes, in logical pixels: the bottom-right corner
+/// of a monitor's work area (`origin` and `size` in physical pixels), a margin in
+/// from both edges.
+fn corner(origin: (i32, i32), size: (u32, u32), scale: f64) -> (f64, f64) {
+    const MARGIN: f64 = 16.0;
+    let (x, y) = (f64::from(origin.0) / scale, f64::from(origin.1) / scale);
+    let (w, h) = (f64::from(size.0) / scale, f64::from(size.1) / scale);
+    (x + w - WIDTH - MARGIN, y + h - HEIGHT - MARGIN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sits_in_the_corner_of_the_work_area_not_of_the_whole_monitor() {
+        // A 1920x1080 monitor at 100 %, 40 pixels of it taken by the taskbar.
+        let (x, y) = corner((0, 0), (1920, 1040), 1.0);
+        assert_eq!((x, y), (1920.0 - 320.0 - 16.0, 1040.0 - 110.0 - 16.0));
+        // Never lower than the taskbar's top edge, which is where the bottom of
+        // the window plus its margin ends up.
+        assert!(y + HEIGHT + 16.0 <= 1040.0);
+    }
+
+    #[test]
+    fn scales_the_work_area_into_logical_pixels() {
+        let (x, y) = corner((0, 0), (1920, 1040), 1.25);
+        assert!((x - (1920.0 / 1.25 - 320.0 - 16.0)).abs() < 1e-9);
+        assert!((y - (1040.0 / 1.25 - 110.0 - 16.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn follows_a_work_area_that_does_not_start_at_the_origin() {
+        // A taskbar on the left and a monitor placed to the left of the origin.
+        let (x, y) = corner((-1880, 0), (1880, 1080), 1.0);
+        assert_eq!((x, y), (-320.0 - 16.0, 1080.0 - 110.0 - 16.0));
     }
 }
