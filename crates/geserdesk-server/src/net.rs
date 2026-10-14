@@ -255,13 +255,13 @@ pub async fn run_server_with(
 }
 
 /// [`run_server_with`], and reports a files pull for this server's own screen
-/// to `transfer_progress`, if given.
+/// to `transfer_hooks`, if given.
 pub async fn run_server_with_progress(
     config: Config,
     capture: bool,
     shutdown: watch::Receiver<bool>,
     ready: Option<oneshot::Sender<Arc<DeskState>>>,
-    transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
+    transfer_hooks: Option<geserdesk_clipboard::pull::PullHooks>,
 ) -> anyhow::Result<()> {
     // The desktop's clipboard is shared whenever its input is captured; a server
     // that only runs the network side leaves it alone.
@@ -277,15 +277,7 @@ pub async fn run_server_with_progress(
     } else {
         None
     };
-    run_server_shared(
-        config,
-        capture,
-        shutdown,
-        ready,
-        clipboard,
-        transfer_progress,
-    )
-    .await
+    run_server_shared(config, capture, shutdown, ready, clipboard, transfer_hooks).await
 }
 
 /// [`run_server_with`] with the clipboard to share chosen by the caller (`None`
@@ -296,7 +288,7 @@ pub async fn run_server_shared(
     shutdown: watch::Receiver<bool>,
     ready: Option<oneshot::Sender<Arc<DeskState>>>,
     clipboard: Option<Box<dyn Clipboard>>,
-    transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
+    transfer_hooks: Option<geserdesk_clipboard::pull::PullHooks>,
 ) -> anyhow::Result<()> {
     let hub = Hub::new();
     let file_router = FileRouter::new(Arc::clone(&hub));
@@ -324,7 +316,7 @@ pub async fn run_server_shared(
             sync,
             enabled: config.options.clipboard_files,
             max_bytes: config.options.clipboard_files_max_bytes,
-            progress: transfer_progress.clone(),
+            hooks: transfer_hooks.clone(),
         });
         // Aborting this task drops the capture handle, which makes the capture
         // thread release the grab and exit.

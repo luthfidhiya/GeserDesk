@@ -265,6 +265,11 @@ impl Remote {
         self.done(Command::AnswerPrompt { trust }).await
     }
 
+    /// Stop the files pull in progress, if any.
+    pub async fn cancel_transfer(&self) -> Result<(), String> {
+        self.done(Command::CancelTransfer).await
+    }
+
     pub async fn log_snapshot(&self) -> Result<Vec<LogLine>, String> {
         match self.request(Command::LogSnapshot).await? {
             Reply::Log(lines) => Ok(lines),

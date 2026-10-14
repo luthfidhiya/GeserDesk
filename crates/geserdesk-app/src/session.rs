@@ -111,6 +111,12 @@ impl Session {
         self.transfers.subscribe()
     }
 
+    /// Stop every files pull in progress. Whatever it had staged is removed and
+    /// the clipboard is left as it was; the transfer window is told.
+    pub fn cancel_transfers(&self) {
+        self.transfers.cancel_all();
+    }
+
     pub fn status(&self) -> Status {
         self.status.borrow().clone()
     }
@@ -202,7 +208,7 @@ impl Session {
                     warn!(error = %e, "the clipboard is not available; it will not be shared")
                 }
             }
-            cfg.transfer_progress = Some(self.transfers.pull_sink());
+            cfg.transfer_hooks = Some(self.transfers.pull_hooks());
         }
         let this = Arc::clone(self);
         info!(server = %cfg.server, name = %cfg.name, reconnect, "starting client");
@@ -273,7 +279,7 @@ impl Session {
         let (stop, shutdown) = watch::channel(false);
         let (ready_tx, ready_rx) = oneshot::channel();
         let this = Arc::clone(self);
-        let progress = self.transfers.pull_sink();
+        let progress = self.transfers.pull_hooks();
         let task = self.rt.spawn(async move {
             match geserdesk_server::run_server_with_progress(
                 config,
@@ -385,7 +391,7 @@ fn client_config(
         handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         // Opening the desktop's clipboard is left to whoever starts the session.
         clipboard: None,
-        transfer_progress: None,
+        transfer_hooks: None,
     })
 }
 

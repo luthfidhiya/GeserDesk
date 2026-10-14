@@ -21,7 +21,7 @@ use crate::trust::TrustPrompt;
 
 /// Bumped when the messages change shape. A daemon outlives the app that
 /// started it, so the two can disagree after an upgrade.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// Longest line either side accepts, so a stray peer cannot make us buffer
 /// without end.
@@ -123,6 +123,8 @@ pub enum Command {
     },
     LogSnapshot,
     ClearLog,
+    /// Stop every files pull in progress; what it staged is removed.
+    CancelTransfer,
     /// Start pushing [`Event`]s on this connection.
     Subscribe,
 }
@@ -260,6 +262,7 @@ mod tests {
             Command::AnswerPrompt { trust: true },
             Command::LogSnapshot,
             Command::ClearLog,
+            Command::CancelTransfer,
             Command::Subscribe,
             Command::Start {
                 spec: StartSpec::Client(ClientOptions {

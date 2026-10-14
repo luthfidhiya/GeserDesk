@@ -547,7 +547,7 @@ pub async fn run_shared(
                             manifest,
                             dest: files::staging_dir(seq),
                             files_max_bytes: lf.max_bytes,
-                            on_progress: lf.progress.clone(),
+                            hooks: lf.hooks.clone(),
                         });
                     }
                 }

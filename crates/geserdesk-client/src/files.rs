@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use geserdesk_clipboard::pull::{ProgressSink, PullEvent};
+use geserdesk_clipboard::pull::{PullError, PullEvent, PullHooks, PullOptions};
 use geserdesk_clipboard::{effective_files_max, pull, ClipboardSync};
 use geserdesk_proto::clipboard::{FileManifest, FileReadError, FileReadResult};
 use geserdesk_proto::ClientMsg;
@@ -64,6 +64,12 @@ impl FileChannel {
         let req = self.next_req.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
+        // Whatever ends this call -- an answer, a send that failed, or the pull
+        // being cancelled or timed out and this future dropped -- the entry goes.
+        let _forget = Forget {
+            pending: &self.pending,
+            req,
+        };
         let sent = self
             .outgoing
             .send(ClientMsg::FileRead {
@@ -75,7 +81,6 @@ impl FileChannel {
             })
             .is_ok();
         if !sent {
-            self.pending.lock().unwrap().remove(&req);
             return FileReadResult::Err(FileReadError::NotFound);
         }
         rx.await
@@ -83,11 +88,25 @@ impl FileChannel {
     }
 }
 
+/// Removes a request from the pending table when the call that made it ends.
+struct Forget<'a> {
+    pending: &'a Mutex<HashMap<u64, oneshot::Sender<FileReadResult>>>,
+    req: u64,
+}
+
+impl Drop for Forget<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.req);
+        }
+    }
+}
+
 /// Pull `manifest` (the server's announcement, transfer `seq`) into `dest` and,
 /// on success, put the top-level results on the clipboard -- what a paste
 /// should paste. Runs in its own task, so the rest of the session (keep-alive,
-/// input) is never held up by it; on any failure it is logged and abandoned,
-/// leaving the clipboard exactly as it was.
+/// input) is never held up by it; on any failure, or if `hooks`' switch cancels
+/// it, it is logged and abandoned, leaving the clipboard exactly as it was.
 pub fn spawn_pull(
     channel: FileChannel,
     sync: ClipboardSync,
@@ -95,31 +114,34 @@ pub fn spawn_pull(
     manifest: FileManifest,
     dest: PathBuf,
     files_max_bytes: u64,
-    on_progress: Option<ProgressSink>,
+    hooks: Option<PullHooks>,
 ) {
+    // Taken now, not when the task first runs: a Cancel in between must count.
+    let cancel = hooks.as_ref().map(|h| h.cancel.watch());
     tokio::spawn(async move {
         // The client only ever pulls from the server itself.
         const PEER: &str = "server";
-        let report = move |cb: &ProgressSink, event: PullEvent| {
-            cb(pull::PullReport {
-                peer: PEER.to_string(),
-                event,
-            })
+        let report = |event: PullEvent| {
+            if let Some(h) = &hooks {
+                h.report(PEER, event);
+            }
         };
-        let max = effective_files_max(files_max_bytes);
-        let progress_sink = on_progress.clone();
-        let result = pull::pull_with_progress(
+        let mut options = PullOptions::new(effective_files_max(files_max_bytes), seq);
+        if let Some(cancel) = cancel {
+            options = options.cancel_with(cancel);
+        }
+        let progress_hooks = hooks.clone();
+        let result = pull::pull_with_options(
             &manifest,
             &dest,
-            max,
-            seq,
+            options,
             |index, offset, len| {
                 let channel = channel.clone();
                 async move { channel.read(seq, index, offset, len).await }
             },
             move |p| {
-                if let Some(cb) = &progress_sink {
-                    report(cb, PullEvent::Progress(p));
+                if let Some(h) = &progress_hooks {
+                    h.report(PEER, PullEvent::Progress(p));
                 }
             },
         )
@@ -130,22 +152,21 @@ pub fn spawn_pull(
                     entries = top.len(),
                     "pulled the server's files; updating the clipboard"
                 );
-                if let Err(e) = sync.apply_files(top).await {
-                    warn!(error = %e, "could not set the clipboard to the pulled files");
-                    if let Some(cb) = &on_progress {
-                        report(cb, PullEvent::Failed(e.to_string()));
+                match sync.apply_files(top).await {
+                    Ok(()) => report(PullEvent::Done),
+                    Err(e) => {
+                        warn!(error = %e, "could not set the clipboard to the pulled files");
+                        report(PullEvent::Failed(e.to_string()));
                     }
-                    return;
                 }
-                if let Some(cb) = &on_progress {
-                    report(cb, PullEvent::Done);
-                }
+            }
+            Err(PullError::Cancelled) => {
+                info!("the pull of the server's files was cancelled");
+                report(PullEvent::Cancelled);
             }
             Err(e) => {
                 warn!(error = %e, "could not pull files from the server");
-                if let Some(cb) = &on_progress {
-                    report(cb, PullEvent::Failed(e.to_string()));
-                }
+                report(PullEvent::ended_with(&e));
             }
         }
     });
@@ -264,7 +285,8 @@ mod tests {
 
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen2 = Arc::clone(&seen);
-        let sink: ProgressSink = Arc::new(move |p| seen2.lock().unwrap().push(p));
+        let sink: geserdesk_clipboard::pull::ProgressSink =
+            Arc::new(move |p| seen2.lock().unwrap().push(p));
         spawn_pull(
             channel.clone(),
             sync,
@@ -272,7 +294,7 @@ mod tests {
             manifest,
             dest.clone(),
             0,
-            Some(sink),
+            Some(PullHooks::new(sink)),
         );
 
         let req = match tokio::time::timeout(Duration::from_secs(2), rx.0.recv())
@@ -301,5 +323,78 @@ mod tests {
         }
         assert_eq!(seen[1].event, PullEvent::Done);
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_pull_is_reported_removed_and_leaves_the_clipboard_alone() {
+        let mem = geserdesk_clipboard::MemoryClipboard::new();
+        let sync = ClipboardSync::new(mem.clone());
+        let (channel, mut rx) = FileChannel::new();
+        let dest = staging_dir(4244).join(std::process::id().to_string());
+        let _ = std::fs::remove_dir_all(&dest);
+        let manifest = FileManifest {
+            entries: vec![FileEntry {
+                path: "f.txt".into(),
+                size: 3,
+                dir: false,
+            }],
+        };
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let hooks = PullHooks::new(Arc::new(move |r| seen2.lock().unwrap().push(r)));
+        spawn_pull(
+            channel.clone(),
+            sync,
+            4244,
+            manifest,
+            dest.clone(),
+            0,
+            Some(hooks.clone()),
+        );
+
+        // The server is asked for the bytes and never answers; the user cancels.
+        tokio::time::timeout(Duration::from_secs(2), rx.0.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        hooks.cancel.cancel();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while seen.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1, "{seen:?}");
+            assert_eq!(seen[0].peer, "server");
+            assert_eq!(seen[0].event, PullEvent::Cancelled);
+        }
+        assert_eq!(mem.files(), None, "the clipboard is untouched");
+        assert!(!dest.exists(), "what was staged is removed");
+        assert!(
+            channel.pending.lock().unwrap().is_empty(),
+            "the abandoned read is not left waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_read_is_not_left_in_the_pending_table() {
+        // A read that times out or is cancelled is dropped while it waits (the
+        // timeout itself is covered, with a short one, in geserdesk-clipboard).
+        let (channel, mut rx) = FileChannel::new();
+        let read = tokio::spawn({
+            let channel = channel.clone();
+            async move { channel.read(1, 0, 0, 3).await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), rx.0.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(channel.pending.lock().unwrap().len(), 1);
+        // Dropping the waiting call (what a timeout or a cancel does) forgets it.
+        read.abort();
+        let _ = read.await;
+        assert!(channel.pending.lock().unwrap().is_empty());
     }
 }

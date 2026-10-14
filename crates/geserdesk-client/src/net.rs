@@ -82,7 +82,7 @@ pub struct ClientConfig {
     pub clipboard: SharedClipboard,
     /// Where a files pull's progress goes, for a front end to show. `None`
     /// means nobody is watching; pulling still happens.
-    pub transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
+    pub transfer_hooks: Option<geserdesk_clipboard::pull::PullHooks>,
 }
 
 impl std::fmt::Debug for ClientConfig {
@@ -95,7 +95,7 @@ impl std::fmt::Debug for ClientConfig {
             .field("tls", &self.tls.is_some())
             .field("handshake_timeout", &self.handshake_timeout)
             .field("clipboard", &self.clipboard)
-            .field("transfer_progress", &self.transfer_progress.is_some())
+            .field("transfer_hooks", &self.transfer_hooks.is_some())
             .finish()
     }
 }
@@ -468,7 +468,7 @@ where
         config.clipboard.clone(),
         connected.options,
         channel,
-        config.transfer_progress.clone(),
+        config.transfer_hooks.clone(),
     );
     clip.prime().await;
     session_loop(
@@ -504,7 +504,7 @@ struct ClientClipboard {
     /// or another client, relayed) worth pulling when the cursor arrives here.
     remote_files: Option<(u64, FileManifest)>,
     last_pulled_seq: Option<u64>,
-    transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
+    transfer_hooks: Option<geserdesk_clipboard::pull::PullHooks>,
 }
 
 impl ClientClipboard {
@@ -512,7 +512,7 @@ impl ClientClipboard {
         sync: SharedClipboard,
         options: Options,
         file_channel: FileChannel,
-        transfer_progress: Option<geserdesk_clipboard::pull::ProgressSink>,
+        transfer_hooks: Option<geserdesk_clipboard::pull::PullHooks>,
     ) -> Self {
         Self {
             sync,
@@ -524,7 +524,7 @@ impl ClientClipboard {
             pending_own_files: None,
             remote_files: None,
             last_pulled_seq: None,
-            transfer_progress,
+            transfer_hooks,
         }
     }
 
@@ -703,7 +703,7 @@ impl ClientClipboard {
             manifest,
             files::staging_dir(seq),
             self.options.clipboard_files_max_bytes,
-            self.transfer_progress.clone(),
+            self.transfer_hooks.clone(),
         );
     }
 
@@ -1232,7 +1232,7 @@ mod tests {
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             clipboard: None,
-            transfer_progress: None,
+            transfer_hooks: None,
         };
 
         // Run the client briefly; it should handshake and answer a keep-alive.
@@ -1320,7 +1320,7 @@ mod tests {
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             clipboard: None,
-            transfer_progress: None,
+            transfer_hooks: None,
         }
     }
 
@@ -1517,7 +1517,7 @@ mod tests {
                 }),
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 clipboard: None,
-                transfer_progress: None,
+                transfer_hooks: None,
             }
         }
 
@@ -1640,7 +1640,7 @@ mod tests {
                 // completes, so only the timeout ends this.
                 handshake_timeout: Duration::from_millis(300),
                 clipboard: None,
-                transfer_progress: None,
+                transfer_hooks: None,
             };
             let err = tokio::time::timeout(
                 Duration::from_secs(5),
@@ -1711,7 +1711,7 @@ mod tests {
                 }),
                 handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
                 clipboard: None,
-                transfer_progress: None,
+                transfer_hooks: None,
             };
             let err = connect(&config, RecordingSink::default())
                 .await

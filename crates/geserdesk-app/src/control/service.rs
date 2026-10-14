@@ -250,6 +250,10 @@ impl Service {
                 self.session.answer_prompt(trust);
                 Ok(Reply::Done)
             }
+            Command::CancelTransfer => {
+                self.session.cancel_transfers();
+                Ok(Reply::Done)
+            }
             Command::LogSnapshot => Ok(Reply::Log(self.log.snapshot(tracing::Level::TRACE))),
             Command::ClearLog => {
                 self.log.clear();

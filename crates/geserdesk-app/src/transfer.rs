@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
-use geserdesk_clipboard::pull::{ProgressSink, PullEvent, PullReport};
+use geserdesk_clipboard::pull::{CancelSwitch, ProgressSink, PullEvent, PullHooks, PullReport};
 
 /// How a transfer stands right now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +12,8 @@ use geserdesk_clipboard::pull::{ProgressSink, PullEvent, PullReport};
 pub enum TransferState {
     Running,
     Done,
+    /// Stopped on request; nothing was kept.
+    Cancelled,
     /// Abandoned; the text says why.
     Failed(String),
 }
@@ -58,6 +60,16 @@ impl TransferProgress {
                 bytes_total: 0,
                 state: TransferState::Done,
             },
+            PullEvent::Cancelled => Self {
+                seq: last_seq,
+                peer: report.peer,
+                file: String::new(),
+                file_index: 0,
+                file_count: 0,
+                bytes_done: 0,
+                bytes_total: 0,
+                state: TransferState::Cancelled,
+            },
             PullEvent::Failed(detail) => Self {
                 seq: last_seq,
                 peer: report.peer,
@@ -76,12 +88,14 @@ impl TransferProgress {
 #[derive(Clone)]
 pub struct TransferHub {
     live: broadcast::Sender<TransferProgress>,
+    cancel: CancelSwitch,
 }
 
 impl Default for TransferHub {
     fn default() -> Self {
         Self {
             live: broadcast::channel(256).0,
+            cancel: CancelSwitch::new(),
         }
     }
 }
@@ -93,6 +107,21 @@ impl TransferHub {
 
     pub fn subscribe(&self) -> broadcast::Receiver<TransferProgress> {
         self.live.subscribe()
+    }
+
+    /// Stop every files pull running now (this session's, as a client or for the
+    /// server's own screen). Pulls started afterwards are not affected.
+    pub fn cancel_all(&self) {
+        self.cancel.cancel();
+    }
+
+    /// What a client or server is given to report its pulls here and to have
+    /// them stopped by [`cancel_all`](Self::cancel_all).
+    pub fn pull_hooks(&self) -> PullHooks {
+        PullHooks {
+            progress: self.pull_sink(),
+            cancel: self.cancel.clone(),
+        }
     }
 
     /// A [`ProgressSink`] that reports every pull through this hub. One sink
@@ -160,6 +189,54 @@ mod tests {
         let got = rx.try_recv().unwrap();
         assert_eq!(got.seq, 0);
         assert_eq!(got.state, TransferState::Failed("putus".into()));
+    }
+
+    #[test]
+    fn a_cancelled_pull_is_reported_as_cancelled_and_not_as_a_failure() {
+        let hub = TransferHub::new();
+        let mut rx = hub.subscribe();
+        let hooks = hub.pull_hooks();
+        hooks.report(
+            "windows-pc",
+            PullEvent::Progress(Progress {
+                seq: 5,
+                file: "a.txt".into(),
+                file_index: 0,
+                file_count: 1,
+                bytes_done: 1,
+                bytes_total: 9,
+            }),
+        );
+        hooks.report("windows-pc", PullEvent::Cancelled);
+        assert_eq!(rx.try_recv().unwrap().state, TransferState::Running);
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got.state, TransferState::Cancelled);
+        assert_eq!(got.seq, 5, "the seq of the pull that was cancelled");
+        assert_eq!(got.peer, "windows-pc");
+    }
+
+    #[test]
+    fn cancel_all_reaches_pulls_already_started_and_not_ones_started_later() {
+        let hub = TransferHub::new();
+        let running = hub.pull_hooks().cancel.watch();
+        let also_running = hub.pull_hooks().cancel.watch(); // another pull, same session
+        assert!(!running.is_cancelled());
+
+        hub.cancel_all();
+        assert!(running.is_cancelled());
+        assert!(also_running.is_cancelled());
+        assert!(
+            !hub.pull_hooks().cancel.watch().is_cancelled(),
+            "a pull started after the cancel is not cancelled by it"
+        );
+    }
+
+    #[test]
+    fn the_cancelled_state_is_spelled_the_way_the_front_end_reads_it() {
+        let json = serde_json::to_string(&TransferState::Cancelled).unwrap();
+        assert_eq!(json, r#"{"kind":"cancelled"}"#);
+        let json = serde_json::to_string(&TransferState::Failed("x".into())).unwrap();
+        assert_eq!(json, r#"{"kind":"failed","detail":"x"}"#);
     }
 
     #[test]

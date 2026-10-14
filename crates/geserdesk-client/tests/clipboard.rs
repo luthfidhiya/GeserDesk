@@ -93,7 +93,7 @@ async fn rig_with(extra_options: &str, connect_a: bool) -> Rig {
             tls: None,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             clipboard: Some(ClipboardSync::new(clip.clone())),
-            transfer_progress: None,
+            transfer_hooks: None,
         };
         tokio::spawn(async move { connect(&cfg, NullSink).await });
         clip

@@ -249,7 +249,7 @@ pub struct LocalFiles {
     pub sync: ClipboardSync,
     pub enabled: bool,
     pub max_bytes: u64,
-    pub progress: Option<pull::ProgressSink>,
+    pub hooks: Option<pull::PullHooks>,
 }
 
 /// Where this server stages files pulled for its own screen, one folder per
@@ -271,14 +271,15 @@ pub struct LocalPullJob {
     pub manifest: FileManifest,
     pub dest: PathBuf,
     pub files_max_bytes: u64,
-    pub on_progress: Option<pull::ProgressSink>,
+    pub hooks: Option<pull::PullHooks>,
 }
 
 /// Pull `job.manifest` (transfer `job.seq`, owned by someone else right now)
 /// through `job.router` into `job.dest`, and on success put the top-level
 /// results on `job.sync`'s clipboard -- what this server's own screen should
 /// paste. Runs in its own task, so nothing else the router does waits on it;
-/// any failure is logged and abandoned, leaving the clipboard exactly as it was.
+/// any failure, or `job.hooks`' switch cancelling it, is logged and abandoned,
+/// leaving the clipboard exactly as it was.
 pub fn spawn_local_pull(job: LocalPullJob) {
     let LocalPullJob {
         router,
@@ -288,27 +289,33 @@ pub fn spawn_local_pull(job: LocalPullJob) {
         manifest,
         dest,
         files_max_bytes,
-        on_progress,
+        hooks,
     } = job;
+    // Taken now, not when the task first runs: a Cancel in between must count.
+    let cancel = hooks.as_ref().map(|h| h.cancel.watch());
     tokio::spawn(async move {
-        let max = effective_files_max(files_max_bytes);
-        let progress_sink = on_progress.clone();
+        let report = |event: pull::PullEvent| {
+            if let Some(h) = &hooks {
+                h.report(&peer, event);
+            }
+        };
+        let mut options = pull::PullOptions::new(effective_files_max(files_max_bytes), seq);
+        if let Some(cancel) = cancel {
+            options = options.cancel_with(cancel);
+        }
+        let progress_hooks = hooks.clone();
         let progress_peer = peer.clone();
-        let result = pull::pull_with_progress(
+        let result = pull::pull_with_options(
             &manifest,
             &dest,
-            max,
-            seq,
+            options,
             |index, offset, len| {
                 let router = Arc::clone(&router);
                 async move { router.request_local(seq, index, offset, len).await }
             },
             move |p| {
-                if let Some(cb) = &progress_sink {
-                    cb(pull::PullReport {
-                        peer: progress_peer.clone(),
-                        event: pull::PullEvent::Progress(p),
-                    });
+                if let Some(h) = &progress_hooks {
+                    h.report(&progress_peer, pull::PullEvent::Progress(p));
                 }
             },
         )
@@ -319,31 +326,21 @@ pub fn spawn_local_pull(job: LocalPullJob) {
                     entries = top.len(),
                     "pulled a client's files for this screen; updating the clipboard"
                 );
-                if let Err(e) = sync.apply_files(top).await {
-                    warn!(error = %e, "could not set the clipboard to the pulled files");
-                    if let Some(cb) = &on_progress {
-                        cb(pull::PullReport {
-                            peer: peer.clone(),
-                            event: pull::PullEvent::Failed(e.to_string()),
-                        });
+                match sync.apply_files(top).await {
+                    Ok(()) => report(pull::PullEvent::Done),
+                    Err(e) => {
+                        warn!(error = %e, "could not set the clipboard to the pulled files");
+                        report(pull::PullEvent::Failed(e.to_string()));
                     }
-                    return;
                 }
-                if let Some(cb) = &on_progress {
-                    cb(pull::PullReport {
-                        peer: peer.clone(),
-                        event: pull::PullEvent::Done,
-                    });
-                }
+            }
+            Err(pull::PullError::Cancelled) => {
+                info!("the pull of a client's files for this screen was cancelled");
+                report(pull::PullEvent::Cancelled);
             }
             Err(e) => {
                 warn!(error = %e, "could not pull files for this screen");
-                if let Some(cb) = &on_progress {
-                    cb(pull::PullReport {
-                        peer: peer.clone(),
-                        event: pull::PullEvent::Failed(e.to_string()),
-                    });
-                }
+                report(pull::PullEvent::ended_with(&e));
             }
         }
     });
@@ -580,7 +577,7 @@ mod tests {
             manifest,
             dest: dest.clone(),
             files_max_bytes: 0,
-            on_progress: None,
+            hooks: None,
         });
 
         let forwarded = tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
@@ -636,7 +633,7 @@ mod tests {
             manifest,
             dest: dest.clone(),
             files_max_bytes: 0,
-            on_progress: Some(sink),
+            hooks: Some(pull::PullHooks::new(sink)),
         });
 
         let req = match tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
@@ -659,5 +656,61 @@ mod tests {
         assert!(matches!(seen[0].event, PullEvent::Progress(_)));
         assert_eq!(seen[1].event, PullEvent::Done);
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_local_pull_is_reported_removed_and_leaves_the_clipboard_alone() {
+        use geserdesk_clipboard::pull::PullEvent;
+        use geserdesk_clipboard::MemoryClipboard;
+        use geserdesk_proto::clipboard::FileEntry;
+        use std::time::Duration;
+
+        let hub = Hub::new();
+        let mut owner_client = hub.register("b", mons()).unwrap();
+        let router = FileRouter::new(Arc::clone(&hub));
+        router.announce(Owner::Client("b".into()), 1, FileManifest::default());
+
+        let mem = MemoryClipboard::new();
+        let manifest = FileManifest {
+            entries: vec![FileEntry {
+                path: "f.txt".into(),
+                size: 3,
+                dir: false,
+            }],
+        };
+        let dest = staging_dir(424_244);
+        let _ = std::fs::remove_dir_all(&dest);
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = Arc::clone(&seen);
+        let hooks = pull::PullHooks::new(Arc::new(move |e| seen2.lock().unwrap().push(e)));
+        spawn_local_pull(LocalPullJob {
+            router: Arc::clone(&router),
+            sync: ClipboardSync::new(mem.clone()),
+            peer: "b".into(),
+            seq: 1,
+            manifest,
+            dest: dest.clone(),
+            files_max_bytes: 0,
+            hooks: Some(hooks.clone()),
+        });
+
+        // The owner is asked for the bytes and never answers; the user cancels.
+        tokio::time::timeout(Duration::from_secs(2), owner_client.outbox.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        hooks.cancel.cancel();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while seen.lock().unwrap().is_empty() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].peer, "b");
+        assert_eq!(seen[0].event, PullEvent::Cancelled);
+        assert_eq!(mem.files(), None, "the clipboard is untouched");
+        assert!(!dest.exists(), "what was staged is removed");
     }
 }

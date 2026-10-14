@@ -112,6 +112,16 @@ async fn a_controller_attaches_and_sees_the_daemon() {
 }
 
 #[tokio::test]
+async fn a_controller_can_cancel_transfers_whether_or_not_one_is_running() {
+    let dir = scratch("canceltransfer");
+    let (endpoint, _daemon) = start_daemon(&dir, false).await;
+    let remote = Remote::connect(&endpoint).await.unwrap();
+    // Nothing is being pulled: the command is still accepted, and changes nothing.
+    remote.cancel_transfer().await.unwrap();
+    assert_eq!(remote.status().await.unwrap(), Status::Stopped);
+}
+
+#[tokio::test]
 async fn a_wrong_token_or_a_missing_hello_is_refused() {
     let dir = scratch("refuse");
     let (endpoint, _daemon) = start_daemon(&dir, false).await;
