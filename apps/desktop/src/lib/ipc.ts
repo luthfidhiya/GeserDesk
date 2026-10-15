@@ -13,6 +13,7 @@ import type {
   Status,
   TransferProgress,
   Tuning,
+  TrustedClient,
   TrustPrompt,
 } from '@/types'
 
@@ -41,6 +42,8 @@ export const ipc = {
   /** Resolves to whether the layout was written to the config file. */
   saveLayout: (positions: Record<string, Point>, sizes: Record<string, Size | null>) =>
     invoke<boolean>('save_layout', { positions, sizes }),
+  /** The clients the server's config trusts, read from the file (no server needed). */
+  trustedClients: () => invoke<TrustedClient[]>('trusted_clients'),
   approveClient: (name: string, fingerprint: string) =>
     invoke<void>('approve_client', { name, fingerprint }),
   dismissClient: (name: string, fingerprint: string) =>

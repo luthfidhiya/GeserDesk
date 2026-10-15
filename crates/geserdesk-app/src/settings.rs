@@ -99,6 +99,38 @@ pub fn write_tuning(path: &Path, tuning: &Tuning) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// A client whose certificate the server trusts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrustedClient {
+    pub name: String,
+    pub fingerprint: String,
+}
+
+/// The clients the config at `path` trusts, read from the file alone (no server needs
+/// to be running). A file that is not there yet trusts nobody.
+pub fn trusted_clients(path: &Path) -> Result<Vec<TrustedClient>, String> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let config =
+        geserdesk_server::Config::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(config
+        .trusted
+        .into_iter()
+        .map(|(name, fp)| TrustedClient {
+            name,
+            fingerprint: fp.to_string(),
+        })
+        .collect())
+}
+
+/// Stop trusting `name` in the config at `path`, for when no server is running to do
+/// it. The next connection from that client needs approval again.
+pub fn revoke_trusted(path: &Path, name: &str) -> Result<(), String> {
+    geserdesk_server::admin::write_fingerprint(path, name, None)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Make the starting config if `path` is the default one and not there yet, so a
 /// first Start needs no setup. Any other path that is missing is left alone: it is
 /// more likely a typo than a file to invent.
@@ -313,6 +345,47 @@ mod config_tests {
         std::fs::write(&default, "# mine").unwrap();
         ensure_default_config(&default, &default).unwrap();
         assert_eq!(std::fs::read_to_string(&default).unwrap(), "# mine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_clients_are_read_from_the_file_and_revoked_in_it() {
+        let dir =
+            std::env::temp_dir().join(format!("geserdesk-app-trusted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.toml");
+        // No file yet: nobody is trusted, and that is not an error.
+        assert!(trusted_clients(&path).unwrap().is_empty());
+
+        let fp = geserdesk_tls::Fingerprint::of_cert(b"x");
+        std::fs::write(
+            &path,
+            format!(
+                "[[screens]]
+name = \"a\"
+[[screens]]
+name = \"b\"
+fingerprint = \"{fp}\"
+"
+            ),
+        )
+        .unwrap();
+        let listed = trusted_clients(&path).unwrap();
+        assert_eq!(
+            listed,
+            [TrustedClient {
+                name: "b".into(),
+                fingerprint: fp.to_string()
+            }]
+        );
+
+        revoke_trusted(&path, "b").unwrap();
+        assert!(trusted_clients(&path).unwrap().is_empty());
+        // The screen itself stays; only the trust goes.
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("name = \"b\""));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

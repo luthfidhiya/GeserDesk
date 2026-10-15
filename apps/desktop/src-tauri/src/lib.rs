@@ -92,6 +92,7 @@ pub fn run() {
             commands::trust::approve_client,
             commands::trust::dismiss_client,
             commands::trust::revoke_client,
+            commands::trust::trusted_clients,
             commands::trust::current_server_prompt,
             commands::trust::answer_server_prompt,
             commands::log::log_snapshot,

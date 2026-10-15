@@ -105,6 +105,12 @@ export interface Screen {
   trusted_fingerprint: string | null
 }
 
+/** A client the server trusts: the screen name it may use and its certificate. */
+export interface TrustedClient {
+  name: string
+  fingerprint: string
+}
+
 export interface Pending {
   name: string
   fingerprint: string
