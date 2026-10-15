@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { errorText, ipc } from '@/lib/ipc'
 import type { Settings } from '@/types'
 
@@ -80,29 +81,52 @@ export function ServerForm({ settings, disabled, onChange, onProblem }: Props) {
     }
   }
 
-  // The default file is made by Start, so it needs no setting. The field is for a
-  // different file, and stays shut unless that is in use or the file is missing.
-  const custom = defaultPath !== null && path.trim() !== defaultPath
+  // The default file is made by Start, so it needs no setting. Choosing another
+  // file is the exception, so that part stays shut unless it is in use or missing.
+  // The choice is its own state, so "Berkas lain" can be picked while the path
+  // still equals the default.
+  const [choice, setChoice] = useState<'default' | 'custom' | null>(null)
+  useEffect(() => {
+    if (defaultPath !== null && choice === null) setChoice(path.trim() === defaultPath ? 'default' : 'custom')
+  }, [defaultPath, choice, path])
+
+  const custom = choice === 'custom'
   const needsAttention = custom && !exists
 
+  const pick = (next: 'default' | 'custom') => {
+    setChoice(next)
+    if (next === 'default' && defaultPath) set(defaultPath)
+  }
+
   return (
-    <details className="group rounded-lg border p-3" open={needsAttention || undefined}>
+    <details className="rounded-lg border p-3" open={needsAttention || undefined}>
       <summary className="cursor-pointer text-sm text-muted-foreground">
         Lanjutan{custom ? ': memakai berkas konfigurasi lain' : ''}
       </summary>
       <div className="mt-3 space-y-3">
-        <div className="grid grid-cols-[10rem_1fr_auto] items-center gap-x-3">
-          <Label htmlFor="cfg">Berkas konfigurasi</Label>
-          <Input id="cfg" disabled={disabled} value={path} onChange={(e) => set(e.target.value)} />
-          <Button variant="outline" disabled={disabled} onClick={() => void browse()}>
+        <div className="text-sm">Berkas konfigurasi</div>
+        <RadioGroup value={choice ?? 'default'} onValueChange={(v) => pick(v as 'default' | 'custom')} disabled={disabled}>
+          <div className="flex items-center gap-2">
+            <RadioGroupItem value="default" id="cfg-default" />
+            <Label htmlFor="cfg-default">Bawaan (dibuat otomatis saat Start)</Label>
+          </div>
+          <div className="flex items-center gap-2">
+            <RadioGroupItem value="custom" id="cfg-custom" />
+            <Label htmlFor="cfg-custom">Berkas lain</Label>
+          </div>
+        </RadioGroup>
+        <div className="grid grid-cols-[1fr_auto] items-center gap-x-3">
+          <Input
+            id="cfg"
+            aria-label="Path berkas konfigurasi"
+            disabled={disabled || !custom}
+            value={path}
+            onChange={(e) => set(e.target.value)}
+          />
+          <Button variant="outline" disabled={disabled || !custom} onClick={() => void browse()}>
             Pilih…
           </Button>
         </div>
-        {custom && (
-          <Button variant="link" size="sm" className="h-auto p-0 text-xs" disabled={disabled} onClick={() => defaultPath && set(defaultPath)}>
-            Kembali ke berkas bawaan
-          </Button>
-        )}
         {needsAttention && !disabled && (
           <Button variant="secondary" onClick={() => void create()}>
             Buat berkas konfigurasi awal
