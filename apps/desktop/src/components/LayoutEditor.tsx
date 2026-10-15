@@ -188,15 +188,6 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
             onRevoke={(n) => void revoke(n)}
             onEditing={setTyping}
           />
-          {desk.tls && desk.server_fingerprint && (
-            <div className="rounded-lg border p-3">
-              <div className="font-semibold">Sidik jari server ini</div>
-              <p className="mb-1 text-xs text-muted-foreground">
-                Client menampilkan angka ini saat pertama menyambung. Pastikan sama.
-              </p>
-              <code className="break-all font-mono text-xs">{desk.server_fingerprint}</code>
-            </div>
-          )}
           <div className="rounded-lg border p-3">
             <div className="flex flex-wrap gap-2">
               <Button disabled={bad.size > 0 || !dirty} onClick={() => void save()}>

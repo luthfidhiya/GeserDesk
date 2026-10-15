@@ -93,11 +93,11 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
                   title={connected.has(name) ? 'terhubung' : 'tidak terhubung'}
                   style={{ background: connected.has(name) ? 'var(--ok)' : 'var(--muted-foreground)' }}
                 />
+                {fp && <RevokeButton onConfirm={() => void revoke(name)} />}
               </div>
               <p className="text-xs text-muted-foreground">
                 {connected.has(name) ? `Terhubung · ${monitors(name).length} monitor: ${sizes}` : 'Tidak terhubung'}
               </p>
-              {fp && <RevokeButton onConfirm={() => void revoke(name)} />}
             </div>
           )
         })}

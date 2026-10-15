@@ -1,3 +1,4 @@
+import { ShieldOff } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -45,6 +46,7 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
                 title={s.connected ? 'terhubung' : 'tidak terhubung'}
                 style={{ background: s.connected ? 'var(--ok)' : 'var(--muted-foreground)' }}
               />
+              {s.trusted_fingerprint && <RevokeButton onConfirm={() => onRevoke(s.name)} />}
             </div>
             <p className="mb-1 text-xs text-muted-foreground">
               {s.connected ? 'Terhubung' : 'Tidak terhubung'} · {s.monitors.length} monitor: {sizes}
@@ -57,7 +59,6 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
                 Tidak menyentuh layar lain: kursor tidak bisa pindah ke sini.
               </p>
             )}
-            {s.trusted_fingerprint && <RevokeButton onConfirm={() => onRevoke(s.name)} />}
             <div className="mt-2 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
               {(['x', 'y'] as const).map((axis) => (
                 <div key={axis}>
@@ -113,14 +114,16 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
   )
 }
 
-/** Two clicks to revoke: the first arms it (and turns it red) for a few seconds. */
+/** An icon that revokes trust in two clicks: the first arms it (red, "Yakin?") for a few seconds. */
 export function RevokeButton({ onConfirm }: { onConfirm: () => void }) {
   const [armed, setArmed] = useState(false)
   const timer = useRef<number | undefined>(undefined)
   return (
     <Button
-      variant={armed ? 'destructive' : 'outline'}
-      size="sm"
+      variant={armed ? 'destructive' : 'ghost'}
+      size={armed ? 'sm' : 'icon-sm'}
+      title={armed ? 'Klik lagi untuk mencabut' : 'Cabut kepercayaan'}
+      aria-label="Cabut kepercayaan"
       onClick={(e) => {
         e.stopPropagation()
         if (!armed) {
@@ -133,7 +136,8 @@ export function RevokeButton({ onConfirm }: { onConfirm: () => void }) {
         onConfirm()
       }}
     >
-      {armed ? 'Yakin? Klik lagi' : 'Cabut kepercayaan'}
+      <ShieldOff />
+      {armed && 'Yakin?'}
     </Button>
   )
 }
