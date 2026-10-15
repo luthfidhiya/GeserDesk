@@ -53,6 +53,8 @@ export const ipc = {
   logSnapshot: () => invoke<LogLine[]>('log_snapshot'),
   clearLog: () => invoke<void>('clear_log'),
 
+  /** The "Tentang GeserDesk" box. */
+  showAbout: () => invoke<void>('show_about'),
   /** Open (or raise) a tool window: `settings`, `terminal` or `log`. */
   openTool: (tool: 'settings' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
   /** Run `geserdesk <line>` (the CLI beside the app). Output and the end arrive as events with the id it returns. */

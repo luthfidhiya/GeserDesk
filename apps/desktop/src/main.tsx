@@ -31,6 +31,7 @@ const mainMenus: Menu[] = [
       { label: 'Log', run: () => void ipc.openTool('log') },
     ],
   },
+  { label: 'Bantuan', items: [{ label: 'Tentang GeserDesk', run: () => void ipc.showAbout() }] },
 ]
 const tool = params.get('window') as keyof typeof tools | null
 const page = tool && tools[tool]

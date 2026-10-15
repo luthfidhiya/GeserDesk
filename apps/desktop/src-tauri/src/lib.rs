@@ -7,6 +7,7 @@
 mod commands;
 mod events;
 mod link;
+mod menu;
 mod state;
 mod terminal;
 mod transfer_window;
@@ -76,6 +77,7 @@ pub fn run() {
             commands::session::shutdown_daemon,
             commands::session::own_fingerprint,
             windows::open_tool,
+            menu::show_about,
             terminal::terminal_run,
             terminal::terminal_kill,
             commands::settings::load_settings,
