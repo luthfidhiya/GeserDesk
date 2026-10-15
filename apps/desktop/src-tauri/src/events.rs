@@ -5,7 +5,6 @@ pub const STATUS: &str = "session://status";
 pub const LOG: &str = "log://line";
 pub const PROMPT: &str = "trust://prompt";
 pub const DAEMON: &str = "daemon://info";
-pub const NAVIGATE: &str = "ui://navigate";
 pub const APPROVALS: &str = "ui://approvals";
 pub const SETTINGS: &str = "settings://changed";
 pub const TERMINAL_OUT: &str = "terminal://out";

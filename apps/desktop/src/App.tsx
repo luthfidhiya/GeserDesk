@@ -28,7 +28,6 @@ export default function App() {
   useTheme(settings?.theme)
 
   // The tray's "Pengaturan layar" asks the window to show the monitor tab (server only).
-  useEffect(() => on<string>(EVENTS.navigate, (to) => to === 'layout' && setTab('layout')), [])
 
   // A computer asking to connect: the daemon says so, and the requests come up over this window.
   const [approvalsOpen, setApprovalsOpen] = useState(false)

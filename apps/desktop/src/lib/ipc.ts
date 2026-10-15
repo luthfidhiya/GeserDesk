@@ -89,7 +89,6 @@ export const EVENTS = {
   log: 'log://line',
   prompt: 'trust://prompt',
   daemon: 'daemon://info',
-  navigate: 'ui://navigate',
   approvals: 'ui://approvals',
   settings: 'settings://changed',
   terminalOut: 'terminal://out',

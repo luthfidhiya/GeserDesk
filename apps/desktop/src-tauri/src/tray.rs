@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The system tray: shows whether GeserDesk is running, and offers Start/Stop,
+//! The system tray: shows whether GeserDesk is running, and offers to start or stop the daemon,
 //! the window and Quit without opening the window. Starting and stopping go
 //! through the daemon, like everything else in the app.
 
+use geserdesk_app::Mode;
 use geserdesk_app::Status;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, Wry};
+use tauri::{AppHandle, Manager, Wry};
 use tracing::{error, info, warn};
 
-use crate::events::NAVIGATE;
 use crate::state::AppState;
 
 const IDLE: &[u8] = include_bytes!("../icons/tray-idle.png");
@@ -18,7 +18,6 @@ const ON: &[u8] = include_bytes!("../icons/tray-on.png");
 const ERROR: &[u8] = include_bytes!("../icons/tray-error.png");
 
 const ID_OPEN: &str = "open";
-const ID_LAYOUT: &str = "layout";
 const ID_TOGGLE: &str = "toggle";
 const ID_QUIT: &str = "quit";
 const ID_QUIT_STOP: &str = "quit_stop";
@@ -44,8 +43,7 @@ pub fn build(app: &AppHandle) {
 
 fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
     let open = MenuItem::with_id(app, ID_OPEN, "Buka jendela", true, None::<&str>)?;
-    let layout = MenuItem::with_id(app, ID_LAYOUT, "Pengaturan monitor", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start", true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start daemon", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(
         app,
         ID_QUIT,
@@ -59,7 +57,6 @@ fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
         app,
         &[
             &open,
-            &layout,
             &PredefinedMenuItem::separator(app)?,
             &toggle,
             &PredefinedMenuItem::separator(app)?,
@@ -74,10 +71,6 @@ fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             ID_OPEN => show_window(app),
-            ID_LAYOUT => {
-                show_window(app);
-                let _ = app.emit(NAVIGATE, "layout");
-            }
             ID_TOGGLE => toggle_session(app),
             ID_QUIT => quit(app, false),
             ID_QUIT_STOP => quit(app, true),
@@ -97,7 +90,7 @@ fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
     Ok(Handles { tray, toggle })
 }
 
-/// Update the icon, tooltip and Start/Stop label to match `status`.
+/// Update the icon, tooltip and start/stop label to match `status`.
 pub fn reflect(app: &AppHandle, status: &Status) {
     let Some(h) = app.try_state::<Handles>() else {
         return;
@@ -114,7 +107,18 @@ pub fn reflect(app: &AppHandle, status: &Status) {
     let _ = h
         .tray
         .set_tooltip(Some(format!("GeserDesk: {}", label(status))));
-    let _ = h.toggle.set_text(if running { "Stop" } else { "Start" });
+    // Say which part the daemon plays (or will play): the one running, else the saved mode.
+    let state = app.state::<AppState>();
+    let mode = state
+        .info()
+        .and_then(|d| d.info.mode)
+        .unwrap_or(state.settings().mode);
+    let part = match mode {
+        Mode::Server => "server",
+        Mode::Client => "client",
+    };
+    let verb = if running { "Stop" } else { "Start" };
+    let _ = h.toggle.set_text(format!("{verb} daemon ({part})"));
 }
 
 fn label(status: &Status) -> String {
