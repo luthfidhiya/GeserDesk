@@ -6,6 +6,7 @@ import { ScreenSwitch } from '@/components/ScreenSwitch'
 import { Badge } from '@/components/ui/badge'
 import { errorText, ipc } from '@/lib/ipc'
 import type { DeskSnapshot, Pending, TrustedClient } from '@/types'
+import { useT } from '@/lib/i18n'
 
 const POLL_MS = 2000
 
@@ -26,6 +27,7 @@ interface Props {
  * connected without being trusted (TLS off) is listed too.
  */
 export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answering, onClose }: Props) {
+  const t = useT()
   const [trusted, setTrusted] = useState<TrustedClient[] | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
 
@@ -49,7 +51,7 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
       await ipc.revokeClient(name)
       await Promise.all([load(), refresh()])
     } catch (e) {
-      setProblem(`Gagal: ${errorText(e)}`)
+      setProblem(`${t('Gagal', 'Failed')}: ${errorText(e)}`)
     }
   }
 
@@ -58,7 +60,7 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
       await ipc.setScreenDisabled(name, disabled)
       await Promise.all([load(), refresh()])
     } catch (e) {
-      setProblem(`Gagal: ${errorText(e)}`)
+      setProblem(`${t('Gagal', 'Failed')}: ${errorText(e)}`)
     }
   }
 
@@ -73,10 +75,10 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
   names.sort((a, b) => Number(connected.has(b)) - Number(connected.has(a)) || a.localeCompare(b))
 
   return (
-    <Panel title="Daftar client" onClose={onClose}>
+    <Panel title={t('Daftar client', 'Clients')} onClose={onClose}>
       {desk && desk.pending.length > 0 && (
         <section className="space-y-1">
-          <h2 className="text-sm font-semibold">Menunggu persetujuan</h2>
+          <h2 className="text-sm font-semibold">{t('Menunggu persetujuan', 'Waiting for approval')}</h2>
           <PendingApprovals pending={desk.pending} onTrust={onTrust} onDismiss={onDismiss} />
           {answering && (
             <p className="text-sm" style={{ color: 'var(--bad)' }}>
@@ -86,7 +88,7 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
         </section>
       )}
       {trusted && names.length === 0 && (
-        <p className="text-sm text-muted-foreground">Belum ada client yang dipercaya.</p>
+        <p className="text-sm text-muted-foreground">{t('Belum ada client yang dipercaya.', 'No trusted clients yet.')}</p>
       )}
       <div className="divide-y">
         {names.map((name) => {
@@ -98,7 +100,7 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
                 {name}
                 {fp && (
                   <Badge variant="outline" title={fp} style={{ color: 'var(--ok)' }}>
-                    terpercaya
+                    {t('terpercaya', 'trusted')}
                   </Badge>
                 )}
                 <span className="ml-auto">
@@ -113,10 +115,10 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
               </div>
               <p className="text-xs text-muted-foreground">
                 {isOff(name)
-                  ? 'Nonaktif'
+                  ? t('Nonaktif', 'Off')
                   : connected.has(name)
-                    ? `Terhubung · ${monitors(name).length} monitor: ${sizes}`
-                    : 'Tidak terhubung'}
+                    ? t(`Terhubung · ${monitors(name).length} monitor: ${sizes}`, `Connected · ${monitors(name).length} monitor(s): ${sizes}`)
+                    : t('Tidak terhubung', 'Not connected')}
               </p>
             </div>
           )

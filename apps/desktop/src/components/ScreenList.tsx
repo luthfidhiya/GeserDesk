@@ -8,6 +8,7 @@ import { isStretched, neighbours, union } from '@/lib/geometry'
 import { ScreenSwitch } from '@/components/ScreenSwitch'
 import { screenColor } from '@/components/ScreenStage'
 import type { Draft, Screen } from '@/types'
+import { useT } from '@/lib/i18n'
 
 interface Props {
   screens: Screen[]
@@ -23,6 +24,7 @@ interface Props {
 }
 
 export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSize, onResetSize, onRevoke, onDisabled, onEditing }: Props) {
+  const t = useT()
   return (
     <div className="space-y-2">
       {screens.map((s, i) => {
@@ -40,11 +42,11 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
               {s.local && <Badge variant="secondary">server</Badge>}
               {s.trusted_fingerprint && (
                 <Badge variant="outline" title={s.trusted_fingerprint} style={{ color: 'var(--ok)' }}>
-                  terpercaya
+                  {t('terpercaya', 'trusted')}
                 </Badge>
               )}
               {s.local ? (
-                <span className="ml-auto size-2.5 rounded-full" title="terhubung" style={{ background: 'var(--ok)' }} />
+                <span className="ml-auto size-2.5 rounded-full" title={t('terhubung', 'connected')} style={{ background: 'var(--ok)' }} />
               ) : (
                 <span className="ml-auto">
                   <ScreenSwitch name={s.name} connected={s.connected} disabled={s.disabled} onToggle={(d) => onDisabled(s.name, d)} />
@@ -53,15 +55,16 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
               {s.trusted_fingerprint && <RevokeButton onConfirm={() => onRevoke(s.name)} />}
             </div>
             <p className="mb-1 text-xs text-muted-foreground">
-              {s.disabled ? 'Nonaktif' : s.connected ? 'Terhubung' : 'Tidak terhubung'}
-              {s.disabled && s.connected && ' (tetap tersambung)'} · {s.monitors.length} monitor: {sizes}
-              {s.placeholder && ' (perkiraan, belum pernah terhubung)'}
+              {s.disabled ? t('Nonaktif', 'Off') : s.connected ? t('Terhubung', 'Connected') : t('Tidak terhubung', 'Not connected')}
+              {s.disabled && s.connected && t(' (tetap tersambung)', ' (still connected)')} · {s.monitors.length}{' '}
+              {t('monitor', 'monitor(s)')}: {sizes}
+              {s.placeholder && t(' (perkiraan, belum pernah terhubung)', ' (estimated, never connected)')}
             </p>
             {s.disabled ? null : near.length > 0 ? (
-              <p className="mb-1 text-xs text-muted-foreground">Bersebelahan: {near.join(', ')}</p>
+              <p className="mb-1 text-xs text-muted-foreground">{t('Bersebelahan', 'Next to')}: {near.join(', ')}</p>
             ) : (
               <p className="mb-1 text-xs" style={{ color: 'var(--warn)' }}>
-                Tidak bersentuhan dengan layar lain: kursor tak bisa pindah ke sini.
+                {t('Tidak bersentuhan dengan layar lain: kursor tak bisa pindah ke sini.', 'Touches no other screen: the cursor cannot move here.')}
               </p>
             )}
             <div className="mt-2 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
@@ -86,11 +89,11 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
             <div className="mt-2 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
               {(['w', 'h'] as const).map((axis) => (
                 <div key={axis}>
-                  <Label className="text-xs text-muted-foreground">{axis === 'w' ? 'Lebar' : 'Tinggi'}</Label>
+                  <Label className="text-xs text-muted-foreground">{axis === 'w' ? t('Lebar', 'Width') : t('Tinggi', 'Height')}</Label>
                   <Input
                     type="number"
                     step={10}
-                    aria-label={`${s.name} ${axis === 'w' ? 'lebar' : 'tinggi'}`}
+                    aria-label={`${s.name} ${axis === 'w' ? t('lebar', 'width') : t('tinggi', 'height')}`}
                     value={draft[s.name]?.[axis] ?? union(s.monitors)[axis]}
                     onFocus={() => onEditing(true)}
                     onBlur={() => onEditing(false)}
@@ -105,7 +108,7 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
             {isStretched(s, draft[s.name]) && (
               <div className="mt-1 flex items-center justify-between gap-2" onClick={(e) => e.stopPropagation()}>
                 <span className="text-xs text-muted-foreground">
-                  Diregangkan dari {union(s.monitors).w}×{union(s.monitors).h}
+                  {t('Diregangkan dari', 'Stretched from')} {union(s.monitors).w}×{union(s.monitors).h}
                 </span>
                 <Button variant="outline" size="sm" onClick={() => onResetSize(s.name)}>
                   Reset
@@ -121,14 +124,15 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
 
 /** An icon that revokes trust in two clicks: the first arms it (red, "Yakin?") for a few seconds. */
 export function RevokeButton({ onConfirm }: { onConfirm: () => void }) {
+  const t = useT()
   const [armed, setArmed] = useState(false)
   const timer = useRef<number | undefined>(undefined)
   return (
     <Button
       variant={armed ? 'destructive' : 'ghost'}
       size={armed ? 'sm' : 'icon-sm'}
-      title={armed ? 'Klik lagi untuk mencabut' : 'Cabut kepercayaan'}
-      aria-label="Cabut kepercayaan"
+      title={armed ? t('Klik lagi untuk mencabut', 'Click again to revoke') : t('Cabut kepercayaan', 'Revoke trust')}
+      aria-label={t('Cabut kepercayaan', 'Revoke trust')}
       onClick={(e) => {
         e.stopPropagation()
         if (!armed) {
@@ -142,7 +146,7 @@ export function RevokeButton({ onConfirm }: { onConfirm: () => void }) {
       }}
     >
       <ShieldOff />
-      {armed && 'Yakin?'}
+      {armed && t('Yakin?', 'Sure?')}
     </Button>
   )
 }

@@ -1,3 +1,5 @@
+import { useT } from '@/lib/i18n'
+
 /**
  * The status dot of a client's screen, which is also its switch: green while connected,
  * grey while not, a red ring when the screen is off. Clicking turns it off or on.
@@ -13,13 +15,18 @@ export function ScreenSwitch({
   disabled: boolean
   onToggle: (disabled: boolean) => void
 }) {
+  const t = useT()
   return (
     <button
       className="grid size-6 place-items-center rounded hover:bg-muted"
       title={
-        disabled ? 'Nonaktif. Klik untuk mengaktifkan' : `${connected ? 'Terhubung' : 'Tidak terhubung'}. Klik untuk menonaktifkan`
+        disabled
+          ? t('Nonaktif. Klik untuk mengaktifkan', 'Off. Click to turn on')
+          : connected
+            ? t('Terhubung. Klik untuk menonaktifkan', 'Connected. Click to turn off')
+            : t('Tidak terhubung. Klik untuk menonaktifkan', 'Not connected. Click to turn off')
       }
-      aria-label={disabled ? `Aktifkan ${name}` : `Nonaktifkan ${name}`}
+      aria-label={disabled ? t(`Aktifkan ${name}`, `Turn on ${name}`) : t(`Nonaktifkan ${name}`, `Turn off ${name}`)}
       onClick={(e) => {
         e.stopPropagation()
         onToggle(!disabled)

@@ -1,6 +1,7 @@
 import { Panel } from '@/components/Panel'
 import { PendingApprovals } from '@/components/PendingApprovals'
 import type { Pending } from '@/types'
+import { useT } from '@/lib/i18n'
 
 interface Props {
   pending: Pending[]
@@ -12,8 +13,9 @@ interface Props {
 
 /** Computers asking to connect, to be trusted or turned away. */
 export function ApprovalsPanel({ pending, problem, onTrust, onDismiss, onClose }: Props) {
+  const t = useT()
   return (
-    <Panel title="Permintaan sambung" onClose={onClose}>
+    <Panel title={t('Permintaan sambung', 'Connection requests')} onClose={onClose}>
       <PendingApprovals pending={pending} onTrust={onTrust} onDismiss={onDismiss} />
       {problem && (
         <p className="text-sm" style={{ color: 'var(--bad)' }}>

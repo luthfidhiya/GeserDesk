@@ -1,6 +1,7 @@
 import { X } from 'lucide-react'
 import { useEffect, useRef, useState, type PointerEvent, type ReactNode } from 'react'
 import appIcon from '@/assets/app-icon.png'
+import { useT } from '@/lib/i18n'
 
 /** Where a panel may be dragged to, as an offset from where it opens: always with its header in reach. */
 function clamp(x: number, y: number) {
@@ -17,6 +18,7 @@ function clamp(x: number, y: number) {
  * the header; a click outside or Escape closes it.
  */
 export function Panel({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const t = useT()
   const [offset, setOffset] = useState({ x: 0, y: 0 })
   const grab = useRef<{ x: number; y: number; from: { x: number; y: number } } | null>(null)
 
@@ -60,7 +62,7 @@ export function Panel({ title, onClose, children }: { title: string; onClose: ()
           <span className="flex-1 truncate font-medium">{title}</span>
           <button
             className="inline-flex size-6 items-center justify-center rounded hover:bg-accent hover:text-foreground"
-            aria-label="Tutup"
+            aria-label={t('Tutup', 'Close')}
             onClick={onClose}
           >
             <X size={14} />

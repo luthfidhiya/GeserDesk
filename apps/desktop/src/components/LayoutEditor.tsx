@@ -6,6 +6,7 @@ import { autoArrange, deskSize, MIN_DESK_SIZE, overlapping, union, unstretched }
 import { errorText, ipc } from '@/lib/ipc'
 import { openClients } from '@/lib/panels'
 import type { DeskSnapshot, Draft, Placement, Point, Size } from '@/types'
+import { useT } from '@/lib/i18n'
 
 type Msg = { text: string; kind: 'ok' | 'err' | 'info' } | null
 
@@ -20,6 +21,7 @@ interface Props {
 
 /** Arrange the machines on the desk. Who may connect is in the clients window. */
 export function LayoutEditor({ desk, refresh, onBusy }: Props) {
+  const t = useT()
   const [draft, setDraft] = useState<Draft>({})
   const [dirty, setDirty] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
@@ -68,7 +70,7 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   const resetSize = (name: string) => {
     setDraft((d) => ({ ...d, [name]: unstretched(d[name]) }))
     setDirty(true)
-    setMsg({ text: `Ukuran "${name}" direset. Klik Simpan.`, kind: 'info' })
+    setMsg({ text: t(`Ukuran "${name}" direset. Klik Simpan.`, `"${name}" is back to its real size. Click Save.`), kind: 'info' })
   }
 
   // Arrow keys nudge the selected machine; Shift = 1 px.
@@ -92,12 +94,12 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
       await refresh()
       if (ok) setMsg({ text: ok, kind: 'ok' })
     } catch (e) {
-      setMsg({ text: `Gagal: ${errorText(e)}`, kind: 'err' })
+      setMsg({ text: `${t('Gagal', 'Failed')}: ${errorText(e)}`, kind: 'err' })
     }
   }
 
   const save = async () => {
-    setMsg({ text: 'Menyimpan…', kind: 'info' })
+    setMsg({ text: t('Menyimpan…', 'Saving…'), kind: 'info' })
     try {
       // Every machine's size is sent: a real size is `null`, which also undoes a stretch.
       const positions: Record<string, Point> = {}
@@ -111,8 +113,8 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
       setDirty(false)
       setMsg({
         text: saved
-          ? 'Tersimpan dan berlaku.'
-          : 'Berlaku, tapi tidak tersimpan (config tanpa berkas).',
+          ? t('Tersimpan dan berlaku.', 'Saved and in effect.')
+          : t('Berlaku, tapi tidak tersimpan (config tanpa berkas).', 'In effect, but not saved (the config has no file).'),
         kind: 'ok',
       })
     } catch (e) {
@@ -123,25 +125,25 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   const revert = async () => {
     setDirty(false)
     await refresh()
-    setMsg({ text: 'Perubahan dibatalkan.', kind: 'info' })
+    setMsg({ text: t('Perubahan dibatalkan.', 'Changes undone.'), kind: 'info' })
   }
 
   const arrange = () => {
     setDraft(autoArrange(screens))
     setDirty(true)
-    setMsg({ text: 'Disusun berjajar. Klik Simpan.', kind: 'info' })
+    setMsg({ text: t('Disusun berjajar. Klik Simpan.', 'Placed side by side. Click Save.'), kind: 'info' })
   }
 
   const revoke = (name: string) =>
     run(
       () => ipc.revokeClient(name),
-      `"${name}" dicabut dan diputus.`,
+      t(`"${name}" dicabut dan diputus.`, `"${name}" revoked and disconnected.`),
     )
 
   const setDisabled = (name: string, disabled: boolean) =>
     run(
       () => ipc.setScreenDisabled(name, disabled),
-      disabled ? `"${name}" dinonaktifkan.` : `"${name}" diaktifkan.`,
+      disabled ? t(`"${name}" dinonaktifkan.`, `"${name}" turned off.`) : t(`"${name}" diaktifkan.`, `"${name}" turned on.`),
     )
 
   if (!complete) return null
@@ -150,12 +152,14 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
     <div className="flex h-full min-h-0 flex-col">
       {!desk.tls && (
         <div className="mb-3 rounded-lg border p-3 text-sm" style={{ borderColor: 'var(--bad)', color: 'var(--bad)' }}>
-          TLS mati: ketikan dikirim tanpa enkripsi dan komputer mana pun bisa tersambung. Hanya untuk
-          debugging.
+          {t(
+            'TLS mati: ketikan dikirim tanpa enkripsi dan komputer mana pun bisa tersambung. Hanya untuk debugging.',
+            'TLS is off: keystrokes are sent unencrypted and any computer can connect. For debugging only.',
+          )}
         </div>
       )}
       <p className="mb-2 text-xs text-muted-foreground">
-        {desk.config_path ? `Disimpan ke ${desk.config_path}` : 'Tanpa berkas config: tidak disimpan'}
+        {desk.config_path ? t(`Disimpan ke ${desk.config_path}`, `Saved to ${desk.config_path}`) : t('Tanpa berkas config: tidak disimpan', 'No config file: not saved')}
       </p>
       <div className="grid min-h-0 flex-1 grid-cols-[1fr_20rem] gap-4">
         <div className="flex min-h-0 flex-col rounded-lg border">
@@ -172,15 +176,17 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
             />
           </div>
           <p className="p-2 text-xs text-muted-foreground">
-            Seret kotak untuk menggeser. Tarik kotak kecil di tepi layar yang dipilih untuk meregangkan. Tepi
-            menempel otomatis (tahan <kbd>Alt</kbd> untuk tanpa tempel). Panah menggeser 10 px, <kbd>Shift</kbd> 1 px.
+            {t(
+              'Seret kotak untuk menggeser. Tarik kotak kecil di tepi layar yang dipilih untuk meregangkan. Tepi menempel otomatis (tahan Alt untuk tanpa tempel). Panah menggeser 10 px, Shift 1 px.',
+              'Drag a box to move it. Pull the small handles on the selected screen to stretch it. Edges snap (hold Alt not to). Arrows move 10 px, Shift 1 px.',
+            )}
           </p>
         </div>
         <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
           <div className="flex items-center justify-between gap-2 rounded-lg border px-3 py-2">
-            <span className="text-sm font-medium">Daftar client</span>
+            <span className="text-sm font-medium">{t('Daftar client', 'Clients')}</span>
             <Button variant="outline" size="sm" onClick={openClients}>
-              Buka
+              {t('Buka', 'Open')}
             </Button>
           </div>
           <ScreenList
@@ -197,19 +203,19 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
           />
           <div className="rounded-lg border p-3">
             <div className="flex gap-2">
-              <Button title="Simpan dan terapkan" disabled={bad.size > 0 || !dirty} onClick={() => void save()}>
-                Simpan
+              <Button title={t('Simpan dan terapkan', 'Save and apply')} disabled={bad.size > 0 || !dirty} onClick={() => void save()}>
+                {t('Simpan', 'Save')}
               </Button>
-              <Button title="Batalkan perubahan" variant="outline" disabled={!dirty} onClick={() => void revert()}>
-                Batal
+              <Button title={t('Batalkan perubahan', 'Undo the changes')} variant="outline" disabled={!dirty} onClick={() => void revert()}>
+                {t('Batal', 'Undo')}
               </Button>
-              <Button title="Susun berjajar otomatis" variant="outline" onClick={arrange}>
-                Susun
+              <Button title={t('Susun berjajar otomatis', 'Place side by side')} variant="outline" onClick={arrange}>
+                {t('Susun', 'Arrange')}
               </Button>
             </div>
             {bad.size > 0 ? (
               <p className="mt-2 text-sm" style={{ color: 'var(--bad)' }}>
-                Ada layar yang bertumpuk (merah). Geser agar terpisah.
+                {t('Ada layar yang bertumpuk (merah). Geser agar terpisah.', 'Some screens overlap (red). Move them apart.')}
               </p>
             ) : (
               msg && (
