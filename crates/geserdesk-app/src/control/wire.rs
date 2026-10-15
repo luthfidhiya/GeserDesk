@@ -21,7 +21,7 @@ use crate::trust::TrustPrompt;
 
 /// Bumped when the messages change shape. A daemon outlives the app that
 /// started it, so the two can disagree after an upgrade.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 /// Longest line either side accepts, so a stray peer cannot make us buffer
 /// without end.
@@ -174,8 +174,20 @@ pub enum Event {
     Log(LogLine),
     /// A files pull is in progress, or just finished.
     Transfer(crate::transfer::TransferProgress),
+    /// A computer asked a running server to trust it, and no request from it was
+    /// waiting already.
+    ClientRequest(ClientRequest),
     /// The daemon is about to exit.
     Closing,
+}
+
+/// Who asked to be trusted: enough to say so, the full request is in the desk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientRequest {
+    pub name: String,
+    pub fingerprint: String,
+    /// Where it connected from (`ip:port`).
+    pub addr: String,
 }
 
 /// A line from the daemon to a controller.
@@ -332,6 +344,13 @@ mod tests {
                     server: "s".into(),
                     fingerprint: "SHA256:00".into(),
                 })),
+            },
+            ToController::Event {
+                event: Event::ClientRequest(ClientRequest {
+                    name: "win".into(),
+                    fingerprint: "SHA256:00".into(),
+                    addr: "10.0.0.2:5000".into(),
+                }),
             },
             ToController::Event {
                 event: Event::Closing,

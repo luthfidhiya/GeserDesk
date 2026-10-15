@@ -18,7 +18,7 @@ use geserdesk_server::{Config, DeskState};
 use geserdesk_tls::Identity;
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Handle;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
@@ -89,6 +89,8 @@ pub struct Session {
     started: AtomicU64,
     desk: Mutex<Option<Arc<DeskState>>>,
     transfers: crate::transfer::TransferHub,
+    /// Computers asking the running server to trust them; outlives each server run.
+    requests: broadcast::Sender<crate::control::ClientRequest>,
 }
 
 impl Session {
@@ -101,7 +103,13 @@ impl Session {
             started: AtomicU64::new(0),
             desk: Mutex::new(None),
             transfers: crate::transfer::TransferHub::new(),
+            requests: broadcast::channel(16).0,
         })
+    }
+
+    /// Each computer that asks the running server to trust it, as it asks.
+    pub fn subscribe_requests(&self) -> broadcast::Receiver<crate::control::ClientRequest> {
+        self.requests.subscribe()
     }
 
     /// Every files pull's progress, for a front end to show.
@@ -301,7 +309,24 @@ impl Session {
         self.rt.spawn(async move {
             // Dropped without a value when the server fails to start.
             if let Ok(desk) = ready_rx.await {
+                let mut asking = desk.subscribe_requests();
                 *this.desk.lock().unwrap() = Some(desk);
+                // Pass each request on until the server (and so its trust list) is gone.
+                if let Some(asking) = asking.as_mut() {
+                    loop {
+                        match asking.recv().await {
+                            Ok(p) => {
+                                let _ = this.requests.send(crate::control::ClientRequest {
+                                    name: p.name,
+                                    fingerprint: p.fingerprint.to_string(),
+                                    addr: p.addr,
+                                });
+                            }
+                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
             }
         });
         *self.running.lock().unwrap() = Some(Running::Server { stop, task });

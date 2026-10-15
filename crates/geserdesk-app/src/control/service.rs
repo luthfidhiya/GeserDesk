@@ -12,7 +12,8 @@ use tracing::{debug, warn};
 
 use super::transport::{same_token, Bound, Stream};
 use super::wire::{
-    encode, read_line, Command, Event, Info, Reply, Request, StartSpec, ToController, PROTOCOL,
+    encode, read_line, ClientRequest, Command, Event, Info, Reply, Request, StartSpec,
+    ToController, PROTOCOL,
 };
 use crate::log::{LogBuffer, LogLine};
 use crate::session::{Session, Status};
@@ -265,6 +266,7 @@ impl Service {
                     prompt: self.session.subscribe_prompt(),
                     log: self.log.subscribe(),
                     transfer: self.session.subscribe_transfers(),
+                    requests: self.session.subscribe_requests(),
                 };
                 // Changes from now on only; the controller asks for the current state itself.
                 s.status.borrow_and_update();
@@ -298,6 +300,7 @@ struct Subscriptions {
     prompt: watch::Receiver<Option<TrustPrompt>>,
     log: broadcast::Receiver<LogLine>,
     transfer: broadcast::Receiver<crate::transfer::TransferProgress>,
+    requests: broadcast::Receiver<ClientRequest>,
 }
 
 /// The next event for a subscribed connection; never ready when not subscribed.
@@ -324,6 +327,11 @@ async fn next_event(subs: &mut Option<Subscriptions>) -> Event {
             },
             progress = s.transfer.recv() => match progress {
                 Ok(p) => return Event::Transfer(p),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return pending().await,
+            },
+            request = s.requests.recv() => match request {
+                Ok(r) => return Event::ClientRequest(r),
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return pending().await,
             },
