@@ -113,7 +113,7 @@ pub fn reflect(app: &AppHandle, status: &Status) {
     }
     let _ = h
         .tray
-        .set_tooltip(Some(format!("GeserDesk — {}", label(status))));
+        .set_tooltip(Some(format!("GeserDesk: {}", label(status))));
     let _ = h.toggle.set_text(if running { "Stop" } else { "Start" });
 }
 

@@ -10,6 +10,7 @@ mod link;
 mod state;
 mod transfer_window;
 mod tray;
+mod windows;
 
 use tauri::{Manager, WindowEvent};
 use tracing::info;
@@ -48,13 +49,17 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let state = window.app_handle().state::<AppState>();
-                if state.hides_on_close() {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    info!("GeserDesk tetap berjalan di tray (Keluar dari menu tray untuk menutup)");
+            match (window.label(), event) {
+                // Only the main window hides to the tray; the tool windows just close.
+                ("main", WindowEvent::CloseRequested { api, .. }) => {
+                    let state = window.app_handle().state::<AppState>();
+                    if state.hides_on_close() {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        info!("GeserDesk tetap berjalan di tray (Keluar dari menu tray untuk menutup)");
+                    }
                 }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -64,6 +69,7 @@ pub fn run() {
             commands::session::stop_session,
             commands::session::shutdown_daemon,
             commands::session::own_fingerprint,
+            windows::open_tool,
             commands::settings::load_settings,
             commands::settings::save_settings,
             commands::settings::config_exists,

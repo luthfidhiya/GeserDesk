@@ -53,6 +53,9 @@ export const ipc = {
   logSnapshot: () => invoke<LogLine[]>('log_snapshot'),
   clearLog: () => invoke<void>('clear_log'),
 
+  /** Open (or raise) a tool window: `settings`, `terminal` or `log`. */
+  openTool: (tool: 'settings' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
+
   /** Stop the files pull in progress; what it staged is removed. */
   cancelTransfer: () => invoke<void>('cancel_transfer'),
   /** The latest pull report, for a progress window that opened after it was sent. */

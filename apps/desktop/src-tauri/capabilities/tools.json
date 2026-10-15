@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tools",
+  "description": "What the tool windows may do (advanced settings, terminal, log): the same as the main window",
+  "windows": ["settings", "terminal", "log"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "clipboard-manager:allow-write-text"
+  ]
+}
