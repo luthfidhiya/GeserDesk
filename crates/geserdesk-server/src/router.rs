@@ -18,7 +18,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use geserdesk_platform::{CaptureCmd, CaptureEvent, CaptureHandle};
-use geserdesk_proto::{Edge, ModMask, MouseEvent, Point, Rect, ServerMsg, Size};
+use geserdesk_proto::keys::Rule;
+use geserdesk_proto::{
+    Edge, KeyAction, KeyEvent, ModMask, MouseEvent, Point, Rect, ServerMsg, Size,
+};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tracing::{debug, info, warn};
 
@@ -26,6 +29,15 @@ use crate::desk::{desk_size, effective_origins, inset_clamp, nearest_point, Fram
 use crate::files::{self, LocalFiles, Owner};
 use crate::hub::{Hub, HubEvent};
 use crate::layout::{Decision, Layout, SwitchPolicy, SwitchState};
+
+/// The keys of each modifier, left and right, to let go of on the client.
+const MODIFIER_KEYS: &[(ModMask, &[u16])] = &[
+    (ModMask::CONTROL, &[0xE0, 0xE4]),
+    (ModMask::ALT, &[0xE2, 0xE6]),
+    (ModMask::SHIFT, &[0xE1, 0xE5]),
+    (ModMask::SUPER, &[0xE3, 0xE7]),
+    (ModMask::ALT_GR, &[0xE6]),
+];
 
 /// Something the shell must do on behalf of [`Core`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +76,10 @@ pub struct Core {
     last_local_monitor: Option<Rect>,
     switch: SwitchState,
     seq: u64,
+    /// Key combinations that mean an action, from this machine's `keys.toml`.
+    key_rules: Vec<Rule>,
+    /// The keys whose press fired a rule, and the action each one stands for until released.
+    fired: HashMap<u16, u16>,
 }
 
 impl Core {
@@ -87,9 +103,17 @@ impl Core {
             last_local_monitor: None,
             switch: SwitchState::new(),
             seq: 0,
+            key_rules: Vec::new(),
+            fired: HashMap::new(),
         };
         core.refresh_origins();
         core
+    }
+
+    /// Let these key combinations stand for actions (see [`Rule`]).
+    pub fn with_key_rules(mut self, rules: Vec<Rule>) -> Self {
+        self.key_rules = rules;
+        self
     }
 
     /// Start with these desk sizes instead of every machine's real one.
@@ -181,8 +205,51 @@ impl Core {
             CaptureEvent::Wheel { dx, dy } => {
                 self.forward(ServerMsg::Mouse(MouseEvent::Wheel { dx, dy }))
             }
-            CaptureEvent::Key(k) => self.forward(ServerMsg::Key(k)),
+            CaptureEvent::Key(k) => self.on_key(k),
         }
+    }
+
+    /// A key for the client. One that completes a rule's combination goes as its action
+    /// alone: the modifiers of the combination are let go on the client first, so what it
+    /// sees is the action key and nothing held with it (the server's own release of them
+    /// later finds them already up, and the client ignores it).
+    fn on_key(&mut self, k: KeyEvent) -> Vec<Action> {
+        let as_action = |hid: u16, action: KeyAction| {
+            ServerMsg::Key(KeyEvent {
+                hid,
+                ch: None,
+                mods: ModMask::empty(),
+                action,
+            })
+        };
+        if let Some(&action) = self.fired.get(&k.hid) {
+            if k.action == KeyAction::Up {
+                self.fired.remove(&k.hid);
+            }
+            return self.forward(as_action(action, k.action));
+        }
+        let rule = match k.action {
+            KeyAction::Down if self.active_remote().is_some() => self
+                .key_rules
+                .iter()
+                .find(|r| r.matches(k.hid, k.mods))
+                .copied(),
+            _ => None,
+        };
+        let Some(rule) = rule else {
+            return self.forward(ServerMsg::Key(k));
+        };
+        let mut actions = Vec::new();
+        for (bit, keys) in MODIFIER_KEYS {
+            if rule.mods.contains(*bit) {
+                for hid in *keys {
+                    actions.extend(self.forward(as_action(*hid, KeyAction::Up)));
+                }
+            }
+        }
+        actions.extend(self.forward(as_action(rule.action, KeyAction::Down)));
+        self.fired.insert(k.hid, rule.action);
+        actions
     }
 
     // ---- desk geometry ------------------------------------------------------
@@ -1277,6 +1344,84 @@ mod tests {
             sends(&a)[0],
             ("win", ServerMsg::Mouse(MouseEvent::Wheel { dy: 120, .. }))
         ));
+    }
+
+    fn key(hid: u16, mods: ModMask, action: KeyAction) -> KeyEvent {
+        KeyEvent {
+            hid,
+            ch: None,
+            mods,
+            action,
+        }
+    }
+
+    fn key_msgs(actions: &[Action]) -> Vec<(u16, KeyAction)> {
+        sends(actions)
+            .into_iter()
+            .filter_map(|(_, m)| match m {
+                ServerMsg::Key(k) => Some((k.hid, k.action)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_rules_combination_goes_to_the_client_as_its_action_alone() {
+        use geserdesk_proto::consumer::BRIGHTNESS_DOWN;
+        let rule = Rule::parse("ctrl+alt+f5", "brightness_down").unwrap();
+        let mut c = core().with_key_rules(vec![rule]);
+        c.handle(CaptureEvent::Hotkey, 0); // the client has the keyboard
+        let both = ModMask::CONTROL | ModMask::ALT;
+
+        // The modifiers pass as usual: the client is told they are down.
+        let a = c.handle(
+            CaptureEvent::Key(key(0xE0, ModMask::CONTROL, KeyAction::Down)),
+            1,
+        );
+        assert_eq!(key_msgs(&a), [(0xE0, KeyAction::Down)]);
+        c.handle(CaptureEvent::Key(key(0xE2, both, KeyAction::Down)), 2);
+
+        // F5 completes the combination: both modifiers are let go, then the action goes down.
+        let a = c.handle(CaptureEvent::Key(key(0x3E, both, KeyAction::Down)), 3);
+        assert_eq!(
+            key_msgs(&a),
+            [
+                (0xE0, KeyAction::Up),
+                (0xE4, KeyAction::Up),
+                (0xE2, KeyAction::Up),
+                (0xE6, KeyAction::Up),
+                (BRIGHTNESS_DOWN, KeyAction::Down),
+            ]
+        );
+        // Held down, it repeats as the action; released, it ends and F5 is never sent.
+        let a = c.handle(CaptureEvent::Key(key(0x3E, both, KeyAction::Repeat(1))), 4);
+        assert_eq!(key_msgs(&a), [(BRIGHTNESS_DOWN, KeyAction::Repeat(1))]);
+        let a = c.handle(CaptureEvent::Key(key(0x3E, both, KeyAction::Up)), 5);
+        assert_eq!(key_msgs(&a), [(BRIGHTNESS_DOWN, KeyAction::Up)]);
+        // F5 on its own is an ordinary F5 again.
+        let a = c.handle(
+            CaptureEvent::Key(key(0x3E, ModMask::empty(), KeyAction::Down)),
+            6,
+        );
+        assert_eq!(key_msgs(&a), [(0x3E, KeyAction::Down)]);
+    }
+
+    #[test]
+    fn a_rule_only_fires_when_the_modifiers_are_exactly_its_own_and_the_client_has_the_keyboard() {
+        let rule = Rule::parse("ctrl+f5", "mute").unwrap();
+        let mut c = core().with_key_rules(vec![rule]);
+        // Not remote: nothing to send at all.
+        assert!(c
+            .handle(
+                CaptureEvent::Key(key(0x3E, ModMask::CONTROL, KeyAction::Down)),
+                0
+            )
+            .is_empty());
+        c.handle(CaptureEvent::Hotkey, 1);
+        // An extra Shift: not the combination, so the key goes on as it is.
+        let held = ModMask::CONTROL | ModMask::SHIFT;
+        let a = c.handle(CaptureEvent::Key(key(0x3E, held, KeyAction::Down)), 2);
+        assert_eq!(key_msgs(&a), [(0x3E, KeyAction::Down)]);
     }
 
     #[test]

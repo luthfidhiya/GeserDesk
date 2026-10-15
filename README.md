@@ -232,6 +232,44 @@ few seconds after a pull ends (and if it never hears of one).
   pasting it.
 * Nothing is ever read from, or written to, a symlink.
 
+## Special keys (volume, brightness, media...)
+
+The volume, mute, media, brightness and microphone keys, and the launcher and browser keys of
+a laptop's top row, travel as named actions: `mute`, `volume_up`, `volume_down`,
+`mic_mute`, `play_pause`, `next_track`, `previous_track`, `stop`, `brightness_up`,
+`brightness_down`, `mail`, `calculator`, `explorer`, `browser`, `browser_search`,
+`browser_home`, `browser_back`, `browser_forward`, `browser_stop`, `browser_refresh`
+and `browser_favorites`. What each machine does with them is its own, kept in `keys.toml`
+in the user's config folder (next to `gui.toml`: `%APPDATA%\geserdesk\config` on Windows,
+`~/.config/geserdesk` on Linux). The file belongs to the machine and is read whichever
+part it plays, so a computer that was a client and becomes the server keeps its setup, and
+no two machines have to agree on anything but the names above. It only needs what differs
+from the built-in setup; a line that cannot be understood is skipped with a warning in the
+log.
+
+```toml
+# What this machine's keyboard means (read when it is the server). For the keys a laptop
+# does not show to programs (on a Lenovo, brightness and microphone mute usually are not
+# shown), use a combination of ordinary keys.
+[capture]
+"ctrl+alt+f5" = "brightness_down"
+"ctrl+alt+f6" = "brightness_up"
+"ctrl+alt+f4" = "mic_mute"
+
+# How this machine does an action it is sent (read when it is a client): `ignore`, a
+# keysym on Linux (`keysym:0x1008ff02`), a virtual key on Windows (`vk:0xB7`), or
+# `action:name` to do another action.
+[perform]
+brightness_up = "ignore"
+mic_mute = "keysym:0x1008ffb2"
+```
+
+A combination fires only while the cursor is on a client, and the client gets the action
+alone: the combination's modifiers are let go on it first. Modifiers are `ctrl`, `alt`,
+`altgr`, `shift` and `win`; keys are letters, digits, `f1` to `f24`, the arrows and
+the navigation keys, or `hid:0x..`. A client can press brightness and microphone mute only
+on Linux: Windows has no key for them.
+
 ## Security
 
 Every machine has a self-signed certificate (created on first run, kept in

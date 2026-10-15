@@ -275,12 +275,14 @@ impl Session {
     /// nothing is routed: the network side only.
     pub fn start_server_config(
         self: &Arc<Self>,
-        config: Config,
+        mut config: Config,
         capture: bool,
     ) -> Result<(), String> {
         if self.is_running() {
             return Err("Sudah berjalan. Hentikan dulu.".into());
         }
+        // The key setup belongs to this machine, not to the config file chosen for the server.
+        config.key_rules = crate::keys::load().rules;
         self.started.fetch_add(1, Ordering::SeqCst);
         self.set(Status::ServerRunning);
 
@@ -442,8 +444,9 @@ impl<C: Clipboard> Clipboard for NoFiles<C> {
 /// The sink that really moves this machine's pointer and presses its keys.
 #[cfg(feature = "inject")]
 fn real_sink() -> Result<Box<dyn InputSink>, String> {
+    // How this machine does the special keys it is sent: its own setup, whichever part it plays.
     geserdesk_client::EnigoSink::new()
-        .map(|s| Box::new(s) as Box<dyn InputSink>)
+        .map(|s| Box::new(s.with_perform(crate::keys::load().perform)) as Box<dyn InputSink>)
         .map_err(|e| e.to_string())
 }
 

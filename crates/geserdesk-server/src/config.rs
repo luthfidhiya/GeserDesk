@@ -57,6 +57,10 @@ pub struct Config {
     pub identity_dir: Option<PathBuf>,
     /// Approved client certificates: screen name -> fingerprint.
     pub trusted: BTreeMap<String, geserdesk_tls::Fingerprint>,
+    /// Key combinations on this machine's keyboard that stand for an action, for the keys
+    /// a laptop's Fn row does not show to programs. Not read from the server's TOML: they
+    /// belong to the machine (its `keys.toml`) and the app fills them in.
+    pub key_rules: Vec<geserdesk_proto::keys::Rule>,
     /// Screens turned off (`disabled = true`): they stay in the config and the layout, and a
     /// client may stay connected, but the cursor cannot go there and it gets no clipboard
     /// until it is turned on again.
@@ -226,6 +230,7 @@ impl Config {
             identity_dir: None,
             trusted,
             disabled,
+            key_rules: Vec::new(),
             layout,
             policy,
             options,

@@ -348,7 +348,8 @@ pub async fn run_server_shared(
             local.clone(),
             config.positions.clone(),
         )
-        .with_sizes(config.sizes.clone());
+        .with_sizes(config.sizes.clone())
+        .with_key_rules(config.key_rules.clone());
         let files_for_router = local_sync.clone().map(|sync| crate::files::LocalFiles {
             router: Arc::clone(&file_router),
             sync,

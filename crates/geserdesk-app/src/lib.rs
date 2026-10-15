@@ -14,6 +14,7 @@
 
 pub mod control;
 pub mod daemon;
+pub mod keys;
 pub mod log;
 pub mod session;
 pub mod settings;
