@@ -32,12 +32,14 @@ export interface Tuning {
 
 export type Mode = 'client' | 'server'
 export type Theme = 'system' | 'light' | 'dark'
+export type Language = 'id' | 'en'
 
 export interface Settings {
   mode: Mode
   client: { server: string; name: string; log_only: boolean }
   server: { config: string }
   theme: Theme
+  language: Language
 }
 
 export type Status =

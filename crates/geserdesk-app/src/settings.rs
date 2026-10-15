@@ -25,6 +25,15 @@ pub enum Theme {
     Dark,
 }
 
+/// Which language the window speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Language {
+    #[default]
+    Id,
+    En,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClientSettings {
@@ -50,6 +59,7 @@ pub struct Settings {
     pub client: ClientSettings,
     pub server: ServerSettings,
     pub theme: Theme,
+    pub language: Language,
 }
 
 impl Default for ClientSettings {
@@ -278,6 +288,7 @@ mod tests {
                 config: "/x/server.toml".into(),
             },
             theme: Theme::Dark,
+            language: Language::En,
         };
         let text = toml::to_string_pretty(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
@@ -290,6 +301,7 @@ mod tests {
         assert_eq!(s.mode, Mode::Server);
         assert!(s.client.server.is_empty());
         assert_eq!(s.theme, Theme::System);
+        assert_eq!(s.language, Language::Id);
         // A key that is no longer a setting (a file saved by an older version) is ignored.
         let old: Settings = toml::from_str("mode = \"server\"\nclose_to_tray = false\n").unwrap();
         assert_eq!(old.mode, Mode::Server);

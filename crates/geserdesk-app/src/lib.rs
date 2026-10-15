@@ -25,6 +25,6 @@ pub use control::{ClientOptions, Endpoint, Remote};
 pub use geserdesk_server::{DeskSnapshot, DeskState};
 pub use log::{BufferLayer, LogBuffer, LogLine};
 pub use session::{Session, Status};
-pub use settings::{ClientSettings, Mode, ServerSettings, Settings, Theme};
+pub use settings::{ClientSettings, Language, Mode, ServerSettings, Settings, Theme};
 pub use transfer::{TransferProgress, TransferState};
 pub use trust::TrustPrompt;

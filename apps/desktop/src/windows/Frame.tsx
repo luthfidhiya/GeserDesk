@@ -2,6 +2,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Minus, Square, X } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import appIcon from '@/assets/app-icon.png'
+import { useT } from '@/lib/i18n'
 
 export interface MenuItem {
   label: string
@@ -70,6 +71,7 @@ function MenuBar({ menus }: { menus: Menu[] }) {
  */
 export default function Frame({ title, menus, children }: { title?: string; menus?: Menu[]; children: ReactNode }) {
   const win = getCurrentWindow()
+  const t = useT()
   return (
     <div className="flex h-full flex-col">
       <header className="titlebar flex h-8 shrink-0 select-none items-center text-xs">
@@ -78,13 +80,13 @@ export default function Frame({ title, menus, children }: { title?: string; menu
         <div data-tauri-drag-region className="flex h-full min-w-0 flex-1 items-center">
           {title && <span className="pointer-events-none truncate">{title}</span>}
         </div>
-        <button className={button} aria-label="Perkecil" onClick={() => void win.minimize()}>
+        <button className={button} aria-label={t('Perkecil', 'Minimize')} onClick={() => void win.minimize()}>
           <Minus size={14} />
         </button>
-        <button className={button} aria-label="Perbesar" onClick={() => void win.toggleMaximize()}>
+        <button className={button} aria-label={t('Perbesar', 'Maximize')} onClick={() => void win.toggleMaximize()}>
           <Square size={12} />
         </button>
-        <button className={`${button} hover:!bg-red-600 hover:!text-white`} aria-label="Tutup" onClick={() => void win.close()}>
+        <button className={`${button} hover:!bg-red-600 hover:!text-white`} aria-label={t('Tutup', 'Close')} onClick={() => void win.close()}>
           <X size={14} />
         </button>
       </header>
