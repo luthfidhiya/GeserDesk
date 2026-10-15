@@ -4,6 +4,7 @@ import App from './App'
 import TransferPopup from './TransferPopup'
 import AdvancedWindow from './windows/AdvancedWindow'
 import Frame from './windows/Frame'
+import LogWindow from './windows/LogWindow'
 import './index.css'
 
 // Until the saved theme loads, follow the system so the first paint is not the wrong colour
@@ -16,6 +17,7 @@ document.documentElement.classList.toggle('dark', window.matchMedia('(prefers-co
 const params = new URLSearchParams(window.location.search)
 const tools = {
   settings: { Page: AdvancedWindow, title: 'Pengaturan lanjutan' },
+  log: { Page: LogWindow, title: 'Log' },
 } as const
 const tool = params.get('window') as keyof typeof tools | null
 const page = tool && tools[tool]
