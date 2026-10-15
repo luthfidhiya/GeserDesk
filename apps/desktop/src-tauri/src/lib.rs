@@ -8,6 +8,7 @@ mod commands;
 mod events;
 mod link;
 mod state;
+mod terminal;
 mod transfer_window;
 mod tray;
 mod windows;
@@ -34,6 +35,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
+        .manage(terminal::TerminalState::default())
         .setup(|app| {
             link::start(app.handle());
             tray::build(app.handle());
@@ -59,6 +61,10 @@ pub fn run() {
                         info!("GeserDesk tetap berjalan di tray (Keluar dari menu tray untuk menutup)");
                     }
                 }
+                // A command still running in the terminal ends with its window.
+                ("terminal", WindowEvent::Destroyed) => {
+                    terminal::kill(&window.app_handle().state::<terminal::TerminalState>());
+                }
                 _ => {}
             }
         })
@@ -70,6 +76,8 @@ pub fn run() {
             commands::session::shutdown_daemon,
             commands::session::own_fingerprint,
             windows::open_tool,
+            terminal::terminal_run,
+            terminal::terminal_kill,
             commands::settings::load_settings,
             commands::settings::save_settings,
             commands::settings::config_exists,

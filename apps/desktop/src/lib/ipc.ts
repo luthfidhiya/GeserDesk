@@ -55,6 +55,9 @@ export const ipc = {
 
   /** Open (or raise) a tool window: `settings`, `terminal` or `log`. */
   openTool: (tool: 'settings' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
+  /** Run `geserdesk <line>` (the CLI beside the app). Output and the end arrive as events with the id it returns. */
+  terminalRun: (line: string) => invoke<number>('terminal_run', { line }),
+  terminalKill: () => invoke<void>('terminal_kill'),
 
   /** Stop the files pull in progress; what it staged is removed. */
   cancelTransfer: () => invoke<void>('cancel_transfer'),
@@ -75,6 +78,8 @@ export const EVENTS = {
   daemon: 'daemon://info',
   navigate: 'ui://navigate',
   settings: 'settings://changed',
+  terminalOut: 'terminal://out',
+  terminalExit: 'terminal://exit',
   transfer: 'transfer://progress',
 } as const
 
