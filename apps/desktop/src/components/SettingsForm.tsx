@@ -35,13 +35,14 @@ export function ClientForm({ settings, disabled, onChange }: Props) {
       <span />
       <div className="flex items-center gap-2">
         <Checkbox
-          id="logonly"
+          id="allow-control"
           disabled={disabled}
-          checked={c.log_only}
-          onCheckedChange={(v) => set({ log_only: v === true })}
+          checked={!c.log_only}
+          onCheckedChange={(v) => set({ log_only: v !== true })}
         />
-        <Label htmlFor="logonly">
-          Hanya catat input di log (untuk uji coba, tanpa menggerakkan mouse)
+        <Label htmlFor="allow-control" className="flex-wrap">
+          Izinkan dikendalikan server
+          <span className="font-normal text-muted-foreground">(tanpa centang, input hanya dicatat di log)</span>
         </Label>
       </div>
     </div>
