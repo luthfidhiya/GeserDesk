@@ -14,6 +14,7 @@
 //! name = "linux-pc"
 //! [[screens]]
 //! name = "windows-pc"
+//! disabled = true       # listed but turned off: a client stays connected, no cursor goes there
 //!
 //! [links]
 //! linux-pc   = { right = "windows-pc" }
@@ -23,7 +24,7 @@
 //! switch_double_tap_ms = 250
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -56,6 +57,10 @@ pub struct Config {
     pub identity_dir: Option<PathBuf>,
     /// Approved client certificates: screen name -> fingerprint.
     pub trusted: BTreeMap<String, geserdesk_tls::Fingerprint>,
+    /// Screens turned off (`disabled = true`): they stay in the config and the layout, and a
+    /// client may stay connected, but the cursor cannot go there and it gets no clipboard
+    /// until it is turned on again.
+    pub disabled: BTreeSet<String>,
     pub layout: Layout,
     pub policy: SwitchPolicy,
     pub options: geserdesk_proto::Options,
@@ -173,6 +178,13 @@ impl Config {
             }
         }
 
+        let disabled = raw
+            .screens
+            .iter()
+            .filter(|s| s.disabled == Some(true))
+            .map(|s| s.name.clone())
+            .collect();
+
         if raw.server.as_ref().is_some_and(|s| s.ui.is_some()) {
             tracing::warn!(
                 "`[server] ui` is ignored: the screen layout is now edited in the GeserDesk app"
@@ -213,6 +225,7 @@ impl Config {
             tls: raw.server.as_ref().and_then(|s| s.tls).unwrap_or(true),
             identity_dir: None,
             trusted,
+            disabled,
             layout,
             policy,
             options,
@@ -386,6 +399,8 @@ struct ScreenEntry {
     h: Option<i32>,
     /// Fingerprint of the certificate approved for this screen.
     fingerprint: Option<String>,
+    /// The screen is turned off.
+    disabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -666,6 +681,25 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.sizes.len(), 1);
         assert_eq!(cfg.sizes["b"], Size::new(1920, 2160));
+    }
+
+    #[test]
+    fn a_screen_can_be_turned_off_in_the_file() {
+        let cfg = Config::parse(
+            "[[screens]]
+name = \"a\"
+[[screens]]
+name = \"b\"
+disabled = true
+[[screens]]
+name = \"c\"
+disabled = false
+",
+        )
+        .unwrap();
+        assert_eq!(cfg.disabled.iter().collect::<Vec<_>>(), ["b"]);
+        // Still a screen of the layout, so turning it on again needs no new entry.
+        assert_eq!(cfg.layout.screens().len(), 3);
     }
 
     #[test]

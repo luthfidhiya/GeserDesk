@@ -244,6 +244,12 @@ impl Service {
                     .map(|()| Reply::Done)
                     .map_err(|e| e.to_string())
             }
+            Command::SetDisabled { name, disabled } => {
+                let desk = self.session.desk().ok_or("server belum berjalan")?;
+                desk.set_disabled(&name, disabled)
+                    .map(|()| Reply::Done)
+                    .map_err(|e| e.to_string())
+            }
             Command::CurrentPrompt => Ok(Reply::Prompt(
                 self.session.subscribe_prompt().borrow().clone(),
             )),

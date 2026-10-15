@@ -327,6 +327,7 @@ pub async fn run_server_shared(
     transfer_hooks: Option<geserdesk_clipboard::pull::PullHooks>,
 ) -> anyhow::Result<()> {
     let hub = Hub::new();
+    hub.load_disabled(&config.disabled);
     let file_router = FileRouter::new(Arc::clone(&hub));
     let mut background = Vec::new();
     // The same ClipboardSync, if any, is used both to detect this server's own

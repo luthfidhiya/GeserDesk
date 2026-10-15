@@ -21,7 +21,7 @@ use crate::trust::TrustPrompt;
 
 /// Bumped when the messages change shape. A daemon outlives the app that
 /// started it, so the two can disagree after an upgrade.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 /// Longest line either side accepts, so a stray peer cannot make us buffer
 /// without end.
@@ -119,6 +119,11 @@ pub enum Command {
     },
     Revoke {
         name: String,
+    },
+    /// Turn a client's screen off or on (kept in the server's config).
+    SetDisabled {
+        name: String,
+        disabled: bool,
     },
     CurrentPrompt,
     AnswerPrompt {
@@ -279,6 +284,10 @@ mod tests {
                 fingerprint: "SHA256:00".into(),
             },
             Command::Revoke { name: "a".into() },
+            Command::SetDisabled {
+                name: "a".into(),
+                disabled: true,
+            },
             Command::CurrentPrompt,
             Command::AnswerPrompt { trust: true },
             Command::LogSnapshot,

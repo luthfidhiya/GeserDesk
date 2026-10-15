@@ -58,6 +58,8 @@ pub struct ScreenView {
     pub size: Size,
     pub monitors: Vec<Rect>,
     pub trusted_fingerprint: Option<String>,
+    /// Turned off: nothing connects as this screen until it is turned on again.
+    pub disabled: bool,
 }
 
 /// A client that connected but is not trusted yet.
@@ -104,6 +106,8 @@ pub enum AdminError {
     NotPending,
     #[error("layar itu tidak punya sertifikat yang dipercayai")]
     NotTrusted,
+    #[error("layar sendiri tidak bisa dinonaktifkan")]
+    LocalScreen,
     #[error("gagal menyimpan config: {0}")]
     Save(String),
 }
@@ -200,6 +204,7 @@ impl DeskState {
                     trusted_fingerprint: trusted
                         .as_ref()
                         .and_then(|t| t.get(n).map(|f| f.to_string())),
+                    disabled: self.hub.is_disabled(n),
                 }
             })
             .collect()
@@ -392,6 +397,31 @@ impl DeskState {
         Ok(())
     }
 
+    /// Turn a client's screen off or on, and remember it in the config. Off, the client
+    /// stays connected but the cursor cannot go to it and it gets no clipboard; its trust
+    /// and its place in the layout stay, so turning it on again needs nothing else.
+    pub fn set_disabled(&self, name: &str, disabled: bool) -> Result<(), AdminError> {
+        if name == self.local {
+            return Err(AdminError::LocalScreen);
+        }
+        if !self
+            .layout
+            .lock()
+            .unwrap()
+            .screens()
+            .iter()
+            .any(|s| s == name)
+        {
+            return Err(AdminError::UnknownScreen(name.to_string()));
+        }
+        if let Some(path) = &self.config_path {
+            write_disabled(path, name, disabled).map_err(|e| AdminError::Save(e.to_string()))?;
+        }
+        self.hub.set_disabled(name, disabled);
+        info!(%name, "screen turned {}", if disabled { "off" } else { "on" });
+        Ok(())
+    }
+
     /// Stop trusting a screen's certificate. A session already running is ended
     /// (the client may knock again, and then waits for approval like a stranger).
     pub fn revoke(&self, name: &str) -> Result<(), AdminError> {
@@ -471,6 +501,20 @@ pub fn write_layout(
             None => {
                 table.remove("w");
                 table.remove("h");
+            }
+        }
+    })
+}
+
+/// Turn the `disabled` key of `screen` in the config file on, or remove it.
+pub fn write_disabled(path: &Path, screen: &str, disabled: bool) -> anyhow::Result<()> {
+    use toml_edit::value;
+    edit_screens(path, |name, table| {
+        if name == screen {
+            if disabled {
+                table["disabled"] = value(true);
+            } else {
+                table.remove("disabled");
             }
         }
     })
@@ -1017,5 +1061,80 @@ mod tests {
             crate::trust::Verdict::Unknown
         );
         assert_eq!(st.revoke("win").unwrap_err(), AdminError::NotTrusted);
+    }
+
+    #[test]
+    fn turning_a_screen_off_writes_it_down_and_keeps_it_connected_and_in_place() {
+        let fp = some_fingerprint();
+        let path = temp_file(
+            "disable",
+            &format!(
+                "[[screens]]
+name = \"linux-pc\"
+
+[[screens]]
+name = \"win\"
+fingerprint = \"{fp}\"
+"
+            ),
+        );
+        let hub = Hub::new();
+        let st = DeskState::new(
+            Arc::clone(&hub),
+            Some(path.clone()),
+            "linux-pc".into(),
+            vec![Rect::new(0, 0, 1920, 1080)],
+            Layout::new(vec!["linux-pc".into(), "win".into()]),
+            BTreeMap::new(),
+            None,
+        );
+        let mut events = hub.take_events().unwrap();
+        let session = hub
+            .register("win", vec![Rect::new(0, 0, 1920, 1080)])
+            .unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            crate::hub::HubEvent::Connected { .. }
+        ));
+
+        // The server's own screen, and a name nobody has, are refused.
+        assert_eq!(
+            st.set_disabled("linux-pc", true),
+            Err(AdminError::LocalScreen)
+        );
+        assert_eq!(
+            st.set_disabled("nobody", true),
+            Err(AdminError::UnknownScreen("nobody".into()))
+        );
+
+        st.set_disabled("win", true).unwrap();
+        assert!(hub.is_disabled("win"));
+        assert!(read_config(&path).disabled.contains("win"));
+        // The router is told it went away, but the session is still there.
+        assert_eq!(
+            events.try_recv().unwrap(),
+            crate::hub::HubEvent::Disconnected("win".into())
+        );
+        assert!(hub.contains("win"));
+        // It is still on the desk, marked off, and what was written beside the flag is kept.
+        let win = st
+            .snapshot()
+            .screens
+            .into_iter()
+            .find(|s| s.name == "win")
+            .unwrap();
+        assert!(win.disabled);
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("fingerprint"));
+
+        st.set_disabled("win", false).unwrap();
+        assert!(!hub.is_disabled("win"));
+        assert!(read_config(&path).disabled.is_empty());
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            crate::hub::HubEvent::Connected { .. }
+        ));
+        drop(session);
     }
 }

@@ -89,6 +89,7 @@ pub fn run() {
             commands::settings::create_default_config,
             commands::desk::desk_state,
             commands::desk::save_layout,
+            commands::desk::set_screen_disabled,
             commands::trust::approve_client,
             commands::trust::dismiss_client,
             commands::trust::revoke_client,

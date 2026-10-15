@@ -261,6 +261,14 @@ impl Remote {
         self.done(Command::Revoke { name: name.into() }).await
     }
 
+    pub async fn set_disabled(&self, name: &str, disabled: bool) -> Result<(), String> {
+        self.done(Command::SetDisabled {
+            name: name.into(),
+            disabled,
+        })
+        .await
+    }
+
     pub async fn current_prompt(&self) -> Result<Option<TrustPrompt>, String> {
         match self.request(Command::CurrentPrompt).await? {
             Reply::Prompt(p) => Ok(p),
