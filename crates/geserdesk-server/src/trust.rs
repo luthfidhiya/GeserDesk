@@ -5,8 +5,8 @@
 //! Trust is recorded as *screen name -> certificate fingerprint*, so a
 //! certificate cannot claim a name it was not approved for. A client with an
 //! unknown (or changed) certificate gets nothing but a refusal; it is listed as
-//! *pending* with its fingerprint, and the person at the server approves it in
-//! the layout editor after checking the fingerprint matches what the client
+//! *pending* with its fingerprint, subscribers are told, and the person at the
+//! server approves it after checking the fingerprint matches what the client
 //! prints.
 
 use std::collections::BTreeMap;
@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use geserdesk_tls::Fingerprint;
+use tokio::sync::broadcast;
 
 /// The most pending requests kept; the oldest is dropped beyond this, so
 /// strangers cannot grow the list without bound.
@@ -53,6 +54,8 @@ struct Inner {
 /// Shared trust state. Cheap to clone via `Arc`.
 pub struct Trust {
     inner: Mutex<Inner>,
+    /// Told of each request that was not pending already.
+    requests: broadcast::Sender<Pending>,
 }
 
 impl Trust {
@@ -62,6 +65,7 @@ impl Trust {
                 trusted,
                 pending: Vec::new(),
             }),
+            requests: broadcast::channel(MAX_PENDING).0,
         })
     }
 
@@ -71,6 +75,11 @@ impl Trust {
             Some(t) => Verdict::Mismatch { expected: *t },
             None => Verdict::Unknown,
         }
+    }
+
+    /// Every request that comes in new: not one that only refreshes a pending one.
+    pub fn subscribe_requests(&self) -> broadcast::Receiver<Pending> {
+        self.requests.subscribe()
     }
 
     /// Record (or refresh) a request to be trusted.
@@ -93,13 +102,15 @@ impl Trust {
         if inner.pending.len() >= MAX_PENDING {
             inner.pending.remove(0);
         }
-        inner.pending.push(Pending {
+        let request = Pending {
             name: name.to_string(),
             fingerprint: fp,
             addr: addr.to_string(),
             replaces,
             last_seen: Instant::now(),
-        });
+        };
+        inner.pending.push(request.clone());
+        let _ = self.requests.send(request);
     }
 
     pub fn pending(&self) -> Vec<Pending> {
@@ -247,5 +258,23 @@ mod tests {
         assert_eq!(t.revoke("win"), Some(fp(1)));
         assert_eq!(t.check("win", &fp(1)), Verdict::Unknown);
         assert_eq!(t.revoke("win"), None);
+    }
+
+    #[test]
+    fn only_a_new_request_is_announced() {
+        let t = Trust::new(BTreeMap::new());
+        let mut told = t.subscribe_requests();
+        t.note_pending("win", fp(1), "10.0.0.2:5000");
+        assert_eq!(told.try_recv().unwrap().name, "win");
+        // The same client knocking again only refreshes it.
+        t.note_pending("win", fp(1), "10.0.0.2:5001");
+        assert!(told.try_recv().is_err());
+        // A different certificate for the name is a new request.
+        t.note_pending("win", fp(2), "10.0.0.2:5002");
+        assert_eq!(told.try_recv().unwrap().fingerprint, fp(2));
+        // Answered and asking again is new too.
+        t.dismiss("win", &fp(2));
+        t.note_pending("win", fp(2), "10.0.0.2:5003");
+        assert!(told.try_recv().is_ok());
     }
 }

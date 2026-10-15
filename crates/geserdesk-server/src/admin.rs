@@ -331,6 +331,14 @@ impl DeskState {
         Ok((next, sizes))
     }
 
+    /// Told of each client that asks to be trusted for the first time (or with a new
+    /// certificate). `None` when the server runs without TLS: nobody is asked then.
+    pub fn subscribe_requests(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<crate::trust::Pending>> {
+        self.tls.as_ref().map(|tls| tls.trust.subscribe_requests())
+    }
+
     fn tls(&self) -> Result<&Arc<crate::net::TlsContext>, AdminError> {
         self.tls.as_ref().ok_or(AdminError::TlsOff)
     }

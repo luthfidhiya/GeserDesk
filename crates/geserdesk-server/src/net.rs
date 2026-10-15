@@ -617,7 +617,7 @@ where
             return Ok(());
         }
         tls.trust.note_pending(name, fp, &peer.to_string());
-        warn!(%name, %peer, fingerprint = %fp, "client is not trusted yet; approve it in the layout editor after checking the fingerprint");
+        warn!(%name, %peer, fingerprint = %fp, "client is not trusted yet; approve it in the app after checking the fingerprint");
         Err(match verdict {
             Verdict::Mismatch { .. } => "this screen is registered with a different certificate; \
                  approve the new one on the server"
