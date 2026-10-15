@@ -130,6 +130,23 @@ pub fn resolve(perform: &std::collections::HashMap<u16, Perform>, hid: u16) -> R
     }
 }
 
+/// Whether this machine presses the action `hid` with nothing set up in `keys.toml`.
+/// Windows has no key for brightness, microphone mute or the browser launcher, so a
+/// Windows client does nothing for them unless told how. Kept true to `key_for` by a test.
+pub fn has_built_in(hid: u16) -> bool {
+    if cfg!(windows) {
+        !matches!(
+            hid,
+            consumer::BRIGHTNESS_UP
+                | consumer::BRIGHTNESS_DOWN
+                | consumer::MIC_MUTE
+                | consumer::BROWSER
+        )
+    } else {
+        cfg!(all(unix, not(target_os = "macos")))
+    }
+}
+
 #[cfg(feature = "inject")]
 pub use enigo_sink::EnigoSink;
 
@@ -661,6 +678,18 @@ mod enigo_sink {
             assert_eq!(key_for(&ev(c::MUTE, None)), Some(Key::VolumeMute));
             assert_eq!(key_for(&ev(c::PLAY_PAUSE, None)), Some(Key::MediaPlayPause));
             assert_eq!(key_for(&ev(c::NEXT_TRACK, None)), Some(Key::MediaNextTrack));
+        }
+
+        #[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+        #[test]
+        fn has_built_in_says_what_key_for_does() {
+            for &(name, hid) in c::ACTIONS {
+                assert_eq!(
+                    key_for(&ev(hid, None)).is_some(),
+                    crate::inject::has_built_in(hid),
+                    "{name}"
+                );
+            }
         }
 
         #[cfg(windows)]

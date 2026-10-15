@@ -11,7 +11,7 @@ pub mod inject;
 pub mod net;
 pub mod trust_store;
 
-pub use inject::{resolve, InputSink, NullSink, Resolved};
+pub use inject::{has_built_in, resolve, InputSink, NullSink, Resolved};
 pub use net::{
     connect, connect_observed, connect_with_retry, connect_with_status, ClientConfig, ClientStatus,
     ClientTls, ConnectError, Connected, ReconnectPolicy, ServerTrust, DEFAULT_HANDSHAKE_TIMEOUT,
