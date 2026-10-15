@@ -104,6 +104,8 @@ pub fn write_tuning(path: &Path, tuning: &Tuning) -> Result<(), String> {
 pub struct TrustedClient {
     pub name: String,
     pub fingerprint: String,
+    /// Its screen is turned off (`disabled = true` in the config).
+    pub disabled: bool,
 }
 
 /// The clients the config at `path` trusts, read from the file alone (no server needs
@@ -114,10 +116,12 @@ pub fn trusted_clients(path: &Path) -> Result<Vec<TrustedClient>, String> {
     }
     let config =
         geserdesk_server::Config::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let off = config.disabled;
     Ok(config
         .trusted
         .into_iter()
         .map(|(name, fp)| TrustedClient {
+            disabled: off.contains(&name),
             name,
             fingerprint: fp.to_string(),
         })
@@ -128,6 +132,13 @@ pub fn trusted_clients(path: &Path) -> Result<Vec<TrustedClient>, String> {
 /// it. The next connection from that client needs approval again.
 pub fn revoke_trusted(path: &Path, name: &str) -> Result<(), String> {
     geserdesk_server::admin::write_fingerprint(path, name, None)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Turn the screen `name` off or on in the config at `path`, for when no server is running
+/// to do it.
+pub fn set_disabled_in_config(path: &Path, name: &str, disabled: bool) -> Result<(), String> {
+    geserdesk_server::admin::write_disabled(path, name, disabled)
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -376,7 +387,8 @@ fingerprint = \"{fp}\"
             listed,
             [TrustedClient {
                 name: "b".into(),
-                fingerprint: fp.to_string()
+                fingerprint: fp.to_string(),
+                disabled: false
             }]
         );
 
@@ -386,6 +398,33 @@ fingerprint = \"{fp}\"
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("name = \"b\""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_screen_is_turned_off_in_the_file_and_listed_so() {
+        let dir = std::env::temp_dir().join(format!("geserdesk-app-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.toml");
+        let fp = geserdesk_tls::Fingerprint::of_cert(b"y");
+        std::fs::write(
+            &path,
+            format!(
+                "[[screens]]
+name = \"a\"
+[[screens]]
+name = \"b\"
+fingerprint = \"{fp}\"
+"
+            ),
+        )
+        .unwrap();
+
+        set_disabled_in_config(&path, "b", true).unwrap();
+        assert!(trusted_clients(&path).unwrap()[0].disabled);
+        set_disabled_in_config(&path, "b", false).unwrap();
+        assert!(!trusted_clients(&path).unwrap()[0].disabled);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

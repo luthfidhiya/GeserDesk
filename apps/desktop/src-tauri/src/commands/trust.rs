@@ -2,7 +2,8 @@
 use std::path::PathBuf;
 
 use geserdesk_app::settings::{
-    default_config_path, revoke_trusted, trusted_clients as read_trusted, TrustedClient,
+    default_config_path, revoke_trusted, set_disabled_in_config, trusted_clients as read_trusted,
+    TrustedClient,
 };
 use geserdesk_app::TrustPrompt;
 use tauri::State;
@@ -25,6 +26,22 @@ pub async fn dismiss_client(
     fingerprint: String,
 ) -> Result<(), String> {
     state.need_remote()?.dismiss(&name, &fingerprint).await
+}
+
+/// Turn a client's screen off or on: through the running server when there is one (it acts on
+/// the connection at once), else in the config file.
+#[tauri::command]
+pub async fn set_screen_disabled(
+    state: State<'_, AppState>,
+    name: String,
+    disabled: bool,
+) -> Result<(), String> {
+    if let Some(remote) = state.remote() {
+        if matches!(remote.desk().await, Ok(Some(_))) {
+            return remote.set_disabled(&name, disabled).await;
+        }
+    }
+    set_disabled_in_config(&config_path(&state).await, &name, disabled)
 }
 
 /// The server's config file: the one a running server was started with, else the

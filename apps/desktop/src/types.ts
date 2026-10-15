@@ -111,6 +111,8 @@ export interface Screen {
 export interface TrustedClient {
   name: string
   fingerprint: string
+  /** Its screen is turned off. */
+  disabled: boolean
 }
 
 export interface Pending {

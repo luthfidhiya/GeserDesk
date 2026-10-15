@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Panel } from '@/components/Panel'
 import { PendingApprovals } from '@/components/PendingApprovals'
 import { RevokeButton } from '@/components/ScreenList'
+import { ScreenSwitch } from '@/components/ScreenSwitch'
 import { Badge } from '@/components/ui/badge'
 import { errorText, ipc } from '@/lib/ipc'
 import type { DeskSnapshot, Pending, TrustedClient } from '@/types'
@@ -52,9 +53,20 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
     }
   }
 
+  const setOff = async (name: string, disabled: boolean) => {
+    try {
+      await ipc.setScreenDisabled(name, disabled)
+      await Promise.all([load(), refresh()])
+    } catch (e) {
+      setProblem(`Gagal: ${errorText(e)}`)
+    }
+  }
+
   const connected = new Set((desk?.screens ?? []).filter((s) => !s.local && s.connected).map((s) => s.name))
   const names = [...new Set([...(trusted ?? []).map((c) => c.name), ...connected])]
-  const isOff = (name: string) => desk?.screens.some((s) => s.name === name && s.disabled) ?? false
+  // Off by the running server's word when there is one, else by the config file's.
+  const isOff = (name: string) =>
+    desk?.screens.find((s) => s.name === name)?.disabled ?? trusted?.find((c) => c.name === name)?.disabled ?? false
   const monitors = (name: string) => desk?.screens.find((s) => s.name === name)?.monitors ?? []
   const fingerprint = (name: string) => trusted?.find((c) => c.name === name)?.fingerprint
   // Connected ones first, then by name.
@@ -89,11 +101,14 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
                     terpercaya
                   </Badge>
                 )}
-                <span
-                  className="ml-auto size-2.5 rounded-full"
-                  title={connected.has(name) ? 'terhubung' : 'tidak terhubung'}
-                  style={{ background: connected.has(name) ? 'var(--ok)' : 'var(--muted-foreground)' }}
-                />
+                <span className="ml-auto">
+                  <ScreenSwitch
+                    name={name}
+                    connected={connected.has(name)}
+                    disabled={isOff(name)}
+                    onToggle={(d) => void setOff(name, d)}
+                  />
+                </span>
                 {fp && <RevokeButton onConfirm={() => void revoke(name)} />}
               </div>
               <p className="text-xs text-muted-foreground">

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { isStretched, neighbours, union } from '@/lib/geometry'
+import { ScreenSwitch } from '@/components/ScreenSwitch'
 import { screenColor } from '@/components/ScreenStage'
 import type { Draft, Screen } from '@/types'
 
@@ -45,29 +46,9 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
               {s.local ? (
                 <span className="ml-auto size-2.5 rounded-full" title="terhubung" style={{ background: 'var(--ok)' }} />
               ) : (
-                // The dot is the switch: green while connected, grey while not, a red ring when off.
-                <button
-                  className="ml-auto grid size-6 place-items-center rounded hover:bg-muted"
-                  title={
-                    s.disabled
-                      ? 'Nonaktif. Klik untuk mengaktifkan'
-                      : `${s.connected ? 'Terhubung' : 'Tidak terhubung'}. Klik untuk menonaktifkan`
-                  }
-                  aria-label={s.disabled ? `Aktifkan ${s.name}` : `Nonaktifkan ${s.name}`}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onDisabled(s.name, !s.disabled)
-                  }}
-                >
-                  <span
-                    className="size-2.5 rounded-full"
-                    style={
-                      s.disabled
-                        ? { border: '2px solid var(--bad)' }
-                        : { background: s.connected ? 'var(--ok)' : 'var(--muted-foreground)' }
-                    }
-                  />
-                </button>
+                <span className="ml-auto">
+                  <ScreenSwitch name={s.name} connected={s.connected} disabled={s.disabled} onToggle={(d) => onDisabled(s.name, d)} />
+                </span>
               )}
               {s.trusted_fingerprint && <RevokeButton onConfirm={() => onRevoke(s.name)} />}
             </div>

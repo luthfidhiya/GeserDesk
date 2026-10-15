@@ -25,13 +25,3 @@ pub async fn save_layout(
 ) -> Result<bool, String> {
     state.need_remote()?.save_layout(positions, sizes).await
 }
-
-/// Turn a client's screen off or on; the server writes it to its config.
-#[tauri::command]
-pub async fn set_screen_disabled(
-    state: State<'_, AppState>,
-    name: String,
-    disabled: bool,
-) -> Result<(), String> {
-    state.need_remote()?.set_disabled(&name, disabled).await
-}
