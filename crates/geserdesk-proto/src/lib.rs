@@ -26,6 +26,7 @@ pub mod codec;
 pub mod consumer;
 pub mod geometry;
 pub mod input;
+pub mod keys;
 pub mod message;
 pub mod version;
 

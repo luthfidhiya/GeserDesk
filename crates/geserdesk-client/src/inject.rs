@@ -10,6 +10,8 @@
 //!   M3). `enigo` wraps XTest on Linux and `SendInput` on Windows -- the same
 //!   primitives Input Leap's `XWindowsScreen` / `MSWindowsScreen` use.
 
+use geserdesk_proto::consumer;
+use geserdesk_proto::keys::Perform;
 #[cfg(any(feature = "inject", test))]
 use geserdesk_proto::KeyAction;
 use geserdesk_proto::{KeyEvent, MouseEvent, Point};
@@ -99,6 +101,35 @@ impl InputSink for RecordingSink {
     }
 }
 
+/// How this machine does the key it was sent, once its own setup (`keys.toml`) is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved {
+    /// The built-in way, for this key (the one sent, or another action's).
+    Key(u16),
+    /// Nothing.
+    Ignore,
+    /// This X11 keysym.
+    Keysym(u32),
+    /// This Windows virtual key.
+    VirtualKey(u32),
+}
+
+/// What to do for `hid`. Only the special keys (actions) can be set up; every other key is
+/// pressed the usual way. "Do another action" goes one step and no further, so two actions
+/// that name each other cannot loop.
+pub fn resolve(perform: &std::collections::HashMap<u16, Perform>, hid: u16) -> Resolved {
+    if !consumer::is_extra(hid) {
+        return Resolved::Key(hid);
+    }
+    match perform.get(&hid) {
+        None => Resolved::Key(hid),
+        Some(Perform::Ignore) => Resolved::Ignore,
+        Some(Perform::Keysym(v)) => Resolved::Keysym(*v),
+        Some(Perform::VirtualKey(v)) => Resolved::VirtualKey(*v),
+        Some(Perform::Action(other)) => Resolved::Key(*other),
+    }
+}
+
 #[cfg(feature = "inject")]
 pub use enigo_sink::EnigoSink;
 
@@ -108,6 +139,7 @@ mod enigo_sink {
     use enigo::{
         Axis, Button as EBtn, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
     };
+    use geserdesk_proto::consumer as c;
     use geserdesk_proto::Button;
     use std::collections::{HashMap, HashSet};
 
@@ -121,6 +153,8 @@ mod enigo_sink {
         enigo: Enigo,
         held_keys: HashMap<u16, Key>,
         held_buttons: HashSet<u8>,
+        /// This machine's own way of doing the special keys it is sent.
+        perform: HashMap<u16, Perform>,
     }
 
     impl EnigoSink {
@@ -131,7 +165,14 @@ mod enigo_sink {
                 enigo,
                 held_keys: HashMap::new(),
                 held_buttons: HashSet::new(),
+                perform: HashMap::new(),
             })
+        }
+
+        /// Do the special keys this machine's own way (see [`resolve`]).
+        pub fn with_perform(mut self, perform: HashMap<u16, Perform>) -> Self {
+            self.perform = perform;
+            self
         }
 
         /// Size of the main display, for the `Hello` handshake.
@@ -192,7 +233,23 @@ mod enigo_sink {
         fn key(&mut self, ev: &KeyEvent) {
             match ev.action {
                 KeyAction::Down | KeyAction::Repeat(_) => {
-                    let Some(key) = key_for(ev) else {
+                    let key = match resolve(&self.perform, ev.hid) {
+                        Resolved::Ignore => return,
+                        Resolved::Key(hid) => key_for(&KeyEvent { hid, ..ev.clone() }),
+                        #[cfg(all(unix, not(target_os = "macos")))]
+                        Resolved::Keysym(v) => Some(Key::Other(v)),
+                        #[cfg(windows)]
+                        Resolved::VirtualKey(v) => Some(Key::Other(v)),
+                        #[allow(unreachable_patterns)]
+                        _ => {
+                            tracing::warn!(
+                                hid = ev.hid,
+                                "keys.toml names a key of another system; ignored"
+                            );
+                            return;
+                        }
+                    };
+                    let Some(key) = key else {
                         tracing::warn!(hid = ev.hid, "no way to type this key; ignored");
                         return;
                     };
@@ -477,6 +534,66 @@ mod enigo_sink {
             0xE3 | 0xE7 => Key::Meta,
             0xE4 => Key::RControl,
             0xE5 => Key::RShift,
+            // Sound and media: enigo has them on both systems.
+            c::MUTE => Key::VolumeMute,
+            c::VOLUME_DOWN => Key::VolumeDown,
+            c::VOLUME_UP => Key::VolumeUp,
+            c::PLAY_PAUSE => Key::MediaPlayPause,
+            c::NEXT_TRACK => Key::MediaNextTrack,
+            c::PREVIOUS_TRACK => Key::MediaPrevTrack,
+            c::STOP => Key::MediaStop,
+            // Launchers and browser keys have no enigo name, so they go by the system's
+            // own code: a virtual key on Windows ...
+            #[cfg(windows)]
+            c::MAIL => Key::Other(0xB4),
+            #[cfg(windows)]
+            c::EXPLORER => Key::Other(0xB6),
+            #[cfg(windows)]
+            c::CALCULATOR => Key::Other(0xB7),
+            #[cfg(windows)]
+            c::BROWSER_BACK => Key::Other(0xA6),
+            #[cfg(windows)]
+            c::BROWSER_FORWARD => Key::Other(0xA7),
+            #[cfg(windows)]
+            c::BROWSER_REFRESH => Key::Other(0xA8),
+            #[cfg(windows)]
+            c::BROWSER_STOP => Key::Other(0xA9),
+            #[cfg(windows)]
+            c::BROWSER_SEARCH => Key::Other(0xAA),
+            #[cfg(windows)]
+            c::BROWSER_FAVORITES => Key::Other(0xAB),
+            #[cfg(windows)]
+            c::BROWSER_HOME => Key::Other(0xAC),
+            // ... and an X11 keysym (XF86...) elsewhere. Brightness and microphone mute
+            // are only reachable this way: Windows has no key for them to press.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BRIGHTNESS_UP => Key::Other(0x1008_FF02),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BRIGHTNESS_DOWN => Key::Other(0x1008_FF03),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::MIC_MUTE => Key::Other(0x1008_FFB2),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::MAIL => Key::Other(0x1008_FF19),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::CALCULATOR => Key::Other(0x1008_FF1D),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::EXPLORER => Key::Other(0x1008_FF5D),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER => Key::Other(0x1008_FF2E),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER_SEARCH => Key::Other(0x1008_FF1B),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER_HOME => Key::Other(0x1008_FF18),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER_BACK => Key::Other(0x1008_FF26),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER_FORWARD => Key::Other(0x1008_FF27),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER_STOP => Key::Other(0x1008_FF28),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER_REFRESH => Key::Other(0x1008_FF29),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            c::BROWSER_FAVORITES => Key::Other(0x1008_FF30),
             _ => return None,
         })
     }
@@ -535,6 +652,41 @@ mod enigo_sink {
             assert_eq!(key_for(&ev(0x3A, None)), Some(Key::F1));
             assert_eq!(key_for(&ev(0x45, None)), Some(Key::F12));
             assert_eq!(key_for(&ev(0xE1, None)), Some(Key::LShift));
+        }
+
+        #[test]
+        fn volume_and_media_keys_are_named_keys() {
+            assert_eq!(key_for(&ev(c::VOLUME_UP, None)), Some(Key::VolumeUp));
+            assert_eq!(key_for(&ev(c::VOLUME_DOWN, None)), Some(Key::VolumeDown));
+            assert_eq!(key_for(&ev(c::MUTE, None)), Some(Key::VolumeMute));
+            assert_eq!(key_for(&ev(c::PLAY_PAUSE, None)), Some(Key::MediaPlayPause));
+            assert_eq!(key_for(&ev(c::NEXT_TRACK, None)), Some(Key::MediaNextTrack));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn browser_and_launcher_keys_are_virtual_keys_and_brightness_has_none_on_windows() {
+            assert_eq!(key_for(&ev(c::BROWSER_BACK, None)), Some(Key::Other(0xA6)));
+            assert_eq!(key_for(&ev(c::CALCULATOR, None)), Some(Key::Other(0xB7)));
+            assert_eq!(key_for(&ev(c::BRIGHTNESS_UP, None)), None);
+            assert_eq!(key_for(&ev(c::MIC_MUTE, None)), None);
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        #[test]
+        fn brightness_and_mic_mute_are_x11_keysyms_on_linux() {
+            assert_eq!(
+                key_for(&ev(c::BRIGHTNESS_UP, None)),
+                Some(Key::Other(0x1008_FF02))
+            );
+            assert_eq!(
+                key_for(&ev(c::BRIGHTNESS_DOWN, None)),
+                Some(Key::Other(0x1008_FF03))
+            );
+            assert_eq!(
+                key_for(&ev(c::MIC_MUTE, None)),
+                Some(Key::Other(0x1008_FFB2))
+            );
         }
 
         #[cfg(windows)]
@@ -619,6 +771,47 @@ mod tests {
         assert_eq!(s.mice.len(), 1);
         assert_eq!(s.keys.len(), 1);
         assert_eq!(s.leaves, 1);
+    }
+
+    #[test]
+    fn a_machines_own_setup_changes_only_the_special_keys() {
+        use std::collections::HashMap;
+        let perform = HashMap::from([
+            (consumer::BRIGHTNESS_UP, Perform::Ignore),
+            (consumer::MIC_MUTE, Perform::Keysym(0x1008_FFB2)),
+            (consumer::MAIL, Perform::VirtualKey(0xB4)),
+            (consumer::MUTE, Perform::Action(consumer::VOLUME_DOWN)),
+            // A keyboard usage cannot be set up, even if the table says so.
+            (0x04, Perform::Ignore),
+        ]);
+        assert_eq!(resolve(&perform, consumer::BRIGHTNESS_UP), Resolved::Ignore);
+        assert_eq!(
+            resolve(&perform, consumer::MIC_MUTE),
+            Resolved::Keysym(0x1008_FFB2)
+        );
+        assert_eq!(
+            resolve(&perform, consumer::MAIL),
+            Resolved::VirtualKey(0xB4)
+        );
+        assert_eq!(
+            resolve(&perform, consumer::MUTE),
+            Resolved::Key(consumer::VOLUME_DOWN)
+        );
+        // Not mentioned: the built-in way.
+        assert_eq!(
+            resolve(&perform, consumer::VOLUME_UP),
+            Resolved::Key(consumer::VOLUME_UP)
+        );
+        assert_eq!(resolve(&perform, 0x04), Resolved::Key(0x04));
+        // Two actions that name each other do not loop: one step only.
+        let loopy = HashMap::from([
+            (consumer::MUTE, Perform::Action(consumer::VOLUME_UP)),
+            (consumer::VOLUME_UP, Perform::Action(consumer::MUTE)),
+        ]);
+        assert_eq!(
+            resolve(&loopy, consumer::MUTE),
+            Resolved::Key(consumer::VOLUME_UP)
+        );
     }
 
     #[test]
