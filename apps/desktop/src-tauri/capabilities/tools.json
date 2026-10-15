@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "tools",
-  "description": "What the tool windows may do (advanced settings, clients, terminal, log): the same as the main window",
-  "windows": ["settings", "clients", "terminal", "log"],
+  "description": "What the tool windows may do (advanced settings, terminal, log): the same as the main window",
+  "windows": ["settings", "terminal", "log"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

@@ -4,8 +4,8 @@ import App from './App'
 import TransferPopup from './TransferPopup'
 import AdvancedWindow from './windows/AdvancedWindow'
 import { ipc } from './lib/ipc'
+import { openClients } from './lib/panels'
 import Frame, { type Menu } from './windows/Frame'
-import ClientsWindow from './windows/ClientsWindow'
 import LogWindow from './windows/LogWindow'
 import TerminalWindow from './windows/TerminalWindow'
 import './index.css'
@@ -20,7 +20,6 @@ document.documentElement.classList.toggle('dark', window.matchMedia('(prefers-co
 const params = new URLSearchParams(window.location.search)
 const tools = {
   settings: { Page: AdvancedWindow, title: 'Pengaturan lanjutan' },
-  clients: { Page: ClientsWindow, title: 'Daftar client' },
   terminal: { Page: TerminalWindow, title: 'Terminal' },
   log: { Page: LogWindow, title: 'Log' },
 } as const
@@ -29,7 +28,7 @@ const mainMenus: Menu[] = [
     label: 'Alat',
     items: [
       { label: 'Pengaturan lanjutan', run: () => void ipc.openTool('settings') },
-      { label: 'Daftar client', run: () => void ipc.openTool('clients') },
+      { label: 'Daftar client', run: openClients },
       { label: 'Terminal', run: () => void ipc.openTool('terminal') },
       { label: 'Log', run: () => void ipc.openTool('log') },
     ],

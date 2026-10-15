@@ -4,6 +4,7 @@ import { ScreenList } from '@/components/ScreenList'
 import { ScreenStage } from '@/components/ScreenStage'
 import { autoArrange, deskSize, MIN_DESK_SIZE, overlapping, union, unstretched } from '@/lib/geometry'
 import { errorText, ipc } from '@/lib/ipc'
+import { openClients } from '@/lib/panels'
 import type { DeskSnapshot, Draft, Placement, Point, Size } from '@/types'
 
 type Msg = { text: string; kind: 'ok' | 'err' | 'info' } | null
@@ -172,7 +173,7 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
         <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
           <div className="flex items-center justify-between gap-2 rounded-lg border p-3">
             <span className="text-sm">Komputer yang terhubung dan dipercaya</span>
-            <Button variant="outline" size="sm" onClick={() => void ipc.openTool('clients')}>
+            <Button variant="outline" size="sm" onClick={openClients}>
               Daftar client
             </Button>
           </div>

@@ -1,52 +1,52 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
+import { Panel } from '@/components/Panel'
+import { PendingApprovals } from '@/components/PendingApprovals'
 import { RevokeButton } from '@/components/ScreenList'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { useDesk } from '@/hooks/useDesk'
-import { useSession } from '@/hooks/useSession'
-import { useSettings } from '@/hooks/useSettings'
-import { useTheme } from '@/hooks/useTheme'
 import { errorText, ipc } from '@/lib/ipc'
-import type { TrustedClient } from '@/types'
+import type { DeskSnapshot, Pending, TrustedClient } from '@/types'
 
 const POLL_MS = 2000
 
+interface Props {
+  /** The running server's desk, to mark who is connected; none when no server runs. */
+  desk: DeskSnapshot | null
+  refresh: () => Promise<void>
+  /** Answers to the requests waiting at the top, where they can be found again after the panel for them was closed. */
+  onTrust: (p: Pending) => void
+  onDismiss: (p: Pending) => void
+  problem: string | null
+  onClose: () => void
+}
+
 /**
- * The computers this server trusts, read from its config file, so it works with no
- * server running. While one runs, the ones connected now are marked, and a computer
+ * The computers waiting to be trusted, then the ones this server trusts, read from its
+ * config file, so the list works with no server running. While one runs, the ones connected now are marked, and a computer
  * connected without being trusted (TLS off) is listed too.
  */
-export default function ClientsWindow() {
-  const { settings } = useSettings()
-  const session = useSession()
+export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answering, onClose }: Props) {
   const [trusted, setTrusted] = useState<TrustedClient[] | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  useTheme(settings?.theme)
-  // A running session decides the mode, as in the main window.
-  const mode = session.running && session.daemon?.mode ? session.daemon.mode : settings?.mode
-  const { desk, refresh: refreshDesk } = useDesk(session.running && mode === 'server', false)
 
-  const load = useCallback(async () => {
-    try {
-      setTrusted(await ipc.trustedClients())
-      setProblem(null)
-    } catch (e) {
-      setProblem(errorText(e))
-    }
-  }, [])
+  const load = () =>
+    ipc.trustedClients().then(
+      (list) => {
+        setTrusted(list)
+        setProblem(null)
+      },
+      (e) => setProblem(errorText(e)),
+    )
 
   useEffect(() => {
     void load()
     const id = window.setInterval(() => void load(), POLL_MS)
     return () => window.clearInterval(id)
-  }, [load])
-
-  if (!settings) return null
+  }, [])
 
   const revoke = async (name: string) => {
     try {
       await ipc.revokeClient(name)
-      await Promise.all([load(), refreshDesk()])
+      await Promise.all([load(), refresh()])
     } catch (e) {
       setProblem(`Gagal: ${errorText(e)}`)
     }
@@ -60,24 +60,27 @@ export default function ClientsWindow() {
   names.sort((a, b) => Number(connected.has(b)) - Number(connected.has(a)) || a.localeCompare(b))
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-y-auto p-4">
+    <Panel title="Daftar client" onClose={onClose}>
       {desk && desk.pending.length > 0 && (
-        <div className="flex items-center justify-between gap-2 rounded-lg border p-3" style={{ borderColor: 'var(--warn)' }}>
-          <span className="text-sm">{desk.pending.length} komputer meminta tersambung</span>
-          <Button size="sm" onClick={() => void ipc.showApprovals()}>
-            Lihat
-          </Button>
-        </div>
+        <section className="space-y-1">
+          <h2 className="text-sm font-semibold">Menunggu persetujuan</h2>
+          <PendingApprovals pending={desk.pending} onTrust={onTrust} onDismiss={onDismiss} />
+          {answering && (
+            <p className="text-sm" style={{ color: 'var(--bad)' }}>
+              {answering}
+            </p>
+          )}
+        </section>
       )}
       {trusted && names.length === 0 && (
         <p className="text-sm text-muted-foreground">Belum ada client yang dipercaya.</p>
       )}
-      <div className="space-y-2">
+      <div className="divide-y">
         {names.map((name) => {
           const fp = fingerprint(name)
           const sizes = monitors(name).map((m) => `${m.w}×${m.h}`).join(', ')
           return (
-            <div key={name} className="rounded-lg border p-3">
+            <div key={name} className="space-y-1 py-3 first:pt-0">
               <div className="flex items-center gap-2 font-semibold">
                 {name}
                 {fp && (
@@ -91,7 +94,7 @@ export default function ClientsWindow() {
                   style={{ background: connected.has(name) ? 'var(--ok)' : 'var(--muted-foreground)' }}
                 />
               </div>
-              <p className="mb-1 text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 {connected.has(name) ? `Terhubung · ${monitors(name).length} monitor: ${sizes}` : 'Tidak terhubung'}
               </p>
               {fp && <RevokeButton onConfirm={() => void revoke(name)} />}
@@ -104,6 +107,6 @@ export default function ClientsWindow() {
           {problem}
         </p>
       )}
-    </div>
+    </Panel>
   )
 }

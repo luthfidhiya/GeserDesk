@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import appIcon from '@/assets/app-icon.png'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { ApprovalsPanel } from '@/components/ApprovalsPanel'
+import { ClientsPanel } from '@/components/ClientsPanel'
 import { TrustServerDialog } from '@/components/TrustServerDialog'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -10,6 +11,7 @@ import { useSession } from '@/hooks/useSession'
 import { useSettings } from '@/hooks/useSettings'
 import { useTheme } from '@/hooks/useTheme'
 import { errorText, EVENTS, ipc, on } from '@/lib/ipc'
+import { onOpenClients } from '@/lib/panels'
 import type { Mode, Tab } from '@/types'
 import { ControlView } from '@/views/ControlView'
 import { LayoutView } from '@/views/LayoutView'
@@ -32,8 +34,13 @@ export default function App() {
   const [approvalsOpen, setApprovalsOpen] = useState(false)
   const [approvalsProblem, setApprovalsProblem] = useState<string | null>(null)
   useEffect(() => on<null>(EVENTS.approvals, () => void refresh().then(() => setApprovalsOpen(true))), [refresh])
+  // The clients panel: from the Alat menu or the button in the monitor tab. A request that comes
+  // in takes its place.
+  const [clientsOpen, setClientsOpen] = useState(false)
+  useEffect(() => onOpenClients(() => setClientsOpen(true)), [])
   const pending = desk?.pending ?? []
   const showApprovals = approvalsOpen && pending.length > 0
+  const showClients = clientsOpen && !showApprovals
   const answer = async (action: () => Promise<void>) => {
     try {
       await action()
@@ -115,6 +122,16 @@ export default function App() {
           )}
         </main>
       </div>
+      {showClients && (
+        <ClientsPanel
+          desk={desk}
+          refresh={refresh}
+          onTrust={(p) => void answer(() => ipc.approveClient(p.name, p.fingerprint))}
+          onDismiss={(p) => void answer(() => ipc.dismissClient(p.name, p.fingerprint))}
+          problem={approvalsProblem}
+          onClose={() => setClientsOpen(false)}
+        />
+      )}
       {showApprovals && (
         <ApprovalsPanel
           pending={pending}
