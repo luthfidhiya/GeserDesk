@@ -3,7 +3,8 @@ import { createRoot } from 'react-dom/client'
 import App from './App'
 import TransferPopup from './TransferPopup'
 import AdvancedWindow from './windows/AdvancedWindow'
-import Frame from './windows/Frame'
+import { ipc } from './lib/ipc'
+import Frame, { type Menu } from './windows/Frame'
 import LogWindow from './windows/LogWindow'
 import TerminalWindow from './windows/TerminalWindow'
 import './index.css'
@@ -21,6 +22,16 @@ const tools = {
   terminal: { Page: TerminalWindow, title: 'Terminal' },
   log: { Page: LogWindow, title: 'Log' },
 } as const
+const mainMenus: Menu[] = [
+  {
+    label: 'Alat',
+    items: [
+      { label: 'Pengaturan lanjutan', run: () => void ipc.openTool('settings') },
+      { label: 'Terminal', run: () => void ipc.openTool('terminal') },
+      { label: 'Log', run: () => void ipc.openTool('log') },
+    ],
+  },
+]
 const tool = params.get('window') as keyof typeof tools | null
 const page = tool && tools[tool]
 const Root = page
@@ -31,7 +42,11 @@ const Root = page
     )
   : params.get('popup') === 'transfer'
     ? TransferPopup
-    : App
+    : () => (
+        <Frame menus={mainMenus}>
+          <App />
+        </Frame>
+      )
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

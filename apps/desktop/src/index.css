@@ -160,3 +160,15 @@ body { margin: 0; overflow: hidden; }
 .titlebar button:hover {
   background: var(--tb-hover);
 }
+.titlebar .menu-top:hover,
+.titlebar .menu-top[data-open] {
+  background: var(--tb-hover);
+}
+.titlebar .menu-pop {
+  background: var(--tb-bg);
+  color: var(--tb-fg);
+  border-color: var(--tb-hover);
+}
+.titlebar .menu-item:hover {
+  background: var(--tb-hover);
+}
