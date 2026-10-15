@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import appIcon from '@/assets/app-icon.png'
 import { ThemeToggle } from '@/components/ThemeToggle'
 import { TrustServerDialog } from '@/components/TrustServerDialog'
@@ -8,7 +8,7 @@ import { useDesk } from '@/hooks/useDesk'
 import { useSession } from '@/hooks/useSession'
 import { useSettings } from '@/hooks/useSettings'
 import { useTheme } from '@/hooks/useTheme'
-import { EVENTS, ipc, on } from '@/lib/ipc'
+import { EVENTS, on } from '@/lib/ipc'
 import type { Mode, Tab } from '@/types'
 import { ControlView } from '@/views/ControlView'
 import { LayoutView } from '@/views/LayoutView'
@@ -26,18 +26,6 @@ export default function App() {
 
   // The tray's "Pengaturan layar" asks the window to show the monitor tab (server only).
   useEffect(() => on<string>(EVENTS.navigate, (to) => to === 'layout' && setTab('layout')), [])
-
-  // A computer asking to connect for the first time gets a window of its own. One window
-  // per new request: a request left undecided does not open it again, but a computer that
-  // asks again after it was answered does.
-  const asked = useRef(new Set<string>())
-  useEffect(() => {
-    if (!desk) return
-    const now = new Set(desk.pending.map((p) => p.name + '/' + p.fingerprint))
-    const fresh = [...now].some((key) => !asked.current.has(key))
-    asked.current = now
-    if (fresh) void ipc.openTool('approvals')
-  }, [desk])
 
   if (!settings) return null
 

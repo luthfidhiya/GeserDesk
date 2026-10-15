@@ -64,6 +64,11 @@ pub fn open_tool(app: AppHandle, tool: String) -> Result<(), String> {
     Ok(())
 }
 
+/// A computer asked to connect: bring the approvals window up.
+pub fn open_approvals(app: &AppHandle) {
+    open(app, Tool::Approvals);
+}
+
 /// One window is made at a time, so two quick clicks cannot make two of the same.
 static OPENING: Mutex<()> = Mutex::new(());
 

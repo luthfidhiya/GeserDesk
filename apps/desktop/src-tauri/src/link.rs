@@ -15,6 +15,7 @@ use crate::events::{DAEMON, LOG, PROMPT, STATUS, TRANSFER};
 use crate::state::{AppState, DaemonView};
 use crate::transfer_window;
 use crate::tray;
+use crate::windows;
 
 /// How often to look for a daemon while attached to none.
 const POLL: Duration = Duration::from_millis(1500);
@@ -73,6 +74,12 @@ async fn attached(app: &AppHandle, remote: Remote) {
     publish_status(app, remote.status().await.unwrap_or(Status::Stopped));
     publish_info(app, &remote).await;
     let _ = app.emit(PROMPT, remote.current_prompt().await.ok().flatten());
+    // Requests that came in before this app was attached are still waiting for an answer.
+    if let Ok(Some(desk)) = remote.desk().await {
+        if !desk.pending.is_empty() {
+            windows::open_approvals(app);
+        }
+    }
 
     loop {
         tokio::select! {
@@ -97,6 +104,10 @@ async fn attached(app: &AppHandle, remote: Remote) {
                         transfer_window::show(app);
                     }
                     let _ = app.emit(TRANSFER, &progress);
+                }
+                Ok(Event::ClientRequest(request)) => {
+                    info!(name = %request.name, addr = %request.addr, "a computer asks to be trusted");
+                    windows::open_approvals(app);
                 }
                 Ok(Event::Closing) | Err(RecvError::Closed) => break,
                 Err(RecvError::Lagged(skipped)) => warn!(skipped, "daemon events fell behind"),
