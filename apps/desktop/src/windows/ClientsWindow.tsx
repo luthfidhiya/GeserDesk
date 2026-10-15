@@ -64,7 +64,7 @@ export default function ClientsWindow() {
       {desk && desk.pending.length > 0 && (
         <div className="flex items-center justify-between gap-2 rounded-lg border p-3" style={{ borderColor: 'var(--warn)' }}>
           <span className="text-sm">{desk.pending.length} komputer meminta tersambung</span>
-          <Button size="sm" onClick={() => void ipc.openTool('approvals')}>
+          <Button size="sm" onClick={() => void ipc.showApprovals()}>
             Lihat
           </Button>
         </div>

@@ -77,6 +77,7 @@ pub fn run() {
             commands::session::shutdown_daemon,
             commands::session::own_fingerprint,
             windows::open_tool,
+            windows::show_approvals,
             menu::show_about,
             terminal::terminal_run,
             terminal::terminal_kill,

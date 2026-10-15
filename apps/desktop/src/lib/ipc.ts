@@ -58,8 +58,10 @@ export const ipc = {
 
   /** The "Tentang GeserDesk" box. */
   showAbout: () => invoke<void>('show_about'),
-  /** Open (or raise) a tool window: `settings`, `clients`, `approvals`, `terminal` or `log`. */
-  openTool: (tool: 'settings' | 'clients' | 'approvals' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
+  /** Open (or raise) a tool window: `settings`, `clients`, `terminal` or `log`. */
+  /** Bring the main window up with the computers asking to connect over it. */
+  showApprovals: () => invoke<void>('show_approvals'),
+  openTool: (tool: 'settings' | 'clients' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
   /** Run `geserdesk <line>` (the CLI beside the app). Output and the end arrive as events with the id it returns. */
   terminalRun: (line: string) => invoke<number>('terminal_run', { line }),
   terminalKill: () => invoke<void>('terminal_kill'),
@@ -82,6 +84,7 @@ export const EVENTS = {
   prompt: 'trust://prompt',
   daemon: 'daemon://info',
   navigate: 'ui://navigate',
+  approvals: 'ui://approvals',
   settings: 'settings://changed',
   terminalOut: 'terminal://out',
   terminalExit: 'terminal://exit',

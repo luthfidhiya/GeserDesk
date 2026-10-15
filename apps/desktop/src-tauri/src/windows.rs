@@ -5,14 +5,16 @@
 
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing::warn;
+
+use crate::events::APPROVALS;
+use crate::tray;
 
 #[derive(Clone, Copy)]
 enum Tool {
     Settings,
     Clients,
-    Approvals,
     Terminal,
     Log,
 }
@@ -22,7 +24,6 @@ impl Tool {
         match self {
             Tool::Settings => "settings",
             Tool::Clients => "clients",
-            Tool::Approvals => "approvals",
             Tool::Terminal => "terminal",
             Tool::Log => "log",
         }
@@ -32,7 +33,6 @@ impl Tool {
         match self {
             Tool::Settings => "Pengaturan lanjutan",
             Tool::Clients => "Daftar client",
-            Tool::Approvals => "Permintaan sambung",
             Tool::Terminal => "Terminal",
             Tool::Log => "Log",
         }
@@ -42,20 +42,18 @@ impl Tool {
         match self {
             Tool::Settings => (560.0, 640.0),
             Tool::Clients => (560.0, 560.0),
-            Tool::Approvals => (520.0, 520.0),
             Tool::Terminal => (780.0, 480.0),
             Tool::Log => (820.0, 520.0),
         }
     }
 }
 
-/// The page asks for a tool window by its label (`settings`, `clients`, `approvals`, `terminal`, `log`).
+/// The page asks for a tool window by its label (`settings`, `clients`, `terminal`, `log`).
 #[tauri::command]
 pub fn open_tool(app: AppHandle, tool: String) -> Result<(), String> {
     let tool = match tool.as_str() {
         "settings" => Tool::Settings,
         "clients" => Tool::Clients,
-        "approvals" => Tool::Approvals,
         "terminal" => Tool::Terminal,
         "log" => Tool::Log,
         other => return Err(format!("jendela tidak dikenal: {other}")),
@@ -64,9 +62,16 @@ pub fn open_tool(app: AppHandle, tool: String) -> Result<(), String> {
     Ok(())
 }
 
-/// A computer asked to connect: bring the approvals window up.
+/// A computer asked to connect: bring the main window up, with the requests over it.
 pub fn open_approvals(app: &AppHandle) {
-    open(app, Tool::Approvals);
+    tray::show_window(app);
+    let _ = app.emit(APPROVALS, ());
+}
+
+/// The page asks for the requests to be shown again (the clients window has a button).
+#[tauri::command]
+pub fn show_approvals(app: AppHandle) {
+    open_approvals(&app);
 }
 
 /// One window is made at a time, so two quick clicks cannot make two of the same.

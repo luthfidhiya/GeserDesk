@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import appIcon from '@/assets/app-icon.png'
 import { ThemeToggle } from '@/components/ThemeToggle'
+import { ApprovalsPanel } from '@/components/ApprovalsPanel'
 import { TrustServerDialog } from '@/components/TrustServerDialog'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -8,7 +9,7 @@ import { useDesk } from '@/hooks/useDesk'
 import { useSession } from '@/hooks/useSession'
 import { useSettings } from '@/hooks/useSettings'
 import { useTheme } from '@/hooks/useTheme'
-import { EVENTS, on } from '@/lib/ipc'
+import { errorText, EVENTS, ipc, on } from '@/lib/ipc'
 import type { Mode, Tab } from '@/types'
 import { ControlView } from '@/views/ControlView'
 import { LayoutView } from '@/views/LayoutView'
@@ -26,6 +27,22 @@ export default function App() {
 
   // The tray's "Pengaturan layar" asks the window to show the monitor tab (server only).
   useEffect(() => on<string>(EVENTS.navigate, (to) => to === 'layout' && setTab('layout')), [])
+
+  // A computer asking to connect: the daemon says so, and the requests come up over this window.
+  const [approvalsOpen, setApprovalsOpen] = useState(false)
+  const [approvalsProblem, setApprovalsProblem] = useState<string | null>(null)
+  useEffect(() => on<null>(EVENTS.approvals, () => void refresh().then(() => setApprovalsOpen(true))), [refresh])
+  const pending = desk?.pending ?? []
+  const showApprovals = approvalsOpen && pending.length > 0
+  const answer = async (action: () => Promise<void>) => {
+    try {
+      await action()
+      setApprovalsProblem(null)
+      await refresh()
+    } catch (e) {
+      setApprovalsProblem(`Gagal: ${errorText(e)}`)
+    }
+  }
 
   if (!settings) return null
 
@@ -98,6 +115,15 @@ export default function App() {
           )}
         </main>
       </div>
+      {showApprovals && (
+        <ApprovalsPanel
+          pending={pending}
+          problem={approvalsProblem}
+          onTrust={(p) => void answer(() => ipc.approveClient(p.name, p.fingerprint))}
+          onDismiss={(p) => void answer(() => ipc.dismissClient(p.name, p.fingerprint))}
+          onClose={() => setApprovalsOpen(false)}
+        />
+      )}
       <TrustServerDialog prompt={session.prompt} onAnswer={(t) => void session.answer(t)} />
     </TooltipProvider>
   )
