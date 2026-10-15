@@ -1,7 +1,8 @@
-import { StrictMode, type ComponentType } from 'react'
+import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import TransferPopup from './TransferPopup'
+import AdvancedWindow from './windows/AdvancedWindow'
 import Frame from './windows/Frame'
 import './index.css'
 
@@ -13,8 +14,10 @@ document.documentElement.classList.toggle('dark', window.matchMedia('(prefers-co
 // opens and the tool windows `windows.rs` opens (no router: one query parameter
 // each is simpler than a routing library for a few extra pages).
 const params = new URLSearchParams(window.location.search)
-const tools: Record<string, { Page: ComponentType; title: string }> = {}
-const tool = params.get('window')
+const tools = {
+  settings: { Page: AdvancedWindow, title: 'Pengaturan lanjutan' },
+} as const
+const tool = params.get('window') as keyof typeof tools | null
 const page = tool && tools[tool]
 const Root = page
   ? () => (

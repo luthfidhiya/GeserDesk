@@ -48,7 +48,7 @@ export function ClientForm({ settings, disabled, onChange }: Props) {
   )
 }
 
-export function ServerForm({ settings, disabled, onChange, onProblem }: Props) {
+export function ServerForm({ settings, disabled, onChange, onProblem, bare }: Props & { bare?: boolean }) {
   const path = settings.server.config
   const [exists, setExists] = useState(true)
   const [defaultPath, setDefaultPath] = useState<string | null>(null)
@@ -99,42 +99,53 @@ export function ServerForm({ settings, disabled, onChange, onProblem }: Props) {
     if (next === 'default' && defaultPath) set(defaultPath)
   }
 
+  // In the main window: the two choices and a button to the advanced settings
+  // window. In that window (`bare`) the port and switching settings follow.
   return (
-    <details className="rounded-lg border p-3" open={needsAttention || undefined}>
-      <summary className="cursor-pointer text-sm text-muted-foreground">
-        Lanjutan{custom ? ': memakai berkas konfigurasi lain' : ''}
-      </summary>
-      <div className="mt-3 space-y-3">
-        <div className="text-sm">Berkas konfigurasi</div>
-        <RadioGroup value={choice ?? 'default'} onValueChange={(v) => pick(v as 'default' | 'custom')} disabled={disabled}>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+        <span className="text-sm">Berkas konfigurasi</span>
+        <RadioGroup
+          className="flex items-center gap-6"
+          value={choice ?? 'default'}
+          onValueChange={(v) => pick(v as 'default' | 'custom')}
+          disabled={disabled}
+        >
           <div className="flex items-center gap-2">
             <RadioGroupItem value="default" id="cfg-default" />
-            <Label htmlFor="cfg-default">Bawaan (dibuat otomatis saat Start)</Label>
+            <Label htmlFor="cfg-default">Bawaan</Label>
           </div>
           <div className="flex items-center gap-2">
             <RadioGroupItem value="custom" id="cfg-custom" />
             <Label htmlFor="cfg-custom">Berkas lain</Label>
           </div>
         </RadioGroup>
+        {!bare && (
+          <Button variant="outline" size="sm" className="ml-auto" onClick={() => void ipc.openTool('settings')}>
+            Pengaturan lanjutan
+          </Button>
+        )}
+      </div>
+      {custom && (
         <div className="grid grid-cols-[1fr_auto] items-center gap-x-3">
           <Input
             id="cfg"
             aria-label="Path berkas konfigurasi"
-            disabled={disabled || !custom}
+            disabled={disabled}
             value={path}
             onChange={(e) => set(e.target.value)}
           />
-          <Button variant="outline" disabled={disabled || !custom} onClick={() => void browse()}>
+          <Button variant="outline" disabled={disabled} onClick={() => void browse()}>
             Pilih…
           </Button>
         </div>
-        {needsAttention && !disabled && (
-          <Button variant="secondary" onClick={() => void create()}>
-            Buat berkas konfigurasi awal
-          </Button>
-        )}
-        {!needsAttention && <TuningForm path={path} disabled={disabled} />}
-      </div>
-    </details>
+      )}
+      {needsAttention && !disabled && (
+        <Button variant="secondary" onClick={() => void create()}>
+          Buat berkas konfigurasi awal
+        </Button>
+      )}
+      {bare && !needsAttention && <TuningForm path={path} disabled={disabled} />}
+    </div>
   )
 }

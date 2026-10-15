@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ipc } from '@/lib/ipc'
+import { EVENTS, ipc, on } from '@/lib/ipc'
 import type { Settings } from '@/types'
 
 /** The remembered settings, saved a moment after each edit. */
@@ -9,6 +9,9 @@ export function useSettings() {
 
   useEffect(() => {
     void ipc.loadSettings().then(setSettings)
+    // Another window (the advanced settings) saved a change: take it, so this one
+    // does not keep and later save an older copy.
+    return on<Settings>(EVENTS.settings, setSettings)
   }, [])
 
   const update = useCallback((change: (s: Settings) => Settings) => {

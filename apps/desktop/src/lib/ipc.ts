@@ -74,6 +74,7 @@ export const EVENTS = {
   prompt: 'trust://prompt',
   daemon: 'daemon://info',
   navigate: 'ui://navigate',
+  settings: 'settings://changed',
   transfer: 'transfer://progress',
 } as const
 

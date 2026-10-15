@@ -3,8 +3,9 @@ use std::path::Path;
 
 use geserdesk_app::settings::{create_default_config as create, Tuning};
 use geserdesk_app::Settings;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
+use crate::events::SETTINGS as SETTINGS_CHANGED;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -12,9 +13,13 @@ pub fn load_settings(state: State<'_, AppState>) -> Settings {
     state.settings()
 }
 
+/// Remember the settings and tell every window, so one that did not change them
+/// (the main window, while the advanced settings window did) does not keep, and
+/// later save, an older copy.
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: Settings) {
-    state.replace_settings(settings);
+pub fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) {
+    state.replace_settings(settings.clone());
+    let _ = app.emit(SETTINGS_CHANGED, settings);
 }
 
 #[tauri::command]
