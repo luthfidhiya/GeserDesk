@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { PendingApprovals } from '@/components/PendingApprovals'
-import { RevokeButton, ScreenList } from '@/components/ScreenList'
+import { ScreenList } from '@/components/ScreenList'
 import { ScreenStage } from '@/components/ScreenStage'
 import { autoArrange, deskSize, MIN_DESK_SIZE, overlapping, union, unstretched } from '@/lib/geometry'
 import { errorText, ipc } from '@/lib/ipc'
@@ -29,10 +29,6 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
 
   // Only machines that are running now: no stand-ins for ones that never connected.
   const screens = useMemo(() => desk.screens.filter((s) => s.connected), [desk])
-  const offline = useMemo(
-    () => desk.screens.filter((s) => !s.connected && s.trusted_fingerprint),
-    [desk],
-  )
 
   useEffect(() => onBusy(dragging || typing), [dragging, typing, onBusy])
 
@@ -178,6 +174,12 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
           </p>
         </div>
         <div className="min-h-0 space-y-3 overflow-y-auto pr-1">
+          <div className="flex items-center justify-between gap-2 rounded-lg border p-3">
+            <span className="text-sm">Komputer yang terhubung dan dipercaya</span>
+            <Button variant="outline" size="sm" onClick={() => void ipc.openTool('clients')}>
+              Daftar client
+            </Button>
+          </div>
           <PendingApprovals pending={desk.pending} onTrust={(p) => void trust(p)} onDismiss={(p) => void dismiss(p)} />
           <ScreenList
             screens={screens}
@@ -190,17 +192,6 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
             onRevoke={(n) => void revoke(n)}
             onEditing={setTyping}
           />
-          {offline.length > 0 && (
-            <div className="rounded-lg border p-3">
-              <div className="font-semibold">Terpercaya, sedang tidak terhubung</div>
-              {offline.map((s) => (
-                <div key={s.name} className="mt-1 flex items-center justify-between text-sm">
-                  <span>{s.name}</span>
-                  <RevokeButton onConfirm={() => void revoke(s.name)} />
-                </div>
-              ))}
-            </div>
-          )}
           {desk.tls && desk.server_fingerprint && (
             <div className="rounded-lg border p-3">
               <div className="font-semibold">Sidik jari server ini</div>
