@@ -1,3 +1,4 @@
+import { localizeError } from '@/lib/errors'
 import { pick, type Lang } from '@/lib/i18n'
 import type { Status } from '@/types'
 
@@ -13,6 +14,7 @@ export const TONE_COLOR: Record<Tone, string> = {
 /** The one-line text and colour tone for a status. */
 export function describe(s: Status, lang: Lang): { text: string; tone: Tone } {
   const t = (id: string, en: string) => pick(lang, id, en)
+  const detail = 'detail' in s ? localizeError(s.detail, lang) : ''
   switch (s.kind) {
     case 'stopped':
       return { text: t('Berhenti', 'Stopped'), tone: 'idle' }
@@ -25,10 +27,10 @@ export function describe(s: Status, lang: Lang): { text: string; tone: Tone } {
     case 'awaiting_approval':
       return { text: t('Menunggu persetujuan di server', 'Waiting for approval on the server'), tone: 'warn' }
     case 'retrying':
-      return { text: t(`Terputus, mencoba lagi (${s.detail})`, `Disconnected, retrying (${s.detail})`), tone: 'warn' }
+      return { text: t(`Terputus, mencoba lagi (${detail})`, `Disconnected, retrying (${detail})`), tone: 'warn' }
     case 'fatal':
-      return { text: t(`Gagal: ${s.detail}`, `Failed: ${s.detail}`), tone: 'bad' }
+      return { text: t(`Gagal: ${detail}`, `Failed: ${detail}`), tone: 'bad' }
     case 'error':
-      return { text: t(`Kesalahan: ${s.detail}`, `Error: ${s.detail}`), tone: 'bad' }
+      return { text: t(`Kesalahan: ${detail}`, `Error: ${detail}`), tone: 'bad' }
   }
 }

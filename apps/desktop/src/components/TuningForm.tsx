@@ -104,7 +104,7 @@ export function TuningForm({ path, disabled }: Props) {
         [
           ['scroll_lock_locks', t('Scroll Lock mengunci kursor di layar ini', 'Scroll Lock keeps the cursor on this screen')],
           ['clipboard_sharing', t('Bagikan clipboard (teks dan gambar)', 'Share the clipboard (text and pictures)')],
-          ['clipboard_files', t('Bagikan file yang disalin', 'Share copied files')],
+          ['clipboard_files', t('Bagikan berkas yang disalin', 'Share copied files')],
         ] as const
       ).map(([key, label]) => (
         <div key={key} className="flex items-center gap-2">

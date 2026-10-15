@@ -5,7 +5,8 @@ import { Input } from '@/components/ui/input'
 import { useSession } from '@/hooks/useSession'
 import { useSettings } from '@/hooks/useSettings'
 import { useTheme } from '@/hooks/useTheme'
-import { useT } from '@/lib/i18n'
+import { localizeError } from '@/lib/errors'
+import { useLang, useT } from '@/lib/i18n'
 import { errorText, ipc } from '@/lib/ipc'
 import type { KeyAction, KeyEntries } from '@/types'
 
@@ -134,6 +135,7 @@ export default function KeysWindow() {
   const session = useSession()
   useTheme(settings?.theme)
   const tr = useT()
+  const lang = useLang()
   const label = (id: string) => (LABELS[id] ? tr(...LABELS[id]) : id)
   const [rules, setRules] = useState<{ trigger: string; action: string }[] | null>(null)
   const [actions, setActions] = useState<KeyAction[]>([])
@@ -283,7 +285,7 @@ export default function KeysWindow() {
         <div className="rounded-md px-3 py-2 text-xs" style={{ color: 'var(--bad)', background: 'color-mix(in oklch, var(--bad) 10%, transparent)' }}>
           <div className="font-medium">{tr('keys.toml punya baris yang dilewati saat Mulai:', 'keys.toml has lines that are skipped at Start:')}</div>
           <ul className="mt-1 list-disc pl-4 font-mono">
-            {problems.map((p) => <li key={p}>{p}</li>)}
+            {problems.map((p) => <li key={p}>{localizeError(p, lang)}</li>)}
           </ul>
           <div className="mt-1">{tr('Perbaiki di bawah lalu Simpan.', 'Correct them below, then Save.')}</div>
         </div>

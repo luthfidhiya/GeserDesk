@@ -2,6 +2,8 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { localizeError } from '@/lib/errors'
+import { currentLang } from '@/lib/i18n'
 import type {
   DaemonInfo,
   DeskSnapshot,
@@ -97,6 +99,8 @@ export const EVENTS = {
 } as const
 
 /** Error text from a rejected command (the shell rejects with a string). */
+/** What went wrong, in the window's language where the message is a known one. */
 export function errorText(e: unknown): string {
-  return typeof e === 'string' ? e : e instanceof Error ? e.message : String(e)
+  const text = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e)
+  return localizeError(text, currentLang())
 }

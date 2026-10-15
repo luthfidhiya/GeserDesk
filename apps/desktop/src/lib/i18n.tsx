@@ -19,5 +19,12 @@ export function useT() {
   return (id: string, en: string) => (lang === 'en' ? en : id)
 }
 
+/** The language now, for code that is neither a component nor handed it (error messages). */
+let current: Lang = 'id'
+export const currentLang = () => current
+export const setCurrentLang = (lang: Lang) => {
+  current = lang
+}
+
 /** The same, for code that is not a component and is handed the language. */
 export const pick = (lang: Lang, id: string, en: string) => (lang === 'en' ? en : id)

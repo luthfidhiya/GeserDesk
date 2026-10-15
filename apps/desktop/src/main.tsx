@@ -4,7 +4,7 @@ import App from './App'
 import TransferPopup from './TransferPopup'
 import AdvancedWindow from './windows/AdvancedWindow'
 import { useSettings } from './hooks/useSettings'
-import { LangProvider, pick, type Lang } from './lib/i18n'
+import { LangProvider, pick, setCurrentLang, type Lang } from './lib/i18n'
 import { ipc } from './lib/ipc'
 import { openClients } from './lib/panels'
 import Frame, { type Menu } from './windows/Frame'
@@ -58,6 +58,7 @@ function mainMenus(lang: Lang, setLang: (l: Lang) => void): Menu[] {
 function Localized({ children }: { children: (lang: Lang, setLang: (l: Lang) => void) => ReactNode }) {
   const { settings, update } = useSettings()
   const lang: Lang = settings?.language ?? 'id'
+  setCurrentLang(lang)
   useEffect(() => {
     document.documentElement.lang = lang
   }, [lang])
