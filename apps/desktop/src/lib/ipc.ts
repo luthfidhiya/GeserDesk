@@ -6,6 +6,8 @@ import type {
   DaemonInfo,
   DeskSnapshot,
   LogLine,
+  KeyAction,
+  KeyEntries,
   Mode,
   Point,
   Settings,
@@ -35,6 +37,10 @@ export const ipc = {
   readTuning: (path: string) => invoke<Tuning>('read_tuning', { path }),
   /** Takes effect at the next Start. */
   writeTuning: (path: string, tuning: Tuning) => invoke<void>('write_tuning', { path, tuning }),
+  keyActions: () => invoke<KeyAction[]>('key_actions'),
+  readKeys: () => invoke<KeyEntries>('read_keys'),
+  /** Checked first; takes effect at the next Start. */
+  writeKeys: (entries: KeyEntries) => invoke<void>('write_keys', { entries }),
   configExists: (path: string) => invoke<boolean>('config_exists', { path }),
 
   /** `null` while no server is running. */
@@ -61,7 +67,7 @@ export const ipc = {
   /** The "Tentang GeserDesk" box. */
   showAbout: () => invoke<void>('show_about'),
   /** Open (or raise) a tool window: `settings`, `terminal` or `log`. */
-  openTool: (tool: 'settings' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
+  openTool: (tool: 'settings' | 'keys' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
   /** Run `geserdesk <line>` (the CLI beside the app). Output and the end arrive as events with the id it returns. */
   terminalRun: (line: string) => invoke<number>('terminal_run', { line }),
   terminalKill: () => invoke<void>('terminal_kill'),

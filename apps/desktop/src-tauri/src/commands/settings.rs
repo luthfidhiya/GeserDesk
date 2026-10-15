@@ -51,3 +51,21 @@ pub fn write_tuning(path: String, tuning: Tuning) -> Result<(), String> {
 pub fn create_default_config(path: String) -> Result<(), String> {
     create(Path::new(&path)).map_err(|e| format!("{path}: {e}"))
 }
+
+/// The special-key actions, and whether this machine does each with nothing set up.
+#[tauri::command]
+pub fn key_actions() -> Vec<geserdesk_app::keys::ActionInfo> {
+    geserdesk_app::keys::actions()
+}
+
+/// This machine's special-key rules and ways, from its own `keys.toml`.
+#[tauri::command]
+pub fn read_keys() -> Result<geserdesk_app::keys::KeyEntries, String> {
+    geserdesk_app::keys::read_entries()
+}
+
+/// Save them (checked first); they take effect at the next Start.
+#[tauri::command]
+pub fn write_keys(entries: geserdesk_app::keys::KeyEntries) -> Result<(), String> {
+    geserdesk_app::keys::write_entries(&entries)
+}

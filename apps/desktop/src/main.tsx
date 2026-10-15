@@ -6,6 +6,7 @@ import AdvancedWindow from './windows/AdvancedWindow'
 import { ipc } from './lib/ipc'
 import { openClients } from './lib/panels'
 import Frame, { type Menu } from './windows/Frame'
+import KeysWindow from './windows/KeysWindow'
 import LogWindow from './windows/LogWindow'
 import TerminalWindow from './windows/TerminalWindow'
 import './index.css'
@@ -20,6 +21,7 @@ document.documentElement.classList.toggle('dark', window.matchMedia('(prefers-co
 const params = new URLSearchParams(window.location.search)
 const tools = {
   settings: { Page: AdvancedWindow, title: 'Pengaturan lanjutan' },
+  keys: { Page: KeysWindow, title: 'Tombol khusus' },
   terminal: { Page: TerminalWindow, title: 'Terminal' },
   log: { Page: LogWindow, title: 'Log' },
 } as const
@@ -28,6 +30,7 @@ const mainMenus: Menu[] = [
     label: 'Alat',
     items: [
       { label: 'Pengaturan lanjutan', run: () => void ipc.openTool('settings') },
+      { label: 'Tombol khusus', run: () => void ipc.openTool('keys') },
       { label: 'Daftar client', run: openClients },
       { label: 'Terminal', run: () => void ipc.openTool('terminal') },
       { label: 'Log', run: () => void ipc.openTool('log') },

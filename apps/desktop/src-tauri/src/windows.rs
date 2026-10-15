@@ -14,6 +14,7 @@ use crate::tray;
 #[derive(Clone, Copy)]
 enum Tool {
     Settings,
+    Keys,
     Terminal,
     Log,
 }
@@ -22,6 +23,7 @@ impl Tool {
     const fn label(self) -> &'static str {
         match self {
             Tool::Settings => "settings",
+            Tool::Keys => "keys",
             Tool::Terminal => "terminal",
             Tool::Log => "log",
         }
@@ -30,6 +32,7 @@ impl Tool {
     const fn title(self) -> &'static str {
         match self {
             Tool::Settings => "Pengaturan lanjutan",
+            Tool::Keys => "Tombol khusus",
             Tool::Terminal => "Terminal",
             Tool::Log => "Log",
         }
@@ -38,17 +41,19 @@ impl Tool {
     const fn size(self) -> (f64, f64) {
         match self {
             Tool::Settings => (560.0, 640.0),
+            Tool::Keys => (640.0, 720.0),
             Tool::Terminal => (780.0, 480.0),
             Tool::Log => (820.0, 520.0),
         }
     }
 }
 
-/// The page asks for a tool window by its label (`settings`, `terminal`, `log`).
+/// The page asks for a tool window by its label (`settings`, `keys`, `terminal`, `log`).
 #[tauri::command]
 pub fn open_tool(app: AppHandle, tool: String) -> Result<(), String> {
     let tool = match tool.as_str() {
         "settings" => Tool::Settings,
+        "keys" => Tool::Keys,
         "terminal" => Tool::Terminal,
         "log" => Tool::Log,
         other => return Err(format!("jendela tidak dikenal: {other}")),

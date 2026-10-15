@@ -145,3 +145,18 @@ export interface Placement extends Point {
 export type Draft = Record<string, Placement>
 
 export type Tab = 'control' | 'layout'
+
+/** This machine's `keys.toml`: key combinations that mean an action, and how an action is done. */
+export interface KeyEntries {
+  rules: { trigger: string; action: string }[]
+  ways: { action: string; way: string }[]
+  /** Lines the machine would skip as the file is now (read only). */
+  problems?: string[]
+}
+
+/** A special-key action as the code knows it. */
+export interface KeyAction {
+  name: string
+  /** Whether this machine does it with nothing set up. */
+  built_in: boolean
+}
