@@ -5,6 +5,10 @@
   "windows": ["settings", "terminal", "log"],
   "permissions": [
     "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
     "dialog:allow-open",
     "clipboard-manager:allow-write-text"
   ]

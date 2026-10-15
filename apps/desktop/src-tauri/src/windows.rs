@@ -80,6 +80,7 @@ fn open(app: &AppHandle, tool: Tool) {
             WebviewUrl::App(format!("index.html?window={}", tool.label()).into()),
         )
         .title(tool.title())
+        .decorations(false) // the page draws its own title bar (`Frame.tsx`)
         .inner_size(width, height)
         .min_inner_size(360.0, 240.0)
         .build();

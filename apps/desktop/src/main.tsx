@@ -2,6 +2,7 @@ import { StrictMode, type ComponentType } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import TransferPopup from './TransferPopup'
+import Frame from './windows/Frame'
 import './index.css'
 
 // Until the saved theme loads, follow the system so the first paint is not the wrong colour
@@ -16,7 +17,11 @@ const tools: Record<string, { Page: ComponentType; title: string }> = {}
 const tool = params.get('window')
 const page = tool && tools[tool]
 const Root = page
-  ? page.Page
+  ? () => (
+      <Frame title={page.title}>
+        <page.Page />
+      </Frame>
+    )
   : params.get('popup') === 'transfer'
     ? TransferPopup
     : App

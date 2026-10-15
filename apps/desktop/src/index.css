@@ -140,3 +140,23 @@
 }
 html, body, #root { height: 100%; }
 body { margin: 0; overflow: hidden; }
+
+/* The title bar (`Frame.tsx`) follows the operating system's colours, not the app's
+   theme, like the system title bars of other windows. */
+.titlebar {
+  --tb-bg: #f3f3f3;
+  --tb-fg: #1a1a1a;
+  --tb-hover: rgb(0 0 0 / 0.07);
+  background: var(--tb-bg);
+  color: var(--tb-fg);
+}
+@media (prefers-color-scheme: dark) {
+  .titlebar {
+    --tb-bg: #202020;
+    --tb-fg: #ffffff;
+    --tb-hover: rgb(255 255 255 / 0.08);
+  }
+}
+.titlebar button:hover {
+  background: var(--tb-hover);
+}
