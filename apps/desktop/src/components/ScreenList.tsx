@@ -61,7 +61,7 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
               <p className="mb-1 text-xs text-muted-foreground">Bersebelahan: {near.join(', ')}</p>
             ) : (
               <p className="mb-1 text-xs" style={{ color: 'var(--warn)' }}>
-                Tidak menyentuh layar lain: kursor tidak bisa pindah ke sini.
+                Tidak bersentuhan dengan layar lain: kursor tak bisa pindah ke sini.
               </p>
             )}
             <div className="mt-2 grid grid-cols-2 gap-2" onClick={(e) => e.stopPropagation()}>
@@ -108,7 +108,7 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
                   Diregangkan dari {union(s.monitors).w}×{union(s.monitors).h}
                 </span>
                 <Button variant="outline" size="sm" onClick={() => onResetSize(s.name)}>
-                  Reset ukuran
+                  Reset
                 </Button>
               </div>
             )}
