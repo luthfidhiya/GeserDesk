@@ -5,6 +5,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { useLog } from '@/hooks/useLog'
 import type { LogLine } from '@/types'
+import { useT } from '@/lib/i18n'
 
 const LEVEL_COLOR: Record<LogLine['level'], string> = {
   ERROR: 'var(--bad)',
@@ -15,6 +16,7 @@ const LEVEL_COLOR: Record<LogLine['level'], string> = {
 }
 
 export function LogPanel({ daemonPid }: { daemonPid: number | undefined }) {
+  const t = useT()
   const [debug, setDebug] = useState(false)
   const { lines, clear } = useLog(debug, daemonPid)
   const box = useRef<HTMLDivElement>(null)
@@ -35,13 +37,13 @@ export function LogPanel({ daemonPid }: { daemonPid: number | undefined }) {
         <span className="text-sm font-semibold">Log</span>
         <div className="flex items-center gap-2">
           <Checkbox id="debug" checked={debug} onCheckedChange={(c) => setDebug(c === true)} />
-          <Label htmlFor="debug">Rinci (debug)</Label>
+          <Label htmlFor="debug">{t('Rinci (debug)', 'Detailed (debug)')}</Label>
         </div>
         <Button variant="outline" size="sm" onClick={copy}>
-          Salin
+          {t('Salin', 'Copy')}
         </Button>
         <Button variant="outline" size="sm" onClick={() => void clear()}>
-          Bersihkan
+          {t('Bersihkan', 'Clear')}
         </Button>
       </div>
       <div

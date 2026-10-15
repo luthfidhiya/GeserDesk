@@ -5,6 +5,7 @@ import { FingerprintRow } from '@/components/FingerprintRow'
 import { LogPanel } from '@/components/LogPanel'
 import { StatusBar } from '@/components/StatusBar'
 import { Button } from '@/components/ui/button'
+import { useT } from '@/lib/i18n'
 import { ipc } from '@/lib/ipc'
 import type { DaemonInfo, Settings, Status } from '@/types'
 
@@ -23,6 +24,7 @@ interface Props {
 
 /** Choose client or server, set it up, Start/Stop, and watch the log. */
 export function ControlView({ settings, daemon, onChange, status, running, problem, setProblem, onStart, onStop, onShutdownDaemon }: Props) {
+  const t = useT()
   const [fingerprint, setFingerprint] = useState('')
   const mode = settings.mode
   const [appVersion, setAppVersion] = useState('')
@@ -51,23 +53,28 @@ export function ControlView({ settings, daemon, onChange, status, running, probl
       <div className="flex flex-wrap items-center gap-3">
         {running ? (
           <Button variant="destructive" className="w-28" onClick={onStop}>
-            Stop
+            {t('Hentikan', 'Stop')}
           </Button>
         ) : (
           <Button className="w-28" onClick={onStart}>
-            Start
+            {t('Mulai', 'Start')}
           </Button>
         )}
         <StatusBar status={status} />
       </div>
       {daemon && (
         <p className="text-xs text-muted-foreground">
-          Terhubung ke daemon (PID {daemon.pid}, dimulai oleh {daemon.started_by === 'cli' ? 'CLI' : 'aplikasi'}). Menutup
-          jendela tidak menghentikan sesi.
+          {t(
+            `Terhubung ke daemon (PID ${daemon.pid}, dimulai oleh ${daemon.started_by === 'cli' ? 'CLI' : 'aplikasi'}). Menutup jendela tidak menghentikan sesi.`,
+            `Attached to the daemon (PID ${daemon.pid}, started by ${daemon.started_by === 'cli' ? 'the CLI' : 'the app'}). Closing the window does not stop the session.`,
+          )}
           {daemon.compatible && appVersion && daemon.app_version !== appVersion && (
             <span style={{ color: 'var(--warn)' }}>
               {' '}
-              Versi daemon {daemon.app_version} berbeda dari aplikasi {appVersion}.
+              {t(
+                `Versi daemon ${daemon.app_version} berbeda dari aplikasi ${appVersion}.`,
+                `The daemon's version ${daemon.app_version} differs from the app's ${appVersion}.`,
+              )}
             </span>
           )}
         </p>
@@ -75,11 +82,13 @@ export function ControlView({ settings, daemon, onChange, status, running, probl
       {daemon && !daemon.compatible && (
         <div className="flex items-center gap-3 rounded-lg border p-3 text-sm" style={{ borderColor: 'var(--bad)', color: 'var(--bad)' }}>
           <span className="flex-1">
-            Daemon ini memakai protokol {daemon.protocol}, aplikasi ini memakai yang lain. Hentikan dulu daemon lama agar sesi
-            baru bisa dijalankan.
+            {t(
+              `Daemon ini memakai protokol ${daemon.protocol}, aplikasi ini memakai yang lain. Hentikan dulu daemon lama agar sesi baru bisa dijalankan.`,
+              `This daemon speaks protocol ${daemon.protocol} and this app another. Stop the old daemon so a new session can start.`,
+            )}
           </span>
           <Button variant="destructive" size="sm" onClick={onShutdownDaemon}>
-            Hentikan daemon lama
+            {t('Hentikan daemon lama', 'Stop the old daemon')}
           </Button>
         </div>
       )}
@@ -90,7 +99,10 @@ export function ControlView({ settings, daemon, onChange, status, running, probl
       )}
       {status.kind === 'awaiting_approval' && (
         <p className="text-xs" style={{ color: 'var(--warn)' }}>
-          Buka tab Pengaturan monitor di komputer server, lalu setujui komputer ini. ({status.detail})
+          {t(
+            `Buka tab Monitor di komputer server, lalu setujui komputer ini. (${status.detail})`,
+            `Open the Monitors tab on the server, then approve this computer. (${status.detail})`,
+          )}
         </p>
       )}
 

@@ -11,6 +11,7 @@ import { useSession } from '@/hooks/useSession'
 import { useSettings } from '@/hooks/useSettings'
 import { useTheme } from '@/hooks/useTheme'
 import { errorText, EVENTS, ipc, on } from '@/lib/ipc'
+import { useT } from '@/lib/i18n'
 import { onOpenClients } from '@/lib/panels'
 import type { Mode, Tab } from '@/types'
 import { ControlView } from '@/views/ControlView'
@@ -19,6 +20,7 @@ import { LayoutView } from '@/views/LayoutView'
 export default function App() {
   const { settings, update } = useSettings()
   const session = useSession()
+  const t = useT()
   const [tab, setTab] = useState<Tab>('control')
   const [busy, setBusy] = useState(false)
   // A running session decides the mode: the daemon may have been started from the CLI.
@@ -26,8 +28,6 @@ export default function App() {
   const isServer = mode === 'server'
   const { desk, refresh } = useDesk(session.running && isServer, busy)
   useTheme(settings?.theme)
-
-  // The tray's "Pengaturan layar" asks the window to show the monitor tab (server only).
 
   // A computer asking to connect: the daemon says so, and the requests come up over this window.
   const [approvalsOpen, setApprovalsOpen] = useState(false)
@@ -46,7 +46,7 @@ export default function App() {
       setApprovalsProblem(null)
       await refresh()
     } catch (e) {
-      setApprovalsProblem(`Gagal: ${errorText(e)}`)
+      setApprovalsProblem(`${t('Gagal', 'Failed')}: ${errorText(e)}`)
     }
   }
 
@@ -89,9 +89,9 @@ export default function App() {
         {isServer && (
           <Tabs value={shownTab} onValueChange={(t) => setTab(t as Tab)}>
             <TabsList>
-              <TabsTrigger value="control">Konfigurasi</TabsTrigger>
+              <TabsTrigger value="control">{t('Konfigurasi', 'Configuration')}</TabsTrigger>
               <TabsTrigger value="layout">
-                Pengaturan monitor
+                {t('Monitor', 'Monitors')}
                 {desk && desk.pending.length > 0 && (
                   <span className="ml-1.5 rounded-full px-1.5 text-xs text-white" style={{ background: 'var(--warn)' }}>
                     {desk.pending.length}
