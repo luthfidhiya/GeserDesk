@@ -18,6 +18,18 @@ export interface Size {
   h: number
 }
 
+/** The server config's port, switching and sharing settings (crates/geserdesk-server/src/config.rs). */
+export interface Tuning {
+  port: number
+  switch_delay_ms: number
+  switch_double_tap_ms: number
+  switch_corner_size: number
+  jump_zone_size: number
+  scroll_lock_locks: boolean
+  clipboard_sharing: boolean
+  clipboard_files: boolean
+}
+
 export type Mode = 'client' | 'server'
 export type Theme = 'system' | 'light' | 'dark'
 

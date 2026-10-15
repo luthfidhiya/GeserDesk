@@ -5,6 +5,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { TuningForm } from '@/components/TuningForm'
 import { errorText, ipc } from '@/lib/ipc'
 import type { Settings } from '@/types'
 
@@ -132,6 +133,7 @@ export function ServerForm({ settings, disabled, onChange, onProblem }: Props) {
             Buat berkas konfigurasi awal
           </Button>
         )}
+        {!needsAttention && <TuningForm path={path} disabled={disabled} />}
       </div>
     </details>
   )

@@ -12,6 +12,7 @@ import type {
   Size,
   Status,
   TransferProgress,
+  Tuning,
   TrustPrompt,
 } from '@/types'
 
@@ -30,6 +31,9 @@ export const ipc = {
   ownFingerprint: (mode: Mode) => invoke<string | null>('own_fingerprint', { mode }),
   createDefaultConfig: (path: string) => invoke<void>('create_default_config', { path }),
   defaultConfigPath: () => invoke<string>('default_config_path'),
+  readTuning: (path: string) => invoke<Tuning>('read_tuning', { path }),
+  /** Takes effect at the next Start. */
+  writeTuning: (path: string, tuning: Tuning) => invoke<void>('write_tuning', { path, tuning }),
   configExists: (path: string) => invoke<boolean>('config_exists', { path }),
 
   /** `null` while no server is running. */
