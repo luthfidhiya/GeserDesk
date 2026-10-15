@@ -1,3 +1,4 @@
+import { pick, type Lang } from '@/lib/i18n'
 import type { TransferProgress, TransferState } from '@/types'
 
 // Long enough to read, short enough not to linger once a small copy finishes.
@@ -50,16 +51,17 @@ export function percent(done: number, total: number): number {
 }
 
 /** The window's heading for the latest report. */
-export function heading(p: TransferProgress, stalled: boolean, cancelling: boolean): string {
+export function heading(p: TransferProgress, stalled: boolean, cancelling: boolean, lang: Lang = 'id'): string {
+  const t = (id: string, en: string) => pick(lang, id, en)
   switch (p.state.kind) {
     case 'done':
-      return 'Selesai'
+      return t('Selesai', 'Done')
     case 'cancelled':
-      return 'Dibatalkan'
+      return t('Dibatalkan', 'Cancelled')
     case 'failed':
-      return 'Gagal'
+      return t('Gagal', 'Failed')
     case 'running':
-      if (stalled) return `Tidak ada kabar dari ${p.peer}`
-      return cancelling ? 'Membatalkan…' : `Menerima dari ${p.peer}`
+      if (stalled) return t(`Tidak ada kabar dari ${p.peer}`, `Nothing heard from ${p.peer}`)
+      return cancelling ? t('Membatalkan…', 'Cancelling…') : t(`Menerima dari ${p.peer}`, `Receiving from ${p.peer}`)
   }
 }

@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input'
 import { useSettings } from '@/hooks/useSettings'
 import { useTheme } from '@/hooks/useTheme'
 import { EVENTS, errorText, ipc, on } from '@/lib/ipc'
+import { useLang, useT } from '@/lib/i18n'
 
 type Kind = 'in' | 'out' | 'err' | 'sys'
 interface Line {
@@ -31,21 +32,37 @@ const COLOR: Record<Kind, string> = {
 // eslint-disable-next-line no-control-regex
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g
 
-const HELP: Line[] = [
-  { kind: 'sys', text: 'Ketik perintah CLI tanpa kata "geserdesk". Contoh:' },
-  { kind: 'sys', text: '  status          apa yang dikerjakan daemon yang berjalan' },
-  { kind: 'sys', text: '  stop            hentikan daemon dan sesinya' },
-  { kind: 'sys', text: '  --help          semua perintah;  server --help / client --help  untuk opsinya' },
-  { kind: 'sys', text: 'server dan client memulai daemon sendiri dan baru selesai setelah dihentikan (tombol Hentikan,' },
-  { kind: 'sys', text: 'atau tutup jendela ini). Kalau sesi sudah berjalan dari aplikasi, keduanya akan menolak.' },
-  { kind: 'sys', text: 'help: tampilkan ini lagi.  clear: bersihkan layar.  Panah atas/bawah: riwayat.' },
-]
+const HELP: Record<'id' | 'en', string[]> = {
+  id: [
+    'Ketik perintah CLI tanpa kata "geserdesk". Contoh:',
+    '  status          apa yang dikerjakan daemon yang berjalan',
+    '  stop            hentikan daemon dan sesinya',
+    '  --help          semua perintah;  server --help / client --help  untuk opsinya',
+    'server dan client memulai daemon sendiri dan baru selesai setelah dihentikan (tombol Hentikan,',
+    'atau tutup jendela ini). Kalau sesi sudah berjalan dari aplikasi, keduanya akan menolak.',
+    'help: tampilkan ini lagi.  clear: bersihkan layar.  Panah atas/bawah: riwayat.',
+  ],
+  en: [
+    'Type a CLI command without the word "geserdesk". For example:',
+    '  status          what the running daemon is doing',
+    '  stop            stop the daemon and its session',
+    '  --help          every command;  server --help / client --help  for their options',
+    'server and client start a daemon of their own and only finish once stopped (the Stop button,',
+    'or close this window). If a session already runs from the app, both refuse.',
+    'help: show this again.  clear: clear the screen.  Up/down arrows: history.',
+  ],
+}
+const help = (lang: 'id' | 'en'): Line[] => HELP[lang].map((text) => ({ kind: 'sys', text }))
 
 /** Try `geserdesk` command-line commands here; output streams in as it is printed. */
 export default function TerminalWindow() {
   const { settings } = useSettings()
   useTheme(settings?.theme)
-  const [lines, setLines] = useState<Line[]>(HELP)
+  const t = useT()
+  const lang = useLang()
+  // The help shown on opening follows the language, which arrives a moment after the window.
+  const [intro, setIntro] = useState(true)
+  const [lines, setLines] = useState<Line[]>([])
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
   const history = useRef<string[]>([])
@@ -60,7 +77,7 @@ export default function TerminalWindow() {
     const offs = [
       on<Out>(EVENTS.terminalOut, (o) => add([{ kind: o.stream, text: o.line.replace(ANSI, '') }])),
       on<Exit>(EVENTS.terminalExit, (e) => {
-        add([{ kind: 'sys', text: e.code === null ? '[dihentikan]' : `[selesai, kode ${e.code}]` }])
+        add([{ kind: 'sys', text: e.code === null ? t('[dihentikan]', '[stopped]') : t(`[selesai, kode ${e.code}]`, `[finished, code ${e.code}]`) }])
         setRunning(false)
       }),
     ]
@@ -86,10 +103,11 @@ export default function TerminalWindow() {
     const word = line.toLowerCase()
     if (word === 'clear' || word === 'cls') {
       setLines([])
+      setIntro(false)
       return
     }
     if (word === 'help') {
-      add([{ kind: 'in', text: `> ${line}` }, ...HELP])
+      add([{ kind: 'in', text: `> ${line}` }, ...help(lang)])
       return
     }
     add([{ kind: 'in', text: `> geserdesk ${line}` }])
@@ -119,7 +137,7 @@ export default function TerminalWindow() {
         }}
         className="min-h-0 flex-1 overflow-y-auto rounded-md border bg-muted/40 p-2 font-mono text-xs"
       >
-        {lines.map((l, i) => (
+        {[...(intro ? help(lang) : []), ...lines].map((l, i) => (
           <div key={i} className="whitespace-pre-wrap break-all" style={{ color: COLOR[l.kind] }}>
             {l.text || ' '}
           </div>
@@ -131,8 +149,8 @@ export default function TerminalWindow() {
           ref={field}
           autoFocus
           className="font-mono text-xs"
-          aria-label="Perintah"
-          placeholder={running ? 'berjalan…' : 'status'}
+          aria-label={t('Perintah', 'Command')}
+          placeholder={running ? t('berjalan…', 'running…') : 'status'}
           disabled={running}
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -150,15 +168,15 @@ export default function TerminalWindow() {
         />
         {running ? (
           <Button variant="destructive" onClick={() => void ipc.terminalKill()}>
-            Hentikan
+            {t('Hentikan', 'Stop')}
           </Button>
         ) : (
           <Button onClick={() => void run()} disabled={!input.trim()}>
-            Jalankan
+            {t('Jalankan', 'Run')}
           </Button>
         )}
-        <Button variant="outline" onClick={() => setLines([])}>
-          Bersihkan
+        <Button variant="outline" onClick={() => { setLines([]); setIntro(false) }}>
+          {t('Bersihkan', 'Clear')}
         </Button>
       </div>
     </div>

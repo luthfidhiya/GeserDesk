@@ -66,6 +66,7 @@ describe('heading', () => {
     expect(heading(report({ kind: 'done' }), true, true)).toBe('Selesai')
     expect(heading(report({ kind: 'cancelled' }), true, true)).toBe('Dibatalkan')
     expect(heading(report({ kind: 'failed', detail: 'x' }), true, true)).toBe('Gagal')
+    expect(heading(report({ kind: 'running' }), false, false, 'en')).toBe('Receiving from windows-pc')
   })
 })
 

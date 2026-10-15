@@ -3,11 +3,13 @@ import { ServerForm } from '@/components/SettingsForm'
 import { useSession } from '@/hooks/useSession'
 import { useSettings } from '@/hooks/useSettings'
 import { useTheme } from '@/hooks/useTheme'
+import { useT } from '@/lib/i18n'
 
 /** The server config choice, port and switching settings, in a window of their own. */
 export default function AdvancedWindow() {
   const { settings, update } = useSettings()
   const session = useSession()
+  const t = useT()
   const [problem, setProblem] = useState<string | null>(null)
   useTheme(settings?.theme)
   if (!settings) return null
@@ -22,8 +24,10 @@ export default function AdvancedWindow() {
         <ServerForm bare settings={shown} disabled={session.running} onChange={update} onProblem={setProblem} />
       ) : (
         <p className="text-sm text-muted-foreground">
-          Komputer ini berjalan sebagai client. Pengaturan lanjutan (berkas konfigurasi, port, pindah layar,
-          clipboard) milik server; ganti ke mode Server di jendela utama untuk mengubahnya.
+          {t(
+            'Komputer ini berjalan sebagai client. Pengaturan lanjutan (berkas konfigurasi, port, pindah layar, clipboard) milik server; ganti ke mode Server di jendela utama untuk mengubahnya.',
+            'This computer runs as a client. The advanced settings (configuration file, port, switching, clipboard) belong to the server; switch to Server in the main window to change them.',
+          )}
         </p>
       )}
       {problem && (

@@ -10,6 +10,7 @@ import {
   hideDelay,
   percent,
 } from '@/lib/transfer'
+import { useLang, useT } from '@/lib/i18n'
 import type { TransferProgress } from '@/types'
 
 const hideWindow = () => void getCurrentWindow().hide()
@@ -19,6 +20,8 @@ const hideWindow = () => void getCurrentWindow().hide()
  * itself is shown, this decides when it hides again: a little after a pull
  * ends, and also when a running one has gone quiet for too long. */
 export default function TransferPopup() {
+  const t = useT()
+  const lang = useLang()
   const [p, setP] = useState<TransferProgress | null>(null)
   const [stalled, setStalled] = useState(false)
   /** The `seq` the user pressed Cancel on, until the daemon answers. */
@@ -84,10 +87,10 @@ export default function TransferPopup() {
       style={{ background: 'var(--popover)', color: 'var(--popover-foreground)', borderColor: 'var(--border)' }}
     >
       <div className="flex items-center justify-between">
-        <span className="font-medium">{heading(p, stalled, isCancelling)}</span>
+        <span className="font-medium">{heading(p, stalled, isCancelling, lang)}</span>
         <button
-          aria-label="Sembunyikan"
-          title={running ? 'Sembunyikan (transfer tetap berjalan)' : 'Tutup'}
+          aria-label={t('Sembunyikan', 'Hide')}
+          title={running ? t('Sembunyikan (transfer tetap berjalan)', 'Hide (the transfer keeps going)') : t('Tutup', 'Close')}
           className="opacity-60 hover:opacity-100"
           onClick={hideWindow}
         >
@@ -99,7 +102,7 @@ export default function TransferPopup() {
           {p.state.detail}
         </p>
       ) : p.state.kind === 'cancelled' ? (
-        <p style={{ color: 'var(--muted-foreground)' }}>Berkas sementara dihapus.</p>
+        <p style={{ color: 'var(--muted-foreground)' }}>{t('Berkas sementara dihapus.', 'The temporary files were removed.')}</p>
       ) : (
         <>
           <p className="truncate" style={{ color: 'var(--muted-foreground)' }} title={p.file}>
@@ -125,7 +128,7 @@ export default function TransferPopup() {
                 disabled={isCancelling}
                 onClick={cancel}
               >
-                Batal
+                {t('Batal', 'Cancel')}
               </button>
             )}
           </div>
