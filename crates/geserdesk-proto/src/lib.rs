@@ -23,6 +23,7 @@
 
 pub mod clipboard;
 pub mod codec;
+pub mod consumer;
 pub mod geometry;
 pub mod input;
 pub mod message;

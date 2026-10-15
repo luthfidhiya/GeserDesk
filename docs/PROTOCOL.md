@@ -73,6 +73,15 @@ press and release even when the produced character is not (dead keys, mismatched
 layouts). The client maps `hid` to a local key; if it cannot reach the same
 symbol that way, it falls back to synthesising `ch`.
 
+Keys that are not on that page (volume, mute, microphone mute, media, brightness,
+the launcher and browser keys of a multimedia keyboard or a laptop's top row) use the
+page number in the high byte and the usage below it: `0x0C00 + usage` for the
+Consumer page (0x0C), `0x0B00 + usage` for the Telephony page (0x0B). They are all
+0x0B00 or more, so none can be mistaken for a keyboard usage (all under 0x100); the
+values are listed in `geserdesk_proto::consumer`. A peer that does not know one, or
+has no key to press for it (Windows has none for brightness or microphone mute),
+ignores it. The wire format and the version are unchanged.
+
 ## Messages
 
 ### Client → server (`ClientMsg`)

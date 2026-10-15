@@ -3,7 +3,11 @@
 //!
 //! X11 keycodes are `evdev + 8` on every modern Linux X server, so the capture
 //! backend subtracts 8 and looks the result up here. The wire protocol carries
-//! only the HID usage (page 0x07), which is stable across layouts.
+//! only the HID usage (page 0x07), which is stable across layouts; the keys that are
+//! not on that page (volume, media, brightness...) have codes of their own, see
+//! [`geserdesk_proto::consumer`].
+
+use geserdesk_proto::consumer as c;
 
 /// Map a Linux evdev key code to a HID keyboard usage, if it has one.
 pub fn evdev_to_hid(code: u16) -> Option<u16> {
@@ -100,6 +104,28 @@ pub fn evdev_to_hid(code: u16) -> Option<u16> {
         54 => 0xE5,  // Right Shift
         100 => 0xE6, // Right Alt
         126 => 0xE7, // Right Meta
+        // The top row of a laptop and the extra keys of a multimedia keyboard.
+        113 => c::MUTE,
+        114 => c::VOLUME_DOWN,
+        115 => c::VOLUME_UP,
+        248 => c::MIC_MUTE,
+        163 => c::NEXT_TRACK,
+        164 => c::PLAY_PAUSE,
+        165 => c::PREVIOUS_TRACK,
+        166 => c::STOP,
+        224 => c::BRIGHTNESS_DOWN,
+        225 => c::BRIGHTNESS_UP,
+        155 => c::MAIL,
+        140 => c::CALCULATOR,
+        157 => c::EXPLORER,
+        150 => c::BROWSER,
+        217 => c::BROWSER_SEARCH,
+        172 => c::BROWSER_HOME,
+        158 => c::BROWSER_BACK,
+        159 => c::BROWSER_FORWARD,
+        128 => c::BROWSER_STOP,
+        173 => c::BROWSER_REFRESH,
+        156 => c::BROWSER_FAVORITES,
         _ => return None,
     };
     Some(hid)
@@ -120,6 +146,24 @@ pub fn win_key_to_hid(vk: u32, scan: u16, extended: bool) -> Option<u16> {
         0x13 => return Some(0x48),                             // VK_PAUSE
         0x2C => return Some(0x46),                             // VK_SNAPSHOT
         0x7C..=0x83 => return Some(0x68 + (vk - 0x7C) as u16), // F13..F20
+        // Keys Windows gives a virtual key of their own: they have no scan code to go by.
+        0xAD => return Some(c::MUTE),
+        0xAE => return Some(c::VOLUME_DOWN),
+        0xAF => return Some(c::VOLUME_UP),
+        0xB0 => return Some(c::NEXT_TRACK),
+        0xB1 => return Some(c::PREVIOUS_TRACK),
+        0xB2 => return Some(c::STOP),
+        0xB3 => return Some(c::PLAY_PAUSE),
+        0xB4 => return Some(c::MAIL),
+        0xB6 => return Some(c::EXPLORER),
+        0xB7 => return Some(c::CALCULATOR),
+        0xA6 => return Some(c::BROWSER_BACK),
+        0xA7 => return Some(c::BROWSER_FORWARD),
+        0xA8 => return Some(c::BROWSER_REFRESH),
+        0xA9 => return Some(c::BROWSER_STOP),
+        0xAA => return Some(c::BROWSER_SEARCH),
+        0xAB => return Some(c::BROWSER_FAVORITES),
+        0xAC => return Some(c::BROWSER_HOME),
         _ => {}
     }
     let hid = if extended {
@@ -303,7 +347,10 @@ mod tests {
 
     /// The Windows table and the evdev one name the same physical keys: every
     /// HID usage the Linux side can send has a Windows key that produces it, so
-    /// a Windows server can drive whatever a Linux one can.
+    /// a Windows server can drive whatever a Linux one can. Four laptop keys are the
+    /// exception: Windows gives them no virtual key (the firmware or the driver
+    /// handles brightness and microphone mute, and nothing is sent for a browser key
+    /// that opens the browser), so a Windows server cannot see them.
     #[test]
     fn windows_covers_every_key_linux_does() {
         let win: std::collections::HashSet<u16> = (0..=0xFFu32)
@@ -317,6 +364,15 @@ mod tests {
             .collect();
         for code in 0..300u16 {
             if let Some(hid) = evdev_to_hid(code) {
+                let linux_only = [
+                    c::BRIGHTNESS_UP,
+                    c::BRIGHTNESS_DOWN,
+                    c::MIC_MUTE,
+                    c::BROWSER,
+                ];
+                if linux_only.contains(&hid) {
+                    continue;
+                }
                 assert!(win.contains(&hid), "no Windows key gives HID {hid:#x}");
             }
         }
@@ -330,5 +386,42 @@ mod tests {
         assert!(!hid_is_printable(0x2C)); // Space (named key on the client)
         assert!(!hid_is_printable(0x3A)); // F1
         assert!(!hid_is_printable(0xE1)); // Shift
+    }
+
+    #[test]
+    fn the_laptop_top_row_and_media_keys_are_mapped_on_linux() {
+        assert_eq!(evdev_to_hid(113), Some(c::MUTE));
+        assert_eq!(evdev_to_hid(114), Some(c::VOLUME_DOWN));
+        assert_eq!(evdev_to_hid(115), Some(c::VOLUME_UP));
+        assert_eq!(evdev_to_hid(248), Some(c::MIC_MUTE));
+        assert_eq!(evdev_to_hid(224), Some(c::BRIGHTNESS_DOWN));
+        assert_eq!(evdev_to_hid(225), Some(c::BRIGHTNESS_UP));
+        assert_eq!(evdev_to_hid(164), Some(c::PLAY_PAUSE));
+        assert!(evdev_to_hid(115).is_some_and(|h| !hid_is_printable(h)));
+    }
+
+    #[test]
+    fn the_volume_media_and_browser_keys_are_mapped_on_windows() {
+        // No scan code to go by for these: the virtual key decides, extended or not.
+        for ext in [false, true] {
+            assert_eq!(win_key_to_hid(0xAD, 0x20, ext), Some(c::MUTE));
+            assert_eq!(win_key_to_hid(0xAE, 0x2E, ext), Some(c::VOLUME_DOWN));
+            assert_eq!(win_key_to_hid(0xAF, 0x30, ext), Some(c::VOLUME_UP));
+            assert_eq!(win_key_to_hid(0xB3, 0x22, ext), Some(c::PLAY_PAUSE));
+            assert_eq!(win_key_to_hid(0xA6, 0x6A, ext), Some(c::BROWSER_BACK));
+            assert_eq!(win_key_to_hid(0xB7, 0x21, ext), Some(c::CALCULATOR));
+        }
+    }
+
+    #[test]
+    fn every_extra_key_is_told_apart_on_each_platform() {
+        let mut win = std::collections::HashSet::new();
+        for vk in 0xA6..=0xB7u32 {
+            if let Some(h) = win_key_to_hid(vk, 0, false) {
+                assert!(win.insert(h), "duplicate for vk {vk:#x}");
+            }
+        }
+        // Every virtual key from Browser Back to Launch App 2 but Select Media (0xB5).
+        assert_eq!(win.len(), 17);
     }
 }
