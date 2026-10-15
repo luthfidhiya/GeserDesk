@@ -5,8 +5,6 @@ import { FingerprintRow } from '@/components/FingerprintRow'
 import { LogPanel } from '@/components/LogPanel'
 import { StatusBar } from '@/components/StatusBar'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Label } from '@/components/ui/label'
 import { ipc } from '@/lib/ipc'
 import type { DaemonInfo, Settings, Status } from '@/types'
 
@@ -95,15 +93,6 @@ export function ControlView({ settings, daemon, onChange, status, running, probl
           Buka tab Pengaturan monitor di komputer server, lalu setujui komputer ini. ({status.detail})
         </p>
       )}
-
-      <div className="flex items-center gap-2">
-        <Checkbox
-          id="tray"
-          checked={settings.close_to_tray}
-          onCheckedChange={(v) => onChange((s) => ({ ...s, close_to_tray: v === true }))}
-        />
-        <Label htmlFor="tray">Tutup jendela = sembunyikan ke tray (tetap berjalan)</Label>
-      </div>
 
       <LogPanel daemonPid={daemon?.pid} />
     </div>

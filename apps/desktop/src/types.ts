@@ -37,7 +37,6 @@ export interface Settings {
   mode: Mode
   client: { server: string; name: string; log_only: boolean }
   server: { config: string }
-  close_to_tray: boolean
   theme: Theme
 }
 

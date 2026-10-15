@@ -188,9 +188,10 @@ impl AppState {
         self.tray_ok.store(ok, Ordering::SeqCst);
     }
 
-    /// Closing the window hides it, but only when there is a tray to bring it back.
+    /// Closing the window hides it, but only when there is a tray to bring it back
+    /// and to quit from; with none, closing the window is the only way out.
     pub fn hides_on_close(&self) -> bool {
-        self.tray_ok.load(Ordering::SeqCst) && self.settings.lock().unwrap().close_to_tray
+        self.tray_ok.load(Ordering::SeqCst)
     }
 }
 

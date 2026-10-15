@@ -43,27 +43,13 @@ pub struct ServerSettings {
     pub config: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Settings {
     pub mode: Mode,
     pub client: ClientSettings,
     pub server: ServerSettings,
-    /// Closing the window hides it to the tray instead of quitting.
-    pub close_to_tray: bool,
     pub theme: Theme,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            mode: Mode::default(),
-            client: ClientSettings::default(),
-            server: ServerSettings::default(),
-            close_to_tray: true,
-            theme: Theme::default(),
-        }
-    }
 }
 
 impl Default for ClientSettings {
@@ -248,7 +234,6 @@ mod tests {
             server: ServerSettings {
                 config: "/x/server.toml".into(),
             },
-            close_to_tray: false,
             theme: Theme::Dark,
         };
         let text = toml::to_string_pretty(&s).unwrap();
@@ -261,8 +246,10 @@ mod tests {
         let s: Settings = toml::from_str("mode = \"server\"\n").unwrap();
         assert_eq!(s.mode, Mode::Server);
         assert!(s.client.server.is_empty());
-        assert!(s.close_to_tray, "a partial file keeps the default");
         assert_eq!(s.theme, Theme::System);
+        // A key that is no longer a setting (a file saved by an older version) is ignored.
+        let old: Settings = toml::from_str("mode = \"server\"\nclose_to_tray = false\n").unwrap();
+        assert_eq!(old.mode, Mode::Server);
         // Garbage is an error here; `load` turns it into the defaults.
         assert!(toml::from_str::<Settings>("mode = 7").is_err());
     }
