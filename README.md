@@ -246,9 +246,9 @@ those of your profile folder (you, `SYSTEM` and the Administrators). Nobody is t
   After that the fingerprint is pinned in `known_servers.toml`, and a different
   certificate is refused outright (never retried). For unattended setups pass
   `--server-fingerprint SHA256:...`.
-* **Server -> client.** A new client is refused and listed under *Menunggu
-  persetujuan* in the app's *Pengaturan monitor* tab with its fingerprint (the client prints the
-  same one at startup). Check they match and click *Percayai*; the fingerprint
+* **Server -> client.** A new client is refused and shown in the app's *Permintaan
+  sambung* panel with its fingerprint (the client prints the same one at startup); the
+  requests also wait under *Menunggu persetujuan* in *Alat > Daftar client*. Check they match and click *Percayai*; the fingerprint
   is saved as `fingerprint = "..."` on that `[[screens]]` entry, and the client
   gets in on its next automatic retry. A name the config does not list yet is treated
   the same way, marked as a new computer: *Percayai dan tambahkan* writes a new
@@ -257,6 +257,13 @@ those of your profile folder (you, `SYSTEM` and the Administrators). Nobody is t
   that is not plain text -- empty, over 64 characters, with control characters -- is
   refused outright and never listed.) A trusted name cannot be claimed by another
   certificate, and a changed certificate is flagged as a replacement.
+* **Taking a client away.** *Cabut kepercayaan* (in *Daftar client*, which reads the config
+  and so works with no server running) removes the fingerprint and ends that client's
+  session at once; it may knock again and then waits for approval like a stranger. The dot
+  on a screen's card in *Pengaturan monitor* turns that screen off instead, keeping its
+  trust and its place on the desk: it is written as `disabled = true` on the `[[screens]]`
+  entry. The client stays connected, but the cursor cannot go to it and it neither gets nor
+  sends clipboard contents, until the dot is clicked again.
 * Not covered: malware on either machine, and the first contact if you do not
   actually compare the fingerprints.
 
