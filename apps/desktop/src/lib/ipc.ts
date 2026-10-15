@@ -58,8 +58,8 @@ export const ipc = {
 
   /** The "Tentang GeserDesk" box. */
   showAbout: () => invoke<void>('show_about'),
-  /** Open (or raise) a tool window: `settings`, `clients`, `terminal` or `log`. */
-  openTool: (tool: 'settings' | 'clients' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
+  /** Open (or raise) a tool window: `settings`, `clients`, `approvals`, `terminal` or `log`. */
+  openTool: (tool: 'settings' | 'clients' | 'approvals' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
   /** Run `geserdesk <line>` (the CLI beside the app). Output and the end arrive as events with the id it returns. */
   terminalRun: (line: string) => invoke<number>('terminal_run', { line }),
   terminalKill: () => invoke<void>('terminal_kill'),

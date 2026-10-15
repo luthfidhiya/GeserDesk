@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { PendingApprovals } from '@/components/PendingApprovals'
 import { ScreenList } from '@/components/ScreenList'
 import { ScreenStage } from '@/components/ScreenStage'
 import { autoArrange, deskSize, MIN_DESK_SIZE, overlapping, union, unstretched } from '@/lib/geometry'
 import { errorText, ipc } from '@/lib/ipc'
-import type { DeskSnapshot, Draft, Pending, Placement, Point, Size } from '@/types'
+import type { DeskSnapshot, Draft, Placement, Point, Size } from '@/types'
 
 type Msg = { text: string; kind: 'ok' | 'err' | 'info' } | null
 
@@ -18,7 +17,7 @@ interface Props {
   onBusy: (busy: boolean) => void
 }
 
-/** Arrange the machines on the desk, and approve or revoke computers. */
+/** Arrange the machines on the desk. Who may connect is in the clients window. */
 export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   const [draft, setDraft] = useState<Draft>({})
   const [dirty, setDirty] = useState(false)
@@ -131,9 +130,6 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
     setMsg({ text: 'Disusun berjajar. Klik Simpan untuk menerapkan.', kind: 'info' })
   }
 
-  const trust = (p: Pending) =>
-    run(() => ipc.approveClient(p.name, p.fingerprint), `"${p.name}" dipercaya dan disimpan ke config.`)
-  const dismiss = (p: Pending) => run(() => ipc.dismissClient(p.name, p.fingerprint))
   const revoke = (name: string) =>
     run(
       () => ipc.revokeClient(name),
@@ -180,7 +176,6 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
               Daftar client
             </Button>
           </div>
-          <PendingApprovals pending={desk.pending} onTrust={(p) => void trust(p)} onDismiss={(p) => void dismiss(p)} />
           <ScreenList
             screens={screens}
             draft={draft}

@@ -5,6 +5,7 @@ import TransferPopup from './TransferPopup'
 import AdvancedWindow from './windows/AdvancedWindow'
 import { ipc } from './lib/ipc'
 import Frame, { type Menu } from './windows/Frame'
+import ApprovalsWindow from './windows/ApprovalsWindow'
 import ClientsWindow from './windows/ClientsWindow'
 import LogWindow from './windows/LogWindow'
 import TerminalWindow from './windows/TerminalWindow'
@@ -21,6 +22,7 @@ const params = new URLSearchParams(window.location.search)
 const tools = {
   settings: { Page: AdvancedWindow, title: 'Pengaturan lanjutan' },
   clients: { Page: ClientsWindow, title: 'Daftar client' },
+  approvals: { Page: ApprovalsWindow, title: 'Permintaan sambung' },
   terminal: { Page: TerminalWindow, title: 'Terminal' },
   log: { Page: LogWindow, title: 'Log' },
 } as const

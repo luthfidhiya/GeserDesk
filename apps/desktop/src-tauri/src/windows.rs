@@ -12,6 +12,7 @@ use tracing::warn;
 enum Tool {
     Settings,
     Clients,
+    Approvals,
     Terminal,
     Log,
 }
@@ -21,6 +22,7 @@ impl Tool {
         match self {
             Tool::Settings => "settings",
             Tool::Clients => "clients",
+            Tool::Approvals => "approvals",
             Tool::Terminal => "terminal",
             Tool::Log => "log",
         }
@@ -30,6 +32,7 @@ impl Tool {
         match self {
             Tool::Settings => "Pengaturan lanjutan",
             Tool::Clients => "Daftar client",
+            Tool::Approvals => "Permintaan sambung",
             Tool::Terminal => "Terminal",
             Tool::Log => "Log",
         }
@@ -39,18 +42,20 @@ impl Tool {
         match self {
             Tool::Settings => (560.0, 640.0),
             Tool::Clients => (560.0, 560.0),
+            Tool::Approvals => (520.0, 520.0),
             Tool::Terminal => (780.0, 480.0),
             Tool::Log => (820.0, 520.0),
         }
     }
 }
 
-/// The page asks for a tool window by its label (`settings`, `clients`, `terminal`, `log`).
+/// The page asks for a tool window by its label (`settings`, `clients`, `approvals`, `terminal`, `log`).
 #[tauri::command]
 pub fn open_tool(app: AppHandle, tool: String) -> Result<(), String> {
     let tool = match tool.as_str() {
         "settings" => Tool::Settings,
         "clients" => Tool::Clients,
+        "approvals" => Tool::Approvals,
         "terminal" => Tool::Terminal,
         "log" => Tool::Log,
         other => return Err(format!("jendela tidak dikenal: {other}")),

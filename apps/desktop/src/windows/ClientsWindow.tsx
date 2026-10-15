@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { RevokeButton } from '@/components/ScreenList'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { useDesk } from '@/hooks/useDesk'
 import { useSession } from '@/hooks/useSession'
 import { useSettings } from '@/hooks/useSettings'
@@ -60,6 +61,14 @@ export default function ClientsWindow() {
 
   return (
     <div className="flex h-full flex-col gap-3 overflow-y-auto p-4">
+      {desk && desk.pending.length > 0 && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border p-3" style={{ borderColor: 'var(--warn)' }}>
+          <span className="text-sm">{desk.pending.length} komputer meminta tersambung</span>
+          <Button size="sm" onClick={() => void ipc.openTool('approvals')}>
+            Lihat
+          </Button>
+        </div>
+      )}
       {trusted && names.length === 0 && (
         <p className="text-sm text-muted-foreground">Belum ada client yang dipercaya.</p>
       )}
