@@ -59,6 +59,7 @@ tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-build = "2.7"
 tauri-plugin-dialog = "2.8"
 tauri-plugin-clipboard-manager = "2.4"
+tauri-plugin-single-instance = "2"
 
 [profile.release]
 lto = "thin"

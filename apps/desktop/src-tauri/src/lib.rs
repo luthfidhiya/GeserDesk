@@ -25,6 +25,11 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // A second launch only brings the first one's window back, so there is one
+        // window and one tray icon however many times the program is started.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::new())
