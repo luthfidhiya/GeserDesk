@@ -11,6 +11,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Manager, Wry};
 use tracing::{error, info, warn};
 
+use crate::i18n::{english, tr};
 use crate::state::AppState;
 
 const IDLE: &[u8] = include_bytes!("../icons/tray-idle.png");
@@ -25,7 +26,10 @@ const ID_QUIT_STOP: &str = "quit_stop";
 /// Kept in app state so a status change can update the icon and the menu.
 struct Handles {
     tray: TrayIcon<Wry>,
+    open: MenuItem<Wry>,
     toggle: MenuItem<Wry>,
+    quit: MenuItem<Wry>,
+    quit_stop: MenuItem<Wry>,
 }
 
 /// Build the tray. A desktop without one (some Linux setups) only loses the tray:
@@ -42,17 +46,11 @@ pub fn build(app: &AppHandle) {
 }
 
 fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
-    let open = MenuItem::with_id(app, ID_OPEN, "Buka jendela", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, ID_TOGGLE, "Start daemon", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(
-        app,
-        ID_QUIT,
-        "Keluar (sesi tetap jalan)",
-        true,
-        None::<&str>,
-    )?;
-    let quit_stop =
-        MenuItem::with_id(app, ID_QUIT_STOP, "Hentikan dan keluar", true, None::<&str>)?;
+    // The words are set by `reflect`, in the saved language, right after the tray is built.
+    let open = MenuItem::with_id(app, ID_OPEN, "", true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, ID_TOGGLE, "", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, ID_QUIT, "", true, None::<&str>)?;
+    let quit_stop = MenuItem::with_id(app, ID_QUIT_STOP, "", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
@@ -87,10 +85,16 @@ fn try_build(app: &AppHandle) -> tauri::Result<Handles> {
             }
         })
         .build(app)?;
-    Ok(Handles { tray, toggle })
+    Ok(Handles {
+        tray,
+        open,
+        toggle,
+        quit: quit_item,
+        quit_stop,
+    })
 }
 
-/// Update the icon, tooltip and start/stop label to match `status`.
+/// Update the icon, tooltip and words to match `status` and the saved language.
 pub fn reflect(app: &AppHandle, status: &Status) {
     let Some(h) = app.try_state::<Handles>() else {
         return;
@@ -106,7 +110,16 @@ pub fn reflect(app: &AppHandle, status: &Status) {
     }
     let _ = h
         .tray
-        .set_tooltip(Some(format!("GeserDesk: {}", label(status))));
+        .set_tooltip(Some(format!("GeserDesk: {}", label(status, english(app)))));
+    let _ = h.open.set_text(tr(app, "Buka jendela", "Open the window"));
+    let _ = h.quit.set_text(tr(
+        app,
+        "Keluar (sesi tetap jalan)",
+        "Quit (the session keeps running)",
+    ));
+    let _ = h
+        .quit_stop
+        .set_text(tr(app, "Hentikan dan keluar", "Stop and quit"));
     // Say which part the daemon plays (or will play): the one running, else the saved mode.
     let state = app.state::<AppState>();
     let mode = state
@@ -117,20 +130,33 @@ pub fn reflect(app: &AppHandle, status: &Status) {
         Mode::Server => "server",
         Mode::Client => "client",
     };
-    let verb = if running { "Stop" } else { "Start" };
+    let verb = match (running, english(app)) {
+        (true, false) => "Hentikan",
+        (false, false) => "Mulai",
+        (true, true) => "Stop",
+        (false, true) => "Start",
+    };
     let _ = h.toggle.set_text(format!("{verb} daemon ({part})"));
 }
 
-fn label(status: &Status) -> String {
-    match status {
-        Status::Stopped => "berhenti".into(),
-        Status::Connecting => "menyambung…".into(),
-        Status::Connected => "tersambung".into(),
-        Status::AwaitingApproval(_) => "menunggu persetujuan di server".into(),
-        Status::Retrying(why) => format!("terputus, mencoba lagi ({why})"),
-        Status::Fatal(why) => format!("gagal: {why}"),
-        Status::ServerRunning => "server berjalan".into(),
-        Status::Error(why) => format!("kesalahan: {why}"),
+fn label(status: &Status, english: bool) -> String {
+    match (status, english) {
+        (Status::Stopped, false) => "berhenti".into(),
+        (Status::Stopped, true) => "stopped".into(),
+        (Status::Connecting, false) => "menyambung…".into(),
+        (Status::Connecting, true) => "connecting…".into(),
+        (Status::Connected, false) => "tersambung".into(),
+        (Status::Connected, true) => "connected".into(),
+        (Status::AwaitingApproval(_), false) => "menunggu persetujuan di server".into(),
+        (Status::AwaitingApproval(_), true) => "waiting for approval on the server".into(),
+        (Status::Retrying(why), false) => format!("terputus, mencoba lagi ({why})"),
+        (Status::Retrying(why), true) => format!("disconnected, retrying ({why})"),
+        (Status::Fatal(why), false) => format!("gagal: {why}"),
+        (Status::Fatal(why), true) => format!("failed: {why}"),
+        (Status::ServerRunning, false) => "server berjalan".into(),
+        (Status::ServerRunning, true) => "server running".into(),
+        (Status::Error(why), false) => format!("kesalahan: {why}"),
+        (Status::Error(why), true) => format!("error: {why}"),
     }
 }
 

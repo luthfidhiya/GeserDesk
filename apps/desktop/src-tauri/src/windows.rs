@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing::warn;
 
 use crate::events::APPROVALS;
+use crate::i18n::tr;
 use crate::tray;
 
 #[derive(Clone, Copy)]
@@ -29,14 +30,17 @@ impl Tool {
         }
     }
 
-    const fn title(self) -> &'static str {
+    /// The title the system shows for the window (task bar, window list).
+    fn title(self, app: &AppHandle) -> &'static str {
         match self {
-            Tool::Settings => "Pengaturan lanjutan",
-            Tool::Keys => "Tombol khusus",
+            Tool::Settings => tr(app, "Pengaturan lanjutan", "Advanced settings"),
+            Tool::Keys => tr(app, "Tombol khusus", "Special keys"),
             Tool::Terminal => "Terminal",
             Tool::Log => "Log",
         }
     }
+
+    const ALL: [Tool; 4] = [Tool::Settings, Tool::Keys, Tool::Terminal, Tool::Log];
 
     const fn size(self) -> (f64, f64) {
         match self {
@@ -68,6 +72,15 @@ pub fn open_approvals(app: &AppHandle) {
     let _ = app.emit(APPROVALS, ());
 }
 
+/// Give the open tool windows their titles in the saved language.
+pub fn retitle(app: &AppHandle) {
+    for tool in Tool::ALL {
+        if let Some(w) = app.get_webview_window(tool.label()) {
+            let _ = w.set_title(tool.title(app));
+        }
+    }
+}
+
 /// One window is made at a time, so two quick clicks cannot make two of the same.
 static OPENING: Mutex<()> = Mutex::new(());
 
@@ -93,7 +106,7 @@ fn open(app: &AppHandle, tool: Tool) {
             tool.label(),
             WebviewUrl::App(format!("index.html?window={}", tool.label()).into()),
         )
-        .title(tool.title())
+        .title(tool.title(&app))
         .decorations(false) // the page draws its own title bar (`Frame.tsx`)
         .inner_size(width, height)
         .min_inner_size(360.0, 240.0)

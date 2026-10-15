@@ -19,8 +19,9 @@ pub fn load_settings(state: State<'_, AppState>) -> Settings {
 #[tauri::command]
 pub fn save_settings(app: AppHandle, state: State<'_, AppState>, settings: Settings) {
     state.replace_settings(settings.clone());
-    // The tray names the mode the next Start would use.
+    // The tray names the mode the next Start would use, and speaks the saved language.
     crate::tray::reflect(&app, &state.status());
+    crate::windows::retitle(&app);
     let _ = app.emit(SETTINGS_CHANGED, settings);
 }
 

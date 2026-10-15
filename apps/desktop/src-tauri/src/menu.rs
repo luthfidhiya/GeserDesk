@@ -8,6 +8,7 @@ use geserdesk_app::Mode;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
+use crate::i18n::{english, tr};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -18,27 +19,38 @@ pub fn show_about(app: AppHandle) {
         Mode::Client => ("client", "Client"),
         Mode::Server => ("server", "Server"),
     };
+    let en = english(&app);
+    let cli = started_by_cli(&state);
     let daemon = match state.info() {
+        Some(d) if en => format!(
+            "Daemon: PID {}, version {}, started by {}",
+            d.info.pid,
+            d.info.app_version,
+            if cli { "the CLI" } else { "the app" }
+        ),
         Some(d) => format!(
             "Daemon: PID {}, versi {}, dimulai oleh {}",
             d.info.pid,
             d.info.app_version,
-            if d.info.started_by == "cli" {
-                "CLI"
-            } else {
-                "aplikasi"
-            }
+            if cli { "CLI" } else { "aplikasi" }
         ),
-        None => "Daemon: tidak berjalan".to_string(),
+        None => tr(&app, "Daemon: tidak berjalan", "Daemon: not running").to_string(),
     };
-    let fingerprint = own_fingerprint(mode).unwrap_or_else(|| "(belum ada)".into());
-    let text = format!(
-        "GeserDesk {}\n{daemon}\n\nSidik jari komputer ini ({mode_text}, {name}):\n{fingerprint}\n\nLisensi GPL-3.0-or-later.",
-        app.package_info().version
-    );
+    let fingerprint =
+        own_fingerprint(mode).unwrap_or_else(|| tr(&app, "(belum ada)", "(none yet)").into());
+    let version = &app.package_info().version;
+    let text = if en {
+        format!("GeserDesk {version}\n{daemon}\n\nThis computer's fingerprint ({mode_text}, {name}):\n{fingerprint}\n\nLicence GPL-3.0-or-later.")
+    } else {
+        format!("GeserDesk {version}\n{daemon}\n\nSidik jari komputer ini ({mode_text}, {name}):\n{fingerprint}\n\nLisensi GPL-3.0-or-later.")
+    };
     app.dialog()
         .message(text)
-        .title("Tentang GeserDesk")
+        .title(tr(&app, "Tentang GeserDesk", "About GeserDesk"))
         .kind(MessageDialogKind::Info)
         .show(|_| {});
+}
+
+fn started_by_cli(state: &AppState) -> bool {
+    state.info().is_some_and(|d| d.info.started_by == "cli")
 }

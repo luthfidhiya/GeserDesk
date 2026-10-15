@@ -6,6 +6,7 @@
 
 mod commands;
 mod events;
+mod i18n;
 mod link;
 mod menu;
 mod state;
