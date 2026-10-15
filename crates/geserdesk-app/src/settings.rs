@@ -79,11 +79,26 @@ impl Default for ClientSettings {
 impl Default for ServerSettings {
     fn default() -> Self {
         Self {
-            config: config_dir()
-                .map(|d| d.join("server.toml").display().to_string())
-                .unwrap_or_else(|| "server.toml".into()),
+            config: default_config_path().display().to_string(),
         }
     }
+}
+
+/// Where the server's config lives unless the person picks another file.
+pub fn default_config_path() -> PathBuf {
+    config_dir()
+        .map(|d| d.join("server.toml"))
+        .unwrap_or_else(|| PathBuf::from("server.toml"))
+}
+
+/// Make the starting config if `path` is the default one and not there yet, so a
+/// first Start needs no setup. Any other path that is missing is left alone: it is
+/// more likely a typo than a file to invent.
+pub fn ensure_default_config(path: &Path, default: &Path) -> std::io::Result<()> {
+    if path == default && !path.exists() {
+        create_default_config(path)?;
+    }
+    Ok(())
 }
 
 impl From<&ClientSettings> for crate::control::ClientOptions {
@@ -151,7 +166,7 @@ pub fn create_default_config(path: &Path) -> std::io::Result<()> {
     let name = hostname();
     let text = format!(
         "# Dibuat oleh aplikasi GeserDesk. Atur susunan layar dan setujui komputer\n\
-         # di tab \"Susunan layar\" setelah server dijalankan.\n\
+         # di tab \"Pengaturan monitor\" setelah server dijalankan.\n\
          [server]\nlisten = \"0.0.0.0:24810\"\nscreen = \"{name}\"\n\n\
          [[screens]]\nname = \"{name}\"\n"
     );
@@ -251,6 +266,26 @@ mod config_tests {
         std::fs::write(&path, "# mine").unwrap();
         create_default_config(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_default_config_is_made_on_its_own() {
+        let dir = std::env::temp_dir().join(format!("geserdesk-app-ensure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let default = dir.join("server.toml");
+        let typo = dir.join("sever.toml");
+
+        // A path the person typed that is missing is not invented.
+        ensure_default_config(&typo, &default).unwrap();
+        assert!(!typo.exists());
+
+        // The default is made, and valid, and then left alone.
+        ensure_default_config(&default, &default).unwrap();
+        geserdesk_server::Config::parse(&std::fs::read_to_string(&default).unwrap()).unwrap();
+        std::fs::write(&default, "# mine").unwrap();
+        ensure_default_config(&default, &default).unwrap();
+        assert_eq!(std::fs::read_to_string(&default).unwrap(), "# mine");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

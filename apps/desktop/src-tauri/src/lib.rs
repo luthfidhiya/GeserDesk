@@ -67,6 +67,7 @@ pub fn run() {
             commands::settings::load_settings,
             commands::settings::save_settings,
             commands::settings::config_exists,
+            commands::settings::default_config_path,
             commands::settings::create_default_config,
             commands::desk::desk_state,
             commands::desk::save_layout,

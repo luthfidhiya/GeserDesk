@@ -29,6 +29,7 @@ export const ipc = {
   shutdownDaemon: () => invoke<void>('shutdown_daemon'),
   ownFingerprint: (mode: Mode) => invoke<string | null>('own_fingerprint', { mode }),
   createDefaultConfig: (path: string) => invoke<void>('create_default_config', { path }),
+  defaultConfigPath: () => invoke<string>('default_config_path'),
   configExists: (path: string) => invoke<boolean>('config_exists', { path }),
 
   /** `null` while no server is running. */

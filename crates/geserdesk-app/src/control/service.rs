@@ -281,6 +281,8 @@ impl Service {
             StartSpec::Client(options) => self.session.start_client_options(&options, None),
             StartSpec::Server { config, capture } => {
                 let path = std::path::PathBuf::from(config.trim());
+                crate::settings::ensure_default_config(&path, &crate::settings::default_config_path())
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
                 let config = geserdesk_server::Config::load(&path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
                 tracing::info!(config = %path.display(), "starting server");

@@ -22,6 +22,14 @@ pub fn config_exists(path: String) -> bool {
     Path::new(&path).exists()
 }
 
+/// Where the server's config is kept unless another file is picked.
+#[tauri::command]
+pub fn default_config_path() -> String {
+    geserdesk_app::settings::default_config_path()
+        .display()
+        .to_string()
+}
+
 #[tauri::command]
 pub fn create_default_config(path: String) -> Result<(), String> {
     create(Path::new(&path)).map_err(|e| format!("{path}: {e}"))

@@ -49,6 +49,11 @@ export function ClientForm({ settings, disabled, onChange }: Props) {
 export function ServerForm({ settings, disabled, onChange, onProblem }: Props) {
   const path = settings.server.config
   const [exists, setExists] = useState(true)
+  const [defaultPath, setDefaultPath] = useState<string | null>(null)
+
+  useEffect(() => {
+    void ipc.defaultConfigPath().then(setDefaultPath)
+  }, [])
 
   useEffect(() => {
     let current = true
@@ -75,20 +80,35 @@ export function ServerForm({ settings, disabled, onChange, onProblem }: Props) {
     }
   }
 
+  // The default file is made by Start, so it needs no setting. The field is for a
+  // different file, and stays shut unless that is in use or the file is missing.
+  const custom = defaultPath !== null && path.trim() !== defaultPath
+  const needsAttention = custom && !exists
+
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-[10rem_1fr_auto] items-center gap-x-3">
-        <Label htmlFor="cfg">Berkas konfigurasi</Label>
-        <Input id="cfg" disabled={disabled} value={path} onChange={(e) => set(e.target.value)} />
-        <Button variant="outline" disabled={disabled} onClick={() => void browse()}>
-          Pilih…
-        </Button>
+    <details className="group rounded-lg border p-3" open={needsAttention || undefined}>
+      <summary className="cursor-pointer text-sm text-muted-foreground">
+        Lanjutan{custom ? ': memakai berkas konfigurasi lain' : ''}
+      </summary>
+      <div className="mt-3 space-y-3">
+        <div className="grid grid-cols-[10rem_1fr_auto] items-center gap-x-3">
+          <Label htmlFor="cfg">Berkas konfigurasi</Label>
+          <Input id="cfg" disabled={disabled} value={path} onChange={(e) => set(e.target.value)} />
+          <Button variant="outline" disabled={disabled} onClick={() => void browse()}>
+            Pilih…
+          </Button>
+        </div>
+        {custom && (
+          <Button variant="link" size="sm" className="h-auto p-0 text-xs" disabled={disabled} onClick={() => defaultPath && set(defaultPath)}>
+            Kembali ke berkas bawaan
+          </Button>
+        )}
+        {needsAttention && !disabled && (
+          <Button variant="secondary" onClick={() => void create()}>
+            Buat berkas konfigurasi awal
+          </Button>
+        )}
       </div>
-      {!exists && !disabled && (
-        <Button variant="secondary" onClick={() => void create()}>
-          Buat berkas konfigurasi awal
-        </Button>
-      )}
-    </div>
+    </details>
   )
 }
