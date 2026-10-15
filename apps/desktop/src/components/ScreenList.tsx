@@ -113,15 +113,14 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
   )
 }
 
-/** Two clicks to revoke: the first arms it for a few seconds. */
+/** Two clicks to revoke: the first arms it (and turns it red) for a few seconds. */
 export function RevokeButton({ onConfirm }: { onConfirm: () => void }) {
   const [armed, setArmed] = useState(false)
   const timer = useRef<number | undefined>(undefined)
   return (
     <Button
-      variant="link"
+      variant={armed ? 'destructive' : 'outline'}
       size="sm"
-      className="h-auto p-0 text-xs text-muted-foreground"
       onClick={(e) => {
         e.stopPropagation()
         if (!armed) {
@@ -134,7 +133,7 @@ export function RevokeButton({ onConfirm }: { onConfirm: () => void }) {
         onConfirm()
       }}
     >
-      {armed ? 'Yakin? Klik lagi untuk mencabut' : 'Cabut kepercayaan'}
+      {armed ? 'Yakin? Klik lagi' : 'Cabut kepercayaan'}
     </Button>
   )
 }
