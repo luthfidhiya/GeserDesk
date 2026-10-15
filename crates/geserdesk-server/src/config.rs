@@ -225,6 +225,132 @@ fn default_listen() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 24810))
 }
 
+/// The settings the app's window edits, so nobody has to open the file: the
+/// port, how the cursor switches screens, and what is shared. They are read when
+/// the server starts, so a change takes effect at the next start.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tuning {
+    pub port: u16,
+    pub switch_delay_ms: u32,
+    pub switch_double_tap_ms: u32,
+    pub switch_corner_size: i32,
+    pub jump_zone_size: i32,
+    pub scroll_lock_locks: bool,
+    pub clipboard_sharing: bool,
+    pub clipboard_files: bool,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Self {
+            port: default_listen().port(),
+            switch_delay_ms: 0,
+            switch_double_tap_ms: 0,
+            switch_corner_size: 0,
+            jump_zone_size: 1,
+            scroll_lock_locks: true,
+            clipboard_sharing: true,
+            clipboard_files: true,
+        }
+    }
+}
+
+impl Tuning {
+    pub fn of(config: &Config) -> Self {
+        Self {
+            port: config.listen.port(),
+            switch_delay_ms: config.policy.delay_ms,
+            switch_double_tap_ms: config.policy.double_tap_ms,
+            switch_corner_size: config.policy.corner_size,
+            jump_zone_size: config.policy.jump_zone,
+            scroll_lock_locks: config.policy.scroll_lock_locks,
+            clipboard_sharing: config.options.clipboard_sharing,
+            clipboard_files: config.options.clipboard_files,
+        }
+    }
+
+    /// Why these values cannot be used, if they cannot.
+    pub fn check(&self) -> Result<(), String> {
+        if self.port == 0 {
+            return Err("port harus antara 1 dan 65535".into());
+        }
+        if self.jump_zone_size < 1 {
+            return Err("jump zone minimal 1 px".into());
+        }
+        if self.switch_corner_size < 0 {
+            return Err("ukuran sudut tidak boleh negatif".into());
+        }
+        Ok(())
+    }
+}
+
+/// Write `t` into the config file at `path`: `[server] listen` (keeping its
+/// address, changing the port) and the matching `[options]` keys. A value equal to
+/// its default is removed, so a hand-written file stays short; everything else in
+/// the file (comments, screens, links) is left as it was.
+pub fn write_tuning(path: &std::path::Path, t: &Tuning) -> anyhow::Result<()> {
+    use toml_edit::{DocumentMut, Item, Table};
+
+    /// Set `key` to `new`, keeping the comment and spacing the old value had.
+    fn put(t: &mut Table, key: &str, mut new: toml_edit::Value) {
+        if let Some(old) = t.get(key).and_then(Item::as_value) {
+            *new.decor_mut() = old.decor().clone();
+        }
+        t[key] = Item::Value(new);
+    }
+
+    t.check().map_err(|e| anyhow::anyhow!(e))?;
+    let text = std::fs::read_to_string(path)?;
+    let mut doc: DocumentMut = text.parse()?;
+    let def = Tuning::default();
+
+    fn table<'a>(doc: &'a mut DocumentMut, name: &str) -> anyhow::Result<&'a mut Table> {
+        if !doc.contains_key(name) {
+            doc.insert(name, Item::Table(Table::new()));
+        }
+        doc[name]
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("`{name}` in the config is not a table"))
+    }
+
+    // The port keeps whatever address was there; with none, it listens everywhere.
+    let server = table(&mut doc, "server")?;
+    let host = server
+        .get("listen")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<SocketAddr>().ok())
+        .map_or_else(|| default_listen().ip(), |a| a.ip());
+    let listen = SocketAddr::new(host, t.port);
+    if server.contains_key("listen") || t.port != def.port {
+        put(server, "listen", listen.to_string().into());
+    }
+
+    let options = table(&mut doc, "options")?;
+    fn set<V: Into<toml_edit::Value> + PartialEq>(t: &mut Table, key: &str, v: V, default: V) {
+        if v == default {
+            t.remove(key);
+        } else {
+            put(t, key, v.into());
+        }
+    }
+    set(options, "switch_delay_ms", i64::from(t.switch_delay_ms), i64::from(def.switch_delay_ms));
+    set(options, "switch_double_tap_ms", i64::from(t.switch_double_tap_ms), i64::from(def.switch_double_tap_ms));
+    set(options, "switch_corner_size", i64::from(t.switch_corner_size), i64::from(def.switch_corner_size));
+    set(options, "jump_zone_size", i64::from(t.jump_zone_size), i64::from(def.jump_zone_size));
+    set(options, "scroll_lock_locks", t.scroll_lock_locks, def.scroll_lock_locks);
+    set(options, "clipboard_sharing", t.clipboard_sharing, def.clipboard_sharing);
+    set(options, "clipboard_files", t.clipboard_files, def.clipboard_files);
+    if options.is_empty() {
+        doc.remove("options");
+    }
+
+    // Replace atomically so a crash never leaves a half-written config.
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 // ---- raw (as-deserialized) shapes -------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -447,6 +573,75 @@ mod tests {
 
         let default = Config::parse("[[screens]]\nname = \"a\"\n").unwrap();
         assert!(default.positions.is_empty());
+    }
+
+    fn temp_config(name: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("geserdesk-tuning-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("server.toml");
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    #[test]
+    fn the_default_tuning_is_what_a_bare_config_gives() {
+        let cfg = Config::parse("[[screens]]\nname = \"a\"\n").unwrap();
+        assert_eq!(Tuning::of(&cfg), Tuning::default());
+    }
+
+    #[test]
+    fn tuning_is_written_read_back_and_leaves_the_rest_of_the_file_alone() {
+        let path = temp_config(
+            "roundtrip",
+            "# mine\n[server]\nlisten = \"192.168.1.5:24810\"  # keep\nscreen = \"a\"\n\n[[screens]]\nname = \"a\"\nx = 5\n\n[links]\na = { right = \"a\" }\n",
+        );
+        let t = Tuning {
+            port: 30000,
+            switch_delay_ms: 150,
+            switch_double_tap_ms: 250,
+            switch_corner_size: 40,
+            jump_zone_size: 3,
+            scroll_lock_locks: false,
+            clipboard_sharing: false,
+            clipboard_files: true,
+        };
+        write_tuning(&path, &t).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine") && text.contains("# keep") && text.contains("x = 5"), "{text}");
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(Tuning::of(&cfg), t);
+        assert_eq!(cfg.listen.to_string(), "192.168.1.5:30000", "the address stays");
+        assert_eq!(cfg.layout.neighbor("a", geserdesk_proto::Edge::Right), Some("a"));
+    }
+
+    #[test]
+    fn values_equal_to_their_defaults_are_not_kept_in_the_file() {
+        let path = temp_config("defaults", "[[screens]]\nname = \"a\"\n");
+        let mut t = Tuning { switch_delay_ms: 100, ..Tuning::default() };
+        write_tuning(&path, &t).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("switch_delay_ms = 100"));
+
+        t.switch_delay_ms = 0;
+        write_tuning(&path, &t).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("switch_delay_ms") && !text.contains("[options]"), "{text}");
+        assert!(!text.contains("listen"), "the default port adds nothing: {text}");
+        assert_eq!(Tuning::of(&Config::load(&path).unwrap()), Tuning::default());
+    }
+
+    #[test]
+    fn a_tuning_that_cannot_work_is_refused_and_writes_nothing() {
+        let path = temp_config("bad", "[[screens]]\nname = \"a\"\n");
+        let before = std::fs::read_to_string(&path).unwrap();
+        for bad in [
+            Tuning { port: 0, ..Tuning::default() },
+            Tuning { jump_zone_size: 0, ..Tuning::default() },
+            Tuning { switch_corner_size: -1, ..Tuning::default() },
+        ] {
+            assert!(write_tuning(&path, &bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

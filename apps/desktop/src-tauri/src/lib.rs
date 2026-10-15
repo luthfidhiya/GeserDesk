@@ -68,6 +68,8 @@ pub fn run() {
             commands::settings::save_settings,
             commands::settings::config_exists,
             commands::settings::default_config_path,
+            commands::settings::read_tuning,
+            commands::settings::write_tuning,
             commands::settings::create_default_config,
             commands::desk::desk_state,
             commands::desk::save_layout,

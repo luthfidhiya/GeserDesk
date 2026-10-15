@@ -91,6 +91,28 @@ pub fn default_config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("server.toml"))
 }
 
+pub use geserdesk_server::config::Tuning;
+
+/// The port, switching and sharing settings in the config at `path`. A file that is
+/// not there yet reads as the defaults, which is what its first Start will use.
+pub fn read_tuning(path: &Path) -> Result<Tuning, String> {
+    if !path.exists() {
+        return Ok(Tuning::default());
+    }
+    geserdesk_server::Config::load(path)
+        .map(|c| Tuning::of(&c))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Save `tuning` into the config at `path`, making the default one first if that
+/// is the file asked for and it is not there yet. Takes effect at the next Start.
+pub fn write_tuning(path: &Path, tuning: &Tuning) -> Result<(), String> {
+    ensure_default_config(path, &default_config_path())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    geserdesk_server::config::write_tuning(path, tuning)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Make the starting config if `path` is the default one and not there yet, so a
 /// first Start needs no setup. Any other path that is missing is left alone: it is
 /// more likely a typo than a file to invent.
@@ -266,6 +288,24 @@ mod config_tests {
         std::fs::write(&path, "# mine").unwrap();
         create_default_config(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# mine");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tuning_reads_defaults_from_a_missing_file_and_round_trips_through_a_real_one() {
+        let dir = std::env::temp_dir().join(format!("geserdesk-app-tuning-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("server.toml");
+        assert_eq!(read_tuning(&path).unwrap(), Tuning::default());
+
+        // A file that is not the default one is not invented by a save.
+        let t = Tuning { port: 30001, switch_delay_ms: 120, ..Tuning::default() };
+        assert!(write_tuning(&path, &t).is_err());
+        assert!(!path.exists());
+
+        create_default_config(&path).unwrap();
+        write_tuning(&path, &t).unwrap();
+        assert_eq!(read_tuning(&path).unwrap(), t);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

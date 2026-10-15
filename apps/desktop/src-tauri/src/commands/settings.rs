@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 use std::path::Path;
 
-use geserdesk_app::settings::create_default_config as create;
+use geserdesk_app::settings::{create_default_config as create, Tuning};
 use geserdesk_app::Settings;
 use tauri::State;
 
@@ -28,6 +28,18 @@ pub fn default_config_path() -> String {
     geserdesk_app::settings::default_config_path()
         .display()
         .to_string()
+}
+
+/// The port, switching and sharing settings of the server config at `path`.
+#[tauri::command]
+pub fn read_tuning(path: String) -> Result<Tuning, String> {
+    geserdesk_app::settings::read_tuning(Path::new(path.trim()))
+}
+
+/// Save them; they take effect at the next Start.
+#[tauri::command]
+pub fn write_tuning(path: String, tuning: Tuning) -> Result<(), String> {
+    geserdesk_app::settings::write_tuning(Path::new(path.trim()), &tuning)
 }
 
 #[tauri::command]
