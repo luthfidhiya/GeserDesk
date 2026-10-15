@@ -132,7 +132,7 @@ pub enum CloseReason {
     Timeout,
     /// A protocol violation was detected.
     ProtocolError,
-    /// The screen was removed from the configuration.
+    /// The screen was removed from the configuration, or its trust was revoked.
     Reconfigured,
 }
 

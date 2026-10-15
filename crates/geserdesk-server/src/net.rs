@@ -773,6 +773,10 @@ where
             }
             Some(msg) = registration.outbox.recv() => {
                 ms.send(&msg).await?;
+                // A close queued by the server itself (a revoked screen) ends the session here.
+                if matches!(msg, ServerMsg::Close(_)) {
+                    return Ok(());
+                }
             }
             _ = ticker.tick() => {
                 tracing::trace!(outstanding = missed, "sending keep-alive");
@@ -1214,6 +1218,7 @@ mod tests {
             addr: SocketAddr,
             server_fp: Fingerprint,
             ctx: Arc<TlsContext>,
+            hub: Arc<Hub>,
         }
 
         async fn rig(trusted: BTreeMap<String, Fingerprint>) -> Rig {
@@ -1234,6 +1239,7 @@ mod tests {
             let addr = listener.local_addr().unwrap();
             let (_, never) = watch::channel(false);
             let hub = Hub::new();
+            let probe = Arc::clone(&hub);
             let file_router = FileRouter::new(Arc::clone(&hub));
             tokio::spawn(accept_loop_tls(
                 config,
@@ -1247,6 +1253,7 @@ mod tests {
                 addr,
                 server_fp: id.fingerprint(),
                 ctx,
+                hub: probe,
             }
         }
 
@@ -1274,6 +1281,51 @@ mod tests {
             let rig = rig([("win".to_string(), client.fingerprint())].into()).await;
             let reply = hello_as(&rig, &client, "win").await;
             assert!(matches!(reply, ServerMsg::Welcome { .. }), "{reply:?}");
+        }
+
+        #[tokio::test]
+        async fn a_screen_told_to_disconnect_is_closed_with_the_reason() {
+            let client = Identity::generate("c").unwrap();
+            let rig = rig([("win".to_string(), client.fingerprint())].into()).await;
+            let (cfg, _) = client_config(&client, Some(rig.server_fp)).unwrap();
+            let tcp = TcpStream::connect(rig.addr).await.unwrap();
+            let tls = TlsConnector::from(cfg)
+                .connect(ServerName::try_from("geserdesk").unwrap(), tcp)
+                .await
+                .unwrap();
+            let mut ms = MessageStream::new(tls);
+            ms.send(&ClientMsg::Hello {
+                version: PROTOCOL_VERSION,
+                screen: client_screen("win"),
+            })
+            .await
+            .unwrap();
+            let welcome = ms.recv::<ServerMsg>().await.unwrap();
+            assert!(matches!(welcome, ServerMsg::Welcome { .. }), "{welcome:?}");
+
+            // The session registers just after the welcome goes out.
+            while !rig.hub.contains("win") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(rig.hub.disconnect("win", CloseReason::Reconfigured));
+
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match ms.recv::<ServerMsg>().await {
+                        Ok(ServerMsg::Close(reason)) => break Some(reason),
+                        Ok(ServerMsg::KeepAlive) => ms.send(&ClientMsg::KeepAlive).await.unwrap(),
+                        Ok(_) => {}
+                        Err(_) => break None,
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(closed, Some(CloseReason::Reconfigured));
+            // And the screen is free again, not held by a session that lingers.
+            while rig.hub.contains("win") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
 
         #[tokio::test]
@@ -1341,6 +1393,7 @@ mod tests {
                 addr,
                 server_fp: id.fingerprint(),
                 ctx,
+                hub: Arc::clone(&hub),
             };
 
             // The first try is refused, and says why; nothing is on the desk yet.

@@ -133,7 +133,7 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   const revoke = (name: string) =>
     run(
       () => ipc.revokeClient(name),
-      `Kepercayaan untuk "${name}" dicabut. Sesi yang sedang berjalan tidak diputus.`,
+      `Kepercayaan untuk "${name}" dicabut. Sesi yang sedang berjalan diputus.`,
     )
 
   if (!complete) return null

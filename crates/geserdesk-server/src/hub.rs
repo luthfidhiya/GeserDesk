@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use geserdesk_proto::clipboard::ClipboardContent;
-use geserdesk_proto::{Point, Rect, ServerMsg, Size};
+use geserdesk_proto::{CloseReason, Point, Rect, ServerMsg, Size};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// Connection changes the router needs to know about.
@@ -125,6 +125,12 @@ impl Hub {
             Some(entry) => entry.tx.send(msg).is_ok(),
             None => false,
         }
+    }
+
+    /// Tell client `name` its connection is over and why; its session ends once the
+    /// message is sent. `false` if it is not connected.
+    pub fn disconnect(&self, name: &str, reason: CloseReason) -> bool {
+        self.send(name, ServerMsg::Close(reason))
     }
 
     /// Queue `msgs`, in order and without anything else between them, for every

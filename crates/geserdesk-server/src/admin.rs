@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use geserdesk_proto::{Point, Rect, Size};
+use geserdesk_proto::{CloseReason, Point, Rect, Size};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -392,8 +392,8 @@ impl DeskState {
         Ok(())
     }
 
-    /// Stop trusting a screen's certificate. A session already running is not
-    /// cut, but the next connection will need approval again.
+    /// Stop trusting a screen's certificate. A session already running is ended
+    /// (the client may knock again, and then waits for approval like a stranger).
     pub fn revoke(&self, name: &str) -> Result<(), AdminError> {
         let tls = self.tls()?;
         let old = tls.trust.revoke(name).ok_or(AdminError::NotTrusted)?;
@@ -403,7 +403,8 @@ impl DeskState {
                 return Err(AdminError::Save(e.to_string()));
             }
         }
-        info!(%name, "trust revoked");
+        let was_connected = self.hub.disconnect(name, CloseReason::Reconfigured);
+        info!(%name, was_connected, "trust revoked");
         Ok(())
     }
 }
@@ -948,8 +949,9 @@ mod tests {
         );
         let id = Identity::generate("server").unwrap();
         let ctx = crate::net::TlsContext::from_identity(&id, BTreeMap::new()).unwrap();
+        let hub = Hub::new();
         let st = DeskState::new(
-            Hub::new(),
+            Arc::clone(&hub),
             Some(path.clone()),
             "linux-pc".into(),
             vec![Rect::new(0, 0, 1920, 1080)],
@@ -1000,8 +1002,15 @@ mod tests {
             Some(client_fp.to_string())
         );
 
-        // Revoking removes it from memory and from the file.
+        // Revoking removes it from memory and from the file, and ends a session that is running.
+        let mut session = hub
+            .register("win", vec![Rect::new(0, 0, 1920, 1080)])
+            .unwrap();
         st.revoke("win").unwrap();
+        assert_eq!(
+            session.outbox.try_recv().unwrap(),
+            geserdesk_proto::ServerMsg::Close(CloseReason::Reconfigured)
+        );
         assert!(read_config(&path).trusted.is_empty());
         assert_eq!(
             ctx.trust.check("win", &client_fp),
