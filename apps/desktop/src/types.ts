@@ -103,6 +103,8 @@ export interface Screen {
   size: Size
   monitors: Rect[]
   trusted_fingerprint: string | null
+  /** Turned off: nothing connects as it until it is turned on again. */
+  disabled: boolean
 }
 
 /** A client the server trusts: the screen name it may use and its certificate. */

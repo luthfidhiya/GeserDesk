@@ -44,6 +44,8 @@ export const ipc = {
     invoke<boolean>('save_layout', { positions, sizes }),
   /** The clients the server's config trusts, read from the file (no server needed). */
   trustedClients: () => invoke<TrustedClient[]>('trusted_clients'),
+  /** Turn a client's screen off or on; the server keeps it in its config. */
+  setScreenDisabled: (name: string, disabled: boolean) => invoke<void>('set_screen_disabled', { name, disabled }),
   approveClient: (name: string, fingerprint: string) =>
     invoke<void>('approve_client', { name, fingerprint }),
   dismissClient: (name: string, fingerprint: string) =>

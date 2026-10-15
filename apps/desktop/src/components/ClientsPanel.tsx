@@ -54,6 +54,7 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
 
   const connected = new Set((desk?.screens ?? []).filter((s) => !s.local && s.connected).map((s) => s.name))
   const names = [...new Set([...(trusted ?? []).map((c) => c.name), ...connected])]
+  const isOff = (name: string) => desk?.screens.some((s) => s.name === name && s.disabled) ?? false
   const monitors = (name: string) => desk?.screens.find((s) => s.name === name)?.monitors ?? []
   const fingerprint = (name: string) => trusted?.find((c) => c.name === name)?.fingerprint
   // Connected ones first, then by name.
@@ -96,7 +97,11 @@ export function ClientsPanel({ desk, refresh, onTrust, onDismiss, problem: answe
                 {fp && <RevokeButton onConfirm={() => void revoke(name)} />}
               </div>
               <p className="text-xs text-muted-foreground">
-                {connected.has(name) ? `Terhubung · ${monitors(name).length} monitor: ${sizes}` : 'Tidak terhubung'}
+                {isOff(name)
+                  ? 'Nonaktif'
+                  : connected.has(name)
+                    ? `Terhubung · ${monitors(name).length} monitor: ${sizes}`
+                    : 'Tidak terhubung'}
               </p>
             </div>
           )

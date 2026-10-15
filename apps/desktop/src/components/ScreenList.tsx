@@ -17,10 +17,11 @@ interface Props {
   onSize: (name: string, axis: 'w' | 'h', value: number) => void
   onResetSize: (name: string) => void
   onRevoke: (name: string) => void
+  onDisabled: (name: string, disabled: boolean) => void
   onEditing: (editing: boolean) => void
 }
 
-export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSize, onResetSize, onRevoke, onEditing }: Props) {
+export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSize, onResetSize, onRevoke, onDisabled, onEditing }: Props) {
   return (
     <div className="space-y-2">
       {screens.map((s, i) => {
@@ -41,18 +42,41 @@ export function ScreenList({ screens, draft, selected, onSelect, onNumber, onSiz
                   terpercaya
                 </Badge>
               )}
-              <span
-                className="ml-auto size-2.5 rounded-full"
-                title={s.connected ? 'terhubung' : 'tidak terhubung'}
-                style={{ background: s.connected ? 'var(--ok)' : 'var(--muted-foreground)' }}
-              />
+              {s.local ? (
+                <span className="ml-auto size-2.5 rounded-full" title="terhubung" style={{ background: 'var(--ok)' }} />
+              ) : (
+                // The dot is the switch: green while connected, grey while not, a red ring when off.
+                <button
+                  className="ml-auto grid size-6 place-items-center rounded hover:bg-muted"
+                  title={
+                    s.disabled
+                      ? 'Nonaktif. Klik untuk mengaktifkan'
+                      : `${s.connected ? 'Terhubung' : 'Tidak terhubung'}. Klik untuk menonaktifkan`
+                  }
+                  aria-label={s.disabled ? `Aktifkan ${s.name}` : `Nonaktifkan ${s.name}`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onDisabled(s.name, !s.disabled)
+                  }}
+                >
+                  <span
+                    className="size-2.5 rounded-full"
+                    style={
+                      s.disabled
+                        ? { border: '2px solid var(--bad)' }
+                        : { background: s.connected ? 'var(--ok)' : 'var(--muted-foreground)' }
+                    }
+                  />
+                </button>
+              )}
               {s.trusted_fingerprint && <RevokeButton onConfirm={() => onRevoke(s.name)} />}
             </div>
             <p className="mb-1 text-xs text-muted-foreground">
-              {s.connected ? 'Terhubung' : 'Tidak terhubung'} · {s.monitors.length} monitor: {sizes}
+              {s.disabled ? 'Nonaktif' : s.connected ? 'Terhubung' : 'Tidak terhubung'}
+              {s.disabled && s.connected && ' (tetap tersambung)'} · {s.monitors.length} monitor: {sizes}
               {s.placeholder && ' (perkiraan, belum pernah terhubung)'}
             </p>
-            {near.length > 0 ? (
+            {s.disabled ? null : near.length > 0 ? (
               <p className="mb-1 text-xs text-muted-foreground">Bersebelahan: {near.join(', ')}</p>
             ) : (
               <p className="mb-1 text-xs" style={{ color: 'var(--warn)' }}>

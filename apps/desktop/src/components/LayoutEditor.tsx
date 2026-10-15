@@ -27,8 +27,9 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
   const [dragging, setDragging] = useState(false)
   const [typing, setTyping] = useState(false)
 
-  // Only machines that are running now: no stand-ins for ones that never connected.
-  const screens = useMemo(() => desk.screens.filter((s) => s.connected), [desk])
+  // Machines that are running now, and ones turned off (so they can be turned on again): no
+  // stand-ins for ones that never connected.
+  const screens = useMemo(() => desk.screens.filter((s) => s.connected || s.disabled), [desk])
 
   useEffect(() => onBusy(dragging || typing), [dragging, typing, onBusy])
 
@@ -137,6 +138,12 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
       `Kepercayaan untuk "${name}" dicabut. Sesi yang sedang berjalan diputus.`,
     )
 
+  const setDisabled = (name: string, disabled: boolean) =>
+    run(
+      () => ipc.setScreenDisabled(name, disabled),
+      disabled ? `"${name}" dinonaktifkan: tetap tersambung, tapi kursor tidak bisa pindah ke sana.` : `"${name}" diaktifkan lagi.`,
+    )
+
   if (!complete) return null
 
   return (
@@ -186,6 +193,7 @@ export function LayoutEditor({ desk, refresh, onBusy }: Props) {
             onSize={setSize}
             onResetSize={resetSize}
             onRevoke={(n) => void revoke(n)}
+            onDisabled={(n, disabled) => void setDisabled(n, disabled)}
             onEditing={setTyping}
           />
           <div className="rounded-lg border p-3">

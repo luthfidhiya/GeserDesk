@@ -116,7 +116,7 @@ export function ScreenStage({ screens, draft, selected, bad, onSelect, onMove, o
           <g
             key={s.name}
             className="cursor-grab"
-            opacity={s.connected ? 1 : 0.55}
+            opacity={s.connected && !s.disabled ? 1 : 0.55}
             onPointerDown={(ev) => {
               ev.preventDefault()
               svg.current!.setPointerCapture(ev.pointerId)
