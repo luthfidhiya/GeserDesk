@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build && cargo build --release -p geserdesk-cli",
+    "beforeBuildCommand": "pnpm build && cargo build --release -p geserdesk-cli --features inject",
     "frontendDist": "../dist"
   },
   "app": {
