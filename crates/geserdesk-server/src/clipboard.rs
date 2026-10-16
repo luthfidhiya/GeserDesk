@@ -41,6 +41,15 @@ fn messages(seq: u64, content: &ClipboardContent) -> Vec<ServerMsg> {
     grab.chain(data).collect()
 }
 
+/// How copies of files are shared, for [`run`].
+pub struct FilesSharing {
+    pub router: Arc<FileRouter>,
+    pub enabled: bool,
+    pub max_bytes: u64,
+    /// Told of each copy of files the server offers (a front end's history).
+    pub hooks: Option<geserdesk_clipboard::pull::PullHooks>,
+}
+
 /// Share the clipboard (and announce file copies) until `from_clients` closes
 /// or the task is aborted.
 pub async fn run(
@@ -48,11 +57,14 @@ pub async fn run(
     local: ClipboardSync,
     mut from_clients: UnboundedReceiver<SharedClip>,
     max_bytes: u64,
-    file_router: Arc<FileRouter>,
-    files_enabled: bool,
-    files_max_bytes: u64,
-    hooks: Option<geserdesk_clipboard::pull::PullHooks>,
+    files: FilesSharing,
 ) {
+    let FilesSharing {
+        router: file_router,
+        enabled: files_enabled,
+        max_bytes: files_max_bytes,
+        hooks,
+    } = files;
     let max = effective_max(max_bytes);
     let files_max = effective_files_max(files_max_bytes);
     local.prime().await;
@@ -165,10 +177,12 @@ mod tests {
             ClipboardSync::new(mem.clone()),
             rx,
             0,
-            file_router,
-            true,
-            0,
-            None,
+            FilesSharing {
+                router: file_router,
+                enabled: true,
+                max_bytes: 0,
+                hooks: None,
+            },
         ));
 
         // Whatever is on the clipboard when the relay starts is not news.
@@ -216,10 +230,12 @@ mod tests {
             ClipboardSync::new(mem.clone()),
             rx,
             0,
-            Arc::clone(&file_router),
-            true,
-            0,
-            None,
+            FilesSharing {
+                router: Arc::clone(&file_router),
+                enabled: true,
+                max_bytes: 0,
+                hooks: None,
+            },
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -259,10 +275,12 @@ mod tests {
             ClipboardSync::new(mem.clone()),
             rx,
             0,
-            Arc::clone(&file_router),
-            false,
-            0,
-            None,
+            FilesSharing {
+                router: Arc::clone(&file_router),
+                enabled: false,
+                max_bytes: 0,
+                hooks: None,
+            },
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
 
