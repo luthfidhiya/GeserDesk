@@ -114,13 +114,20 @@ drive a connected client's cursor in a square without capturing anything.
 ## The app (`geserdesk-desktop`)
 
 ```bash
-pnpm -C apps/desktop tauri dev          # run it
-pnpm -C apps/desktop tauri build        # installable package
+pnpm -C apps/desktop tauri dev                  # run it
+pnpm -C apps/desktop tauri build --bundles deb  # a .deb (builds the CLI too)
+sudo apt install ./target/release/bundle/deb/GeserDesk_0.1.0_amd64.deb
 ```
 
+The `.deb` (package name `geser-desk`) installs the app as `/usr/bin/geserdesk-desktop`
+with the CLI `geserdesk` beside it, a *GeserDesk* entry in the applications menu and its
+icon, and depends on `libxdo3`, `libayatana-appindicator3-1`, WebKitGTK and GTK. Settings
+stay in the user's config folder and are not removed with `sudo apt remove geser-desk`.
+
 One window for everything: pick **Client** or **Server** at the top, fill in the
-settings on *Konfigurasi*, **Start / Stop**, and watch the status line and the live
-**log** (tick *Rinci* for debug lines; *Salin* copies the log).
+settings on *Konfigurasi*, **Mulai / Hentikan** (*Start / Stop* in English), and watch
+the status line and the live **log** (tick *Rinci* for debug lines; *Salin* copies the
+log). The window speaks Indonesian or English: *Bahasa* in the title bar.
 
 The window is a **controller**: the client or server runs in a separate **daemon**
 that the app starts (this same program with `--daemon`, no window) and attaches to.
@@ -134,18 +141,21 @@ opened. See *Daemon and controllers* below.
   shows this computer's own fingerprint, which the server lists when it asks you to
   approve the computer.
 * **Server:** pick the config file (the app can create a starting one), press
-  Start. The *Pengaturan monitor* tab then arranges the screens and approves or revokes
+  Start. The *Monitor* tab then arranges the screens and approves or revokes
   computers (a badge shows how many are waiting). A computer the config does not list
   yet just shows up there when it connects (with TLS); approving it adds it to the
   config and the desk, to the right of the others, with no restart and no editing of
   the file. Stop ends the session, and the
   daemon with it, giving the keyboard and mouse back.
 * **Tray:** the icon shows whether GeserDesk is running (grey idle, green up, red
-  failed) and its menu starts/stops, opens the window or the monitor tab, and quits.
-  Closing the window hides it to the tray (switch this off with *Tutup jendela =
-  sembunyikan ke tray*). *Keluar* closes only the app and leaves the session running;
+  failed) and its menu opens the window, starts or stops the daemon (naming the part it
+  plays or will play, *server* or *client*), and quits. Closing the window hides it to
+  the tray. *Keluar* closes only the app and leaves the session running;
   *Hentikan dan keluar* ends the session too. Without a tray (GNOME needs the
   *AppIndicator* extension) closing the window quits the app, still not the session.
+* **Alat** (title bar) opens tool windows: *Pengaturan lanjutan* (config file, port,
+  switching, sharing), *Tombol khusus* (special keys, below), *Clipboard* (copies of
+  files, below), *Daftar client*, *Terminal* (runs the CLI) and *Log*.
 * Settings are remembered in `gui.toml` next to the identity files.
 * `--start` begins as soon as the app opens: `pnpm -C apps/desktop tauri dev -- -- --start`.
 * `GESERDESK_NO_CAPTURE=1` keeps a server started from the app from capturing this
@@ -231,6 +241,13 @@ few seconds after a pull ends (and if it never hears of one).
   name Windows reserves (`CON`, `NUL`, `COM1`, ...), whichever OS copied it or is
   pasting it.
 * Nothing is ever read from, or written to, a symlink.
+* Pulled copies stay in the temporary folder (`geserdesk-clipboard-files/<n>` on a
+  client, `geserdesk-clipboard-files-server/<n>` on a server; `/tmp` on Linux,
+  `%TEMP%` on Windows) so they can still be pasted. The app's *Clipboard* window lists
+  them with who sent them, when and their size, and removes one or all; it also lists
+  the copies this machine offered during the session. Copies older than 7 days are
+  removed when a session starts (`clipboard_keep_days` in `gui.toml`, set in that
+  window; 0 keeps them).
 
 ## Special keys (volume, brightness, media...)
 
@@ -263,6 +280,11 @@ log.
 brightness_up = "ignore"
 mic_mute = "keysym:0x1008ffb2"
 ```
+
+The app's *Tombol khusus* window edits this file: every action with *Bawaan*, *Custom*
+(a combination pressed on this keyboard, or a key code to press) or *Diabaikan*, and the
+lines the machine would skip are listed at the top. A change takes effect at the next
+Start.
 
 A combination fires only while the cursor is on a client, and the client gets the action
 alone: the combination's modifiers are let go on it first. Modifiers are `ctrl`, `alt`,
