@@ -125,6 +125,30 @@ impl Session {
         self.transfers.cancel_all();
     }
 
+    /// The copies of files this machine offered during the session, the newest first.
+    pub fn shared_files(&self) -> Vec<crate::transfer::SharedEntry> {
+        self.transfers.shared()
+    }
+
+    pub fn forget_shared(&self, id: Option<u64>) {
+        self.transfers.forget_shared(id);
+    }
+
+    /// A session starts: its history of offered copies starts empty, and received copies
+    /// older than the window's setting are removed from the disk.
+    fn new_session_files(&self) {
+        self.transfers.forget_shared(None);
+        let days = crate::settings::Settings::load().clipboard_keep_days.0;
+        let removed = crate::received::clean_older_than(days);
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                days,
+                "removed received copies of files older than the limit"
+            );
+        }
+    }
+
     pub fn status(&self) -> Status {
         self.status.borrow().clone()
     }
@@ -221,6 +245,7 @@ impl Session {
         let this = Arc::clone(self);
         info!(server = %cfg.server, name = %cfg.name, reconnect, "starting client");
         self.started.fetch_add(1, Ordering::SeqCst);
+        self.new_session_files();
         self.set(Status::Connecting);
 
         let task = self.rt.spawn(async move {
@@ -284,6 +309,7 @@ impl Session {
         // The key setup belongs to this machine, not to the config file chosen for the server.
         config.key_rules = crate::keys::load().rules;
         self.started.fetch_add(1, Ordering::SeqCst);
+        self.new_session_files();
         self.set(Status::ServerRunning);
 
         let (stop, shutdown) = watch::channel(false);

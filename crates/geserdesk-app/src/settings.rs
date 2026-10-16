@@ -60,6 +60,20 @@ pub struct Settings {
     pub server: ServerSettings,
     pub theme: Theme,
     pub language: Language,
+    /// Received copies of files older than this many days are removed when a session
+    /// starts; 0 keeps them.
+    pub clipboard_keep_days: KeepDays,
+}
+
+/// Days to keep received copies of files (7 unless set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeepDays(pub u32);
+
+impl Default for KeepDays {
+    fn default() -> Self {
+        Self(7)
+    }
 }
 
 impl Default for ClientSettings {
@@ -289,6 +303,7 @@ mod tests {
             },
             theme: Theme::Dark,
             language: Language::En,
+            clipboard_keep_days: KeepDays(0),
         };
         let text = toml::to_string_pretty(&s).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), s);
@@ -302,6 +317,7 @@ mod tests {
         assert!(s.client.server.is_empty());
         assert_eq!(s.theme, Theme::System);
         assert_eq!(s.language, Language::Id);
+        assert_eq!(s.clipboard_keep_days, KeepDays(7));
         // A key that is no longer a setting (a file saved by an older version) is ignored.
         let old: Settings = toml::from_str("mode = \"server\"\nclose_to_tray = false\n").unwrap();
         assert_eq!(old.mode, Mode::Server);
@@ -341,7 +357,11 @@ mod config_tests {
         assert_eq!(read_tuning(&path).unwrap(), Tuning::default());
 
         // A file that is not the default one is not invented by a save.
-        let t = Tuning { port: 30001, switch_delay_ms: 120, ..Tuning::default() };
+        let t = Tuning {
+            port: 30001,
+            switch_delay_ms: 120,
+            ..Tuning::default()
+        };
         assert!(write_tuning(&path, &t).is_err());
         assert!(!path.exists());
 

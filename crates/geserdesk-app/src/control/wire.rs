@@ -21,7 +21,7 @@ use crate::trust::TrustPrompt;
 
 /// Bumped when the messages change shape. A daemon outlives the app that
 /// started it, so the two can disagree after an upgrade.
-pub const PROTOCOL: u32 = 6;
+pub const PROTOCOL: u32 = 7;
 
 /// Longest line either side accepts, so a stray peer cannot make us buffer
 /// without end.
@@ -133,6 +133,13 @@ pub enum Command {
     ClearLog,
     /// Stop every files pull in progress; what it staged is removed.
     CancelTransfer,
+    /// The copies of files this machine offered during the session.
+    SharedFiles,
+    /// Forget one offered copy (`Some(id)`) or all of them (only the history).
+    ForgetShared {
+        /// Not `id`: that is the request's own.
+        entry: Option<u64>,
+    },
     /// Start pushing [`Event`]s on this connection.
     Subscribe,
 }
@@ -168,6 +175,7 @@ pub enum Reply {
     Saved(bool),
     Prompt(Option<TrustPrompt>),
     Log(Vec<LogLine>),
+    Shared(Vec<crate::transfer::SharedEntry>),
 }
 
 /// Pushed to subscribed controllers.
@@ -293,6 +301,9 @@ mod tests {
             Command::LogSnapshot,
             Command::ClearLog,
             Command::CancelTransfer,
+            Command::SharedFiles,
+            Command::ForgetShared { entry: Some(3) },
+            Command::ForgetShared { entry: None },
             Command::Subscribe,
             Command::Start {
                 spec: StartSpec::Client(ClientOptions {

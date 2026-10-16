@@ -261,6 +261,11 @@ impl Service {
                 self.session.cancel_transfers();
                 Ok(Reply::Done)
             }
+            Command::SharedFiles => Ok(Reply::Shared(self.session.shared_files())),
+            Command::ForgetShared { entry } => {
+                self.session.forget_shared(entry);
+                Ok(Reply::Done)
+            }
             Command::LogSnapshot => Ok(Reply::Log(self.log.snapshot(tracing::Level::TRACE))),
             Command::ClearLog => {
                 self.log.clear();
@@ -289,8 +294,11 @@ impl Service {
             StartSpec::Client(options) => self.session.start_client_options(&options, None),
             StartSpec::Server { config, capture } => {
                 let path = std::path::PathBuf::from(config.trim());
-                crate::settings::ensure_default_config(&path, &crate::settings::default_config_path())
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                crate::settings::ensure_default_config(
+                    &path,
+                    &crate::settings::default_config_path(),
+                )
+                .map_err(|e| format!("{}: {e}", path.display()))?;
                 let config = geserdesk_server::Config::load(&path)
                     .map_err(|e| format!("{}: {e}", path.display()))?;
                 tracing::info!(config = %path.display(), "starting server");

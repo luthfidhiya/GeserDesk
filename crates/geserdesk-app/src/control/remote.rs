@@ -285,6 +285,19 @@ impl Remote {
         self.done(Command::CancelTransfer).await
     }
 
+    /// The copies of files this machine offered during the session, the newest first.
+    pub async fn shared_files(&self) -> Result<Vec<crate::transfer::SharedEntry>, String> {
+        match self.request(Command::SharedFiles).await? {
+            Reply::Shared(list) => Ok(list),
+            other => Err(format!("jawaban tak terduga: {other:?}")),
+        }
+    }
+
+    /// Forget one offered copy, or all of them.
+    pub async fn forget_shared(&self, id: Option<u64>) -> Result<(), String> {
+        self.done(Command::ForgetShared { entry: id }).await
+    }
+
     pub async fn log_snapshot(&self) -> Result<Vec<LogLine>, String> {
         match self.request(Command::LogSnapshot).await? {
             Reply::Log(lines) => Ok(lines),

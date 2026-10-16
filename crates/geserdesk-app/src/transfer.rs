@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+use geserdesk_clipboard::history::SharedCopy;
 use geserdesk_clipboard::pull::{CancelSwitch, ProgressSink, PullEvent, PullHooks, PullReport};
 
 /// How a transfer stands right now.
@@ -84,11 +85,27 @@ impl TransferProgress {
     }
 }
 
+/// A copy of files this machine offered during the session (the history the clipboard
+/// window lists; kept only while the daemon runs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedEntry {
+    pub id: u64,
+    /// When it was offered, in seconds since 1970.
+    pub time: u64,
+    pub names: Vec<String>,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// How many offered copies are remembered; the oldest go first.
+const SHARED_KEPT: usize = 200;
+
 /// Shared, cheaply clonable stream of [`TransferProgress`] reports.
 #[derive(Clone)]
 pub struct TransferHub {
     live: broadcast::Sender<TransferProgress>,
     cancel: CancelSwitch,
+    shared: std::sync::Arc<std::sync::Mutex<(u64, Vec<SharedEntry>)>>,
 }
 
 impl Default for TransferHub {
@@ -96,6 +113,7 @@ impl Default for TransferHub {
         Self {
             live: broadcast::channel(256).0,
             cancel: CancelSwitch::new(),
+            shared: Default::default(),
         }
     }
 }
@@ -118,9 +136,43 @@ impl TransferHub {
     /// What a client or server is given to report its pulls here and to have
     /// them stopped by [`cancel_all`](Self::cancel_all).
     pub fn pull_hooks(&self) -> PullHooks {
+        let shared = std::sync::Arc::clone(&self.shared);
         PullHooks {
             progress: self.pull_sink(),
             cancel: self.cancel.clone(),
+            shared: Some(std::sync::Arc::new(move |copy: SharedCopy| {
+                let mut s = shared.lock().unwrap_or_else(|e| e.into_inner());
+                s.0 += 1;
+                let entry = SharedEntry {
+                    id: s.0,
+                    time: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs()),
+                    names: copy.names,
+                    files: copy.files as u64,
+                    bytes: copy.bytes,
+                };
+                s.1.push(entry);
+                if s.1.len() > SHARED_KEPT {
+                    s.1.remove(0);
+                }
+            })),
+        }
+    }
+
+    /// The copies of files offered this session, the newest first.
+    pub fn shared(&self) -> Vec<SharedEntry> {
+        let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        s.1.iter().rev().cloned().collect()
+    }
+
+    /// Forget one offered copy (`Some(id)`) or all of them. Only the history: the files
+    /// themselves were never copied.
+    pub fn forget_shared(&self, id: Option<u64>) {
+        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        match id {
+            Some(id) => s.1.retain(|e| e.id != id),
+            None => s.1.clear(),
         }
     }
 
@@ -145,6 +197,31 @@ impl TransferHub {
 mod tests {
     use super::*;
     use geserdesk_clipboard::pull::Progress;
+
+    #[test]
+    fn offered_copies_are_remembered_newest_first_and_can_be_forgotten() {
+        let hub = TransferHub::new();
+        let hooks = hub.pull_hooks();
+        let copy = |name: &str| geserdesk_proto::clipboard::FileManifest {
+            entries: vec![geserdesk_proto::clipboard::FileEntry {
+                path: name.into(),
+                size: 5,
+                dir: false,
+            }],
+        };
+        hooks.offered(&copy("a.txt"));
+        hooks.offered(&copy("b.txt"));
+        let list = hub.shared();
+        assert_eq!(list[0].names, ["b.txt"]);
+        assert_eq!(
+            (list[1].names[0].as_str(), list[1].files, list[1].bytes),
+            ("a.txt", 1, 5)
+        );
+        hub.forget_shared(Some(list[0].id));
+        assert_eq!(hub.shared().len(), 1);
+        hub.forget_shared(None);
+        assert!(hub.shared().is_empty());
+    }
 
     #[test]
     fn a_pull_sink_reports_progress_then_done_through_the_hub() {
