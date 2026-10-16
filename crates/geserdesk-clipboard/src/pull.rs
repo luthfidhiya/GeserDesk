@@ -206,6 +206,8 @@ pub type ProgressSink = std::sync::Arc<dyn Fn(PullReport) + Send + Sync>;
 pub struct PullHooks {
     pub progress: ProgressSink,
     pub cancel: CancelSwitch,
+    /// Told of each copy of files this machine offers, for a front end's history.
+    pub shared: Option<crate::history::SharedSink>,
 }
 
 impl PullHooks {
@@ -214,6 +216,14 @@ impl PullHooks {
         Self {
             progress,
             cancel: CancelSwitch::new(),
+            shared: None,
+        }
+    }
+
+    /// This machine offered `manifest` to the others.
+    pub fn offered(&self, manifest: &geserdesk_proto::clipboard::FileManifest) {
+        if let Some(sink) = &self.shared {
+            sink(crate::history::SharedCopy::of(manifest));
         }
     }
 

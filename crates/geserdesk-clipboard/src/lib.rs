@@ -20,6 +20,7 @@
 //! * [`outbound`] -- the chunk stream that carries one [`ClipboardContent`].
 
 pub mod files;
+pub mod history;
 mod inbound;
 pub mod picture;
 pub mod pull;

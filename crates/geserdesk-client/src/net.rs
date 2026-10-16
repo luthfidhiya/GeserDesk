@@ -586,6 +586,9 @@ impl ClientClipboard {
                         );
                         let content =
                             geserdesk_proto::clipboard::ClipboardContent::with_files(&manifest);
+                        if let Some(hooks) = &self.transfer_hooks {
+                            hooks.offered(&manifest);
+                        }
                         self.pending_own_files = Some((manifest, abs));
                         return std::iter::once(ClientMsg::ClipboardGrab { id, seq })
                             .chain(

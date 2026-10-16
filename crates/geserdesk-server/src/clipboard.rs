@@ -51,6 +51,7 @@ pub async fn run(
     file_router: Arc<FileRouter>,
     files_enabled: bool,
     files_max_bytes: u64,
+    hooks: Option<geserdesk_clipboard::pull::PullHooks>,
 ) {
     let max = effective_max(max_bytes);
     let files_max = effective_files_max(files_max_bytes);
@@ -79,6 +80,9 @@ pub async fn run(
                                 debug!(entries = manifest.entries.len(), "the server's own files changed; announcing them");
                                 file_router.local_owner().set(seq, manifest.clone(), abs);
                                 file_router.announce(Owner::Server, seq, manifest.clone());
+                                if let Some(hooks) = &hooks {
+                                    hooks.offered(&manifest);
+                                }
                                 let content = ClipboardContent::with_files(&manifest);
                                 hub.broadcast_except(None, &messages(seq, &content));
                             }
@@ -164,6 +168,7 @@ mod tests {
             file_router,
             true,
             0,
+            None,
         ));
 
         // Whatever is on the clipboard when the relay starts is not news.
@@ -214,6 +219,7 @@ mod tests {
             Arc::clone(&file_router),
             true,
             0,
+            None,
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -256,6 +262,7 @@ mod tests {
             Arc::clone(&file_router),
             false,
             0,
+            None,
         ));
         tokio::time::sleep(Duration::from_millis(100)).await;
 

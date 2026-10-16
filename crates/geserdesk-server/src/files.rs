@@ -326,6 +326,7 @@ pub fn spawn_local_pull(job: LocalPullJob) {
                     entries = top.len(),
                     "pulled a client's files for this screen; updating the clipboard"
                 );
+                geserdesk_clipboard::history::write_note(&dest, &peer, &manifest);
                 match sync.apply_files(top).await {
                     Ok(()) => report(pull::PullEvent::Done),
                     Err(e) => {

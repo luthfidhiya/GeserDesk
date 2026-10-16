@@ -152,6 +152,7 @@ pub fn spawn_pull(
                     entries = top.len(),
                     "pulled the server's files; updating the clipboard"
                 );
+                geserdesk_clipboard::history::write_note(&dest, PEER, &manifest);
                 match sync.apply_files(top).await {
                     Ok(()) => report(PullEvent::Done),
                     Err(e) => {

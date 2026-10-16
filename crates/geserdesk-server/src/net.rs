@@ -386,6 +386,7 @@ pub async fn run_server_shared(
             Arc::clone(&file_router),
             config.options.clipboard_files,
             config.options.clipboard_files_max_bytes,
+            transfer_hooks.clone(),
         )));
     } // else nobody relays: dropped, so a client's pushes are discarded
 
