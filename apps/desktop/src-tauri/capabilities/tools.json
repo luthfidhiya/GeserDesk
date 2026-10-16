@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "tools",
   "description": "What the tool windows may do (advanced settings, terminal, log): the same as the main window",
-  "windows": ["settings", "keys", "terminal", "log"],
+  "windows": ["settings", "keys", "clipboard", "terminal", "log"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

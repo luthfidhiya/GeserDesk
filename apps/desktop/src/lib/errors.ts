@@ -44,6 +44,7 @@ const KNOWN: [RegExp, Words, Words][] = [
   [/"([^"]*)" is not a number/, (v) => `"${v}" bukan angka`, (v) => `"${v}" is not a number`],
   [/"([^"]*)" is not a virtual key \(1 to 0xFE\)/, (v) => `"${v}" bukan virtual key (1 sampai 0xFE)`, (v) => `"${v}" is not a virtual key (1 to 0xFE)`],
   [/: use ignore, keysym:0x\.\.\., vk:0x\.\.\. or action:name/, () => ': pakai ignore, keysym:0x..., vk:0x... atau action:nama', () => ': use ignore, keysym:0x..., vk:0x... or action:name'],
+  [/: not a received copy/, () => ': bukan salinan yang diterima', () => ': not a received copy'],
   [/no config folder on this machine/, () => 'tidak ada folder konfigurasi di komputer ini', () => 'no config folder on this machine'],
 ]
 

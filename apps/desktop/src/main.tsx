@@ -8,6 +8,7 @@ import { LangProvider, pick, setCurrentLang, type Lang } from './lib/i18n'
 import { ipc } from './lib/ipc'
 import { openClients } from './lib/panels'
 import Frame, { type Menu } from './windows/Frame'
+import ClipboardWindow from './windows/ClipboardWindow'
 import KeysWindow from './windows/KeysWindow'
 import LogWindow from './windows/LogWindow'
 import TerminalWindow from './windows/TerminalWindow'
@@ -24,6 +25,7 @@ const params = new URLSearchParams(window.location.search)
 const tools = {
   settings: { Page: AdvancedWindow, title: ['Pengaturan lanjutan', 'Advanced settings'] },
   keys: { Page: KeysWindow, title: ['Tombol khusus', 'Special keys'] },
+  clipboard: { Page: ClipboardWindow, title: ['Clipboard', 'Clipboard'] },
   terminal: { Page: TerminalWindow, title: ['Terminal', 'Terminal'] },
   log: { Page: LogWindow, title: ['Log', 'Log'] },
 } as const
@@ -38,6 +40,7 @@ function mainMenus(lang: Lang, setLang: (l: Lang) => void): Menu[] {
       items: [
         { label: t('Pengaturan lanjutan', 'Advanced settings'), run: () => void ipc.openTool('settings') },
         { label: t('Tombol khusus', 'Special keys'), run: () => void ipc.openTool('keys') },
+        { label: 'Clipboard', run: () => void ipc.openTool('clipboard') },
         { label: t('Daftar client', 'Clients'), run: openClients },
         { label: 'Terminal', run: () => void ipc.openTool('terminal') },
         { label: 'Log', run: () => void ipc.openTool('log') },

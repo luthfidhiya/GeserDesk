@@ -40,6 +40,8 @@ export interface Settings {
   server: { config: string }
   theme: Theme
   language: Language
+  /** Received copies of files older than this many days are removed at Start; 0 keeps them. */
+  clipboard_keep_days: number
 }
 
 export type Status =
@@ -161,4 +163,25 @@ export interface KeyAction {
   name: string
   /** Whether this machine does it with nothing set up. */
   built_in: boolean
+}
+
+/** A copy of files this machine received: one pulled folder. */
+export interface ReceivedCopy {
+  path: string
+  /** Empty when the folder has no note. */
+  peer: string
+  /** Seconds since 1970. */
+  time: number
+  names: string[]
+  files: number
+  bytes: number
+}
+
+/** A copy of files this machine offered this session. */
+export interface SharedCopy {
+  id: number
+  time: number
+  names: string[]
+  files: number
+  bytes: number
 }

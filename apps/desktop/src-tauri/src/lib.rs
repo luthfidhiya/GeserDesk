@@ -102,6 +102,12 @@ pub fn run() {
             commands::trust::answer_server_prompt,
             commands::log::log_snapshot,
             commands::log::clear_log,
+            commands::clipboard::received_files,
+            commands::clipboard::remove_received,
+            commands::clipboard::remove_all_received,
+            commands::clipboard::open_received,
+            commands::clipboard::shared_files,
+            commands::clipboard::forget_shared,
             commands::transfer::cancel_transfer,
             commands::transfer::latest_transfer,
         ])

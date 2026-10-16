@@ -9,6 +9,8 @@ import type {
   DeskSnapshot,
   LogLine,
   KeyAction,
+  ReceivedCopy,
+  SharedCopy,
   KeyEntries,
   Mode,
   Point,
@@ -40,6 +42,14 @@ export const ipc = {
   /** Takes effect at the next Start. */
   writeTuning: (path: string, tuning: Tuning) => invoke<void>('write_tuning', { path, tuning }),
   keyActions: () => invoke<KeyAction[]>('key_actions'),
+  receivedFiles: () => invoke<ReceivedCopy[]>('received_files'),
+  removeReceived: (path: string) => invoke<void>('remove_received', { path }),
+  removeAllReceived: () => invoke<void>('remove_all_received'),
+  openReceived: (path: string) => invoke<void>('open_received', { path }),
+  /** Empty while no daemon runs. */
+  sharedFiles: () => invoke<SharedCopy[]>('shared_files'),
+  /** `null` forgets them all. */
+  forgetShared: (id: number | null) => invoke<void>('forget_shared', { id }),
   readKeys: () => invoke<KeyEntries>('read_keys'),
   /** Checked first; takes effect at the next Start. */
   writeKeys: (entries: KeyEntries) => invoke<void>('write_keys', { entries }),
@@ -69,7 +79,7 @@ export const ipc = {
   /** The "Tentang GeserDesk" box. */
   showAbout: () => invoke<void>('show_about'),
   /** Open (or raise) a tool window: `settings`, `terminal` or `log`. */
-  openTool: (tool: 'settings' | 'keys' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
+  openTool: (tool: 'settings' | 'keys' | 'clipboard' | 'terminal' | 'log') => invoke<void>('open_tool', { tool }),
   /** Run `geserdesk <line>` (the CLI beside the app). Output and the end arrive as events with the id it returns. */
   terminalRun: (line: string) => invoke<number>('terminal_run', { line }),
   terminalKill: () => invoke<void>('terminal_kill'),
