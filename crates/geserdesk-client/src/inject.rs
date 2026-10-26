@@ -270,7 +270,7 @@ mod enigo_sink {
                         tracing::warn!(hid = ev.hid, "no way to type this key; ignored");
                         return;
                     };
-                    let key = os_key(key);
+                    let key = small_letter(os_key(key));
                     // A character with no key on this layout is typed as text,
                     // which enigo sends as a whole press-and-release on each
                     // call: once on press, nothing to release.
@@ -348,6 +348,21 @@ mod enigo_sink {
         if let Key::Unicode(c) = key {
             if let Some(vk) = win::shifted_vk(c) {
                 return Key::Other(u32::from(vk));
+            }
+        }
+        key
+    }
+
+    /// A capital letter becomes its small one. The server's Shift and Caps Lock keys
+    /// are sent as keys of their own, so this machine's keyboard state already makes
+    /// the capital; typing the capital as well would add a second Shift, which turns
+    /// a letter small under Caps Lock and `Ctrl+C` into `Ctrl+Shift+C`.
+    fn small_letter(key: Key) -> Key {
+        #[cfg(unix)]
+        if let Key::Unicode(c) = key {
+            let mut lower = c.to_lowercase();
+            if let (Some(l), None) = (lower.next(), lower.next()) {
+                return Key::Unicode(l);
             }
         }
         key
@@ -652,6 +667,15 @@ mod enigo_sink {
     mod tests {
         use super::*;
         use geserdesk_proto::ModMask;
+
+        #[cfg(unix)]
+        #[test]
+        fn a_capital_is_typed_as_its_small_letter() {
+            assert_eq!(small_letter(Key::Unicode('C')), Key::Unicode('c'));
+            assert_eq!(small_letter(Key::Unicode('c')), Key::Unicode('c'));
+            assert_eq!(small_letter(Key::Unicode('!')), Key::Unicode('!'));
+            assert_eq!(small_letter(Key::Return), Key::Return);
+        }
 
         fn ev(hid: u16, ch: Option<char>) -> KeyEvent {
             KeyEvent {
