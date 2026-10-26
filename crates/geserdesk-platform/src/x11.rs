@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use geserdesk_proto::{Button, KeyAction, KeyEvent, ModMask, Point, Rect};
 use tokio::sync::mpsc::UnboundedSender;
@@ -41,6 +41,10 @@ use crate::{CaptureCmd, CaptureError, CaptureEvent, CaptureHandle};
 const KEYSYM_HOTKEY: u32 = 0xff50;
 /// How long the backend sleeps when there was nothing to do.
 const IDLE_SLEEP: Duration = Duration::from_millis(2);
+/// How long a warp to the centre may take to arrive before the pointer is parked
+/// again. A warp that never lands there (the centre is no longer on a monitor) would
+/// otherwise leave the pointer unwarped, to run into an edge and stay.
+const WARP_PATIENCE: Duration = Duration::from_millis(250);
 
 /// Connect to the X server and start the capture thread.
 pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<CaptureHandle, CaptureError> {
@@ -126,6 +130,8 @@ struct Capture {
     last: Point,
     /// A warp to `center` is in flight; events that predate it are still queued.
     expecting_center: bool,
+    /// When the last warp to `center` was sent.
+    warped_at: Instant,
     /// Keys currently held (X keycode -> repeat count), for auto-repeat.
     pressed: HashMap<u8, u16>,
     last_local: Option<Point>,
@@ -204,6 +210,7 @@ impl Capture {
             center: bounds.center(),
             last: bounds.center(),
             expecting_center: false,
+            warped_at: Instant::now(),
             pressed: HashMap::new(),
             last_local: None,
         })
@@ -231,6 +238,10 @@ impl Capture {
                 if !self.on_event(ev) {
                     return Ok(());
                 }
+            }
+
+            if self.grabbed && self.expecting_center && self.warped_at.elapsed() >= WARP_PATIENCE {
+                self.repark();
             }
 
             if !self.grabbed {
@@ -346,8 +357,8 @@ impl Capture {
             .and_then(|c| c.reply().ok())
             .map(|p| Point::new(i32::from(p.root_x), i32::from(p.root_y)))
             .unwrap_or(self.center);
-        self.warp(self.center);
-        self.expecting_center = true;
+        self.center = self.park_point(self.last);
+        self.warp_to_center();
         self.grabbed = true;
         self.pressed.clear();
         info!("grabbed pointer and keyboard");
@@ -367,6 +378,47 @@ impl Capture {
         // If the chord is still held, do not read it as a fresh press.
         self.hotkey_down = true;
         debug!("released pointer and keyboard");
+    }
+
+    /// Send the pointer to `center`; the events queued until it arrives predate it.
+    fn warp_to_center(&mut self) {
+        self.warp(self.center);
+        self.expecting_center = true;
+        self.warped_at = Instant::now();
+    }
+
+    /// The middle of the monitor `p` is on, read now: monitors come and go (a
+    /// screen woken from sleep, one plugged in), and the middle of the whole root
+    /// window can lie between them, where the pointer cannot go.
+    fn park_point(&self, p: Point) -> Point {
+        let monitors = crate::monitors::randr_monitors(&self.conn, self.root).unwrap_or_default();
+        park_point(&monitors, p, self.bounds)
+    }
+
+    /// A warp to the centre did not arrive: park the pointer again, on the monitor
+    /// it is on now.
+    fn repark(&mut self) {
+        let Some(here) = self
+            .conn
+            .query_pointer(self.root)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|p| Point::new(i32::from(p.root_x), i32::from(p.root_y)))
+        else {
+            return;
+        };
+        self.last = here;
+        if here == self.center {
+            // It arrived, but its own event was lost.
+            self.expecting_center = false;
+            return;
+        }
+        let center = self.park_point(here);
+        if center != self.center {
+            info!(?here, from = ?self.center, to = ?center, "the pointer cannot reach its centre; parking it on its monitor");
+            self.center = center;
+        }
+        self.warp_to_center();
     }
 
     fn warp(&self, p: Point) {
@@ -425,8 +477,7 @@ impl Capture {
             return true;
         }
         self.last = pos;
-        self.expecting_center = true;
-        self.warp(self.center);
+        self.warp_to_center();
         self.emit(CaptureEvent::Motion { dx, dy })
     }
 
@@ -604,6 +655,17 @@ fn keysym_to_char(sym: u32) -> Option<char> {
     }
 }
 
+/// The middle of the monitor `p` is on; of the first monitor if `p` is on none; of
+/// `screen` if there are no monitors to go by.
+fn park_point(monitors: &[Rect], p: Point, screen: Rect) -> Point {
+    monitors
+        .iter()
+        .find(|m| m.contains(p))
+        .or(monitors.first())
+        .unwrap_or(&screen)
+        .center()
+}
+
 fn mods_from_state(state: u16) -> ModMask {
     let mut m = ModMask::empty();
     m.set(ModMask::SHIFT, state & 0x01 != 0);
@@ -619,6 +681,20 @@ fn mods_from_state(state: u16) -> ModMask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pointer_is_parked_on_the_monitor_it_is_on() {
+        // A tall monitor beside a short one: the root window's middle (1920, 720)
+        // is below the short one, where the pointer cannot go.
+        let screen = Rect::new(0, 0, 3840, 1440);
+        let monitors = [Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1440)];
+        let short = Point::new(960, 540);
+        let tall = Point::new(2880, 720);
+        assert_eq!(park_point(&monitors, Point::new(100, 100), screen), short);
+        assert_eq!(park_point(&monitors, Point::new(3000, 1300), screen), tall);
+        assert_eq!(park_point(&monitors, Point::new(100, 1300), screen), short);
+        assert_eq!(park_point(&[], Point::new(5, 5), screen), screen.center());
+    }
 
     fn keymap() -> Keymap {
         // keycode 38 = 'a'/'A', 10 = '1'/'!', 79 = KP_Home/KP_7, 20 = AltGr level.

@@ -37,17 +37,15 @@ pub fn monitors() -> Result<Vec<Rect>, CaptureError> {
     Ok(list)
 }
 
+/// The monitors RandR 1.5 reports on `root`, or `None` without it.
 #[cfg(target_os = "linux")]
-fn platform_monitors() -> Result<Vec<Rect>, CaptureError> {
-    use x11rb::connection::Connection;
+pub(crate) fn randr_monitors(
+    conn: &impl x11rb::connection::Connection,
+    root: x11rb::protocol::xproto::Window,
+) -> Option<Vec<Rect>> {
     use x11rb::protocol::randr::ConnectionExt as _;
 
-    let (conn, screen_num) =
-        x11rb::connect(None).map_err(|e| CaptureError::Connect(e.to_string()))?;
-    let screen = &conn.setup().roots[screen_num];
-
-    let via_randr = conn
-        .randr_get_monitors(screen.root, true)
+    conn.randr_get_monitors(root, true)
         .ok()
         .and_then(|c| c.reply().ok())
         .map(|r| {
@@ -63,10 +61,19 @@ fn platform_monitors() -> Result<Vec<Rect>, CaptureError> {
                 })
                 .collect::<Vec<_>>()
         })
-        .filter(|v| !v.is_empty());
+        .filter(|v| !v.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_monitors() -> Result<Vec<Rect>, CaptureError> {
+    use x11rb::connection::Connection;
+
+    let (conn, screen_num) =
+        x11rb::connect(None).map_err(|e| CaptureError::Connect(e.to_string()))?;
+    let screen = &conn.setup().roots[screen_num];
 
     // Without RandR 1.5 the whole root window is the best we can say.
-    Ok(via_randr.unwrap_or_else(|| {
+    Ok(randr_monitors(&conn, screen.root).unwrap_or_else(|| {
         vec![Rect::new(
             0,
             0,
