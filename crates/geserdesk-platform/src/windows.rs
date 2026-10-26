@@ -645,7 +645,12 @@ impl Capture {
             }
 
             let grabbed = self.state.grabbed.get();
-            if !grabbed {
+            if grabbed {
+                if self.last_resync.elapsed() >= RESYNC_EVERY {
+                    self.repark();
+                    self.last_resync = Instant::now();
+                }
+            } else {
                 if self.last_resync.elapsed() >= RESYNC_EVERY {
                     self.state.resync();
                     self.last_resync = Instant::now();
@@ -701,6 +706,14 @@ impl Capture {
         self.state.center.set((center.x, center.y));
         self.state.keys.borrow_mut().clear();
         self.state.buttons.borrow_mut().clear();
+        self.cover();
+        self.state.grabbed.set(true);
+        info!("grabbed pointer and keyboard");
+        Ok(())
+    }
+
+    /// Spread the transparent window over the whole desktop, on top, to hide the cursor.
+    fn cover(&self) {
         if !self.window.is_null() {
             let r = virtual_screen();
             // SAFETY: `window` is the window this thread created.
@@ -716,9 +729,30 @@ impl Capture {
                 );
             }
         }
-        self.state.grabbed.set(true);
-        info!("grabbed pointer and keyboard");
-        Ok(())
+    }
+
+    /// Put the cursor back where the grab parks it. A swallowed move never
+    /// reaches it, so only something outside the grab moves it: waking from
+    /// sleep, the lock screen, a monitor coming back with other coordinates.
+    /// Left there, every move would be read as its distance from the old
+    /// middle and the other screen's cursor would be pinned against an edge.
+    fn repark(&mut self) {
+        let Some(here) = cursor_pos() else { return };
+        if (here.x, here.y) == self.state.center.get() {
+            return;
+        }
+        let center = monitor_center(here);
+        // SAFETY: SetCursorPos takes plain coordinates.
+        if unsafe { SetCursorPos(center.x, center.y) } == 0 {
+            return; // a secure desktop is still showing; try again next time
+        }
+        self.state.center.set((center.x, center.y));
+        self.cover();
+        info!(
+            ?here,
+            ?center,
+            "the cursor was moved under the grab; parked it again"
+        );
     }
 
     fn release(&mut self, warp_to: Option<Point>) {
