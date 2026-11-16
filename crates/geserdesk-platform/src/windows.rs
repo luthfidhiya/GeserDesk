@@ -65,6 +65,9 @@ const IDLE_WAIT_MS: u32 = 2;
 /// the hook never saw. They are tracked from the hook's own events in between;
 /// asking every pass (ten calls each) was most of this thread's cost.
 const RESYNC_EVERY: Duration = Duration::from_millis(100);
+/// How long after the cursor is moved for a grab or a release a move may still
+/// have been worked out from where it was before (see [`Jump`]).
+const JUMP_PATIENCE: Duration = Duration::from_millis(250);
 const WM_KEYUP: u32 = 0x0101;
 const LLKHF_EXTENDED: u32 = 0x01;
 /// Windows reports AltGr as a Right Alt press preceded by a made-up Left Ctrl
@@ -124,6 +127,39 @@ pub fn start(events: UnboundedSender<CaptureEvent>) -> Result<CaptureHandle, Cap
     Ok(CaptureHandle::new(bounds, cmd_tx))
 }
 
+/// The cursor was just put somewhere else: parked by a grab, or sent back by a
+/// release. Windows works out a move's position when it happens, so the moves
+/// already on their way still start from where the cursor was. Read from the
+/// middle, the first moves of a grab were half a screen long and threw the other
+/// screen's cursor to its middle; let through after a release, they put this one
+/// back in the middle instead of where it came back to.
+#[derive(Clone, Copy)]
+struct Jump {
+    from: (i32, i32),
+    to: (i32, i32),
+    until: Instant,
+}
+
+impl Jump {
+    fn new(from: (i32, i32), to: (i32, i32)) -> Option<Self> {
+        (from != to).then(|| Self {
+            from,
+            to,
+            until: Instant::now() + JUMP_PATIENCE,
+        })
+    }
+
+    /// Whether a move to `pt` started from `from`: it lies nearer there than
+    /// where the cursor went.
+    fn predates(&self, pt: (i32, i32), now: Instant) -> bool {
+        let dist = |(x, y): (i32, i32)| {
+            let (dx, dy) = (i64::from(pt.0 - x), i64::from(pt.1 - y));
+            dx * dx + dy * dy
+        };
+        now < self.until && dist(self.from) < dist(self.to)
+    }
+}
+
 /// What the hook procedures need. They are plain functions Windows calls on
 /// the capture thread, so this lives in a thread-local; all of it is touched
 /// only from that thread.
@@ -132,6 +168,9 @@ struct HookState {
     grabbed: Cell<bool>,
     /// Where the cursor is parked while grabbed.
     center: Cell<(i32, i32)>,
+    /// The last time the cursor was put somewhere, while moves from before may
+    /// still come.
+    jump: Cell<Option<Jump>>,
     /// Keys whose press a grab swallowed (HID usage -> repeat count). A release
     /// of any other key began before the grab and belongs to the local desktop.
     keys: RefCell<HashMap<u16, u16>>,
@@ -161,15 +200,30 @@ impl HookState {
         let _ = self.events.send(ev);
     }
 
+    /// Where a move to `pt` started if that was before the last jump. Moves come
+    /// in order, so the first one that started after it ends the wait.
+    fn started_from(&self, pt: POINT) -> Option<(i32, i32)> {
+        let jump = self.jump.get()?;
+        if jump.predates((pt.x, pt.y), Instant::now()) {
+            Some(jump.from)
+        } else {
+            self.jump.set(None);
+            None
+        }
+    }
+
     /// Returns `true` to swallow the event.
     fn on_mouse(&self, msg: u32, info: &MSLLHOOKSTRUCT) -> bool {
         if !self.grabbed.get() {
-            return false;
+            // A move from the parked middle would undo where the release put it.
+            return msg == WM_MOUSEMOVE && self.started_from(info.pt).is_some();
         }
         let high = (info.mouseData >> 16) as u16;
         match msg {
             WM_MOUSEMOVE => {
-                let (cx, cy) = self.center.get();
+                let (cx, cy) = self
+                    .started_from(info.pt)
+                    .unwrap_or_else(|| self.center.get());
                 let (dx, dy) = (info.pt.x - cx, info.pt.y - cy);
                 if dx != 0 || dy != 0 {
                     self.emit(CaptureEvent::Motion { dx, dy });
@@ -563,6 +617,7 @@ impl Capture {
             events: events.clone(),
             grabbed: Cell::new(false),
             center: Cell::new((bounds.center().x, bounds.center().y)),
+            jump: Cell::new(None),
             keys: RefCell::new(HashMap::new()),
             buttons: RefCell::new(HashSet::new()),
             hotkey_down: Cell::new(false),
@@ -703,6 +758,9 @@ impl Capture {
         if unsafe { SetCursorPos(center.x, center.y) } == 0 {
             return Err("cannot move the cursor (a secure desktop is showing?)".into());
         }
+        self.state
+            .jump
+            .set(Jump::new((here.x, here.y), (center.x, center.y)));
         self.state.center.set((center.x, center.y));
         self.state.keys.borrow_mut().clear();
         self.state.buttons.borrow_mut().clear();
@@ -746,6 +804,9 @@ impl Capture {
         if unsafe { SetCursorPos(center.x, center.y) } == 0 {
             return; // a secure desktop is still showing; try again next time
         }
+        self.state
+            .jump
+            .set(Jump::new((here.x, here.y), (center.x, center.y)));
         self.state.center.set((center.x, center.y));
         self.cover();
         info!(
@@ -767,6 +828,9 @@ impl Capture {
             let p = virtual_screen().clamp(p);
             // SAFETY: SetCursorPos takes plain coordinates.
             unsafe { SetCursorPos(p.x, p.y) };
+            self.state
+                .jump
+                .set(Jump::new(self.state.center.get(), (p.x, p.y)));
             self.last_local = Some(p);
         }
         debug!("released pointer and keyboard");
@@ -1222,5 +1286,20 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         assert!(start(tx).is_ok());
+    }
+
+    #[test]
+    fn a_move_from_before_a_jump_is_told_by_where_it_lies_and_only_for_a_moment() {
+        // A grab at the right edge parks the cursor in the middle.
+        let jump = Jump::new((1919, 500), (960, 540)).unwrap();
+        let now = Instant::now();
+        assert!(
+            jump.predates((1922, 501), now),
+            "still the move to the edge"
+        );
+        assert!(!jump.predates((963, 541), now), "a move from the middle");
+        assert!(!jump.predates((1922, 501), now + JUMP_PATIENCE), "too late");
+        // Nowhere to come from: the cursor was already there.
+        assert!(Jump::new((960, 540), (960, 540)).is_none());
     }
 }
