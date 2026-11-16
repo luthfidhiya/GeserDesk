@@ -306,6 +306,7 @@ impl Session {
         if self.is_running() {
             return Err("Sudah berjalan. Hentikan dulu.".into());
         }
+        geserdesk_platform::init_process();
         // The key setup belongs to this machine, not to the config file chosen for the server.
         config.key_rules = crate::keys::load().rules;
         self.started.fetch_add(1, Ordering::SeqCst);

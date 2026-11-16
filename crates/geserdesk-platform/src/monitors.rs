@@ -16,12 +16,22 @@ use crate::CaptureError;
 ///
 /// On Windows a process that is not DPI-aware is lied to about monitor sizes
 /// (a 4K screen at 150 % scale reports 2560x1440), which would make the layout
-/// editor and cursor placement disagree with the real pixels. No-op elsewhere.
+/// editor and cursor placement disagree with the real pixels. The low-level mouse
+/// hook always reports real pixels, so a server that is not aware reads the gap
+/// between them as motion: at 125 % every move is off by a fifth of the screen
+/// and the other computer's cursor runs into a corner. Per-monitor awareness
+/// keeps them equal on every monitor, whatever its scale. No-op elsewhere.
 pub fn init_process() {
     #[cfg(windows)]
-    // SAFETY: SetProcessDPIAware takes no arguments and has no preconditions.
+    // SAFETY: both take plain values and have no preconditions; they fail
+    // harmlessly when the awareness is already set.
     unsafe {
-        windows_sys::Win32::UI::WindowsAndMessaging::SetProcessDPIAware();
+        use windows_sys::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        };
+        if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == 0 {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetProcessDPIAware();
+        }
     }
 }
 
