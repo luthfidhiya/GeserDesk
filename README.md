@@ -100,6 +100,14 @@ drive a connected client's cursor in a square without capturing anything.
 > the secure desktop (UAC prompt, lock screen, `Ctrl+Alt+Del`) cannot be seen or taken
 > over. Run the server elevated if you need the first.
 
+> A Windows client has the mirror of the second limit: while the UAC prompt or the lock screen is
+> up, Windows refuses all injected input, even to a program run as administrator, so the pointer
+> from the server stops moving until it is closed (the log says `blocked by UIPI` once, then every
+> ten seconds while it goes on, and `input injection works again`). Use that computer's own
+> keyboard and mouse for the prompt. Running the client as administrator does not change this.
+> An elevated window is a different case, not measured here: Windows says a program that is not
+> elevated cannot send input to it, and without any error.
+
 ## Try it (Linux ↔ Windows, two machines)
 
 1. Edit `dev-config.toml`: screen names and the `[links]` arrangement.

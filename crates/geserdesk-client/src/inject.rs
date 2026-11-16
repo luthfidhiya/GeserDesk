@@ -147,6 +147,67 @@ pub fn has_built_in(hid: u16) -> bool {
     }
 }
 
+/// A run of failed injections, told once instead of once per event: the first failure is
+/// written, then at most one line every ten seconds saying how many were left out, and
+/// the end of the run is written when input works again. A pointer that cannot be moved
+/// fails on every motion event, which is hundreds of lines a second.
+#[cfg(any(feature = "inject", test))]
+#[derive(Default)]
+struct FailureRun {
+    said_at: Option<std::time::Instant>,
+    /// Every failure of this run.
+    count: u32,
+    /// The ones not written since the last line.
+    unsaid: u32,
+}
+
+#[cfg(any(feature = "inject", test))]
+impl FailureRun {
+    const REPEAT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// One more failure. `Some(n)` when a line should be written, `n` being how many
+    /// failures were left out since the last one.
+    fn failed(&mut self, now: std::time::Instant) -> Option<u32> {
+        self.count += 1;
+        match self.said_at {
+            Some(at) if now.duration_since(at) < Self::REPEAT => {
+                self.unsaid += 1;
+                None
+            }
+            _ => {
+                self.said_at = Some(now);
+                Some(std::mem::take(&mut self.unsaid))
+            }
+        }
+    }
+
+    /// An injection that worked. `Some(n)` when it ends a run of `n` failures.
+    fn worked(&mut self) -> Option<u32> {
+        if self.count == 0 {
+            return None;
+        }
+        let n = self.count;
+        *self = Self::default();
+        Some(n)
+    }
+}
+
+/// What to tell the person when Windows refuses the input (its message says UIPI). Measured
+/// on Windows 11 (a probe sending a key every half second): the call is refused outright, 0
+/// events in, only while the UAC prompt or the lock screen is up, and even for a program run as
+/// administrator; with an elevated window in front it still reports success. So this is not
+/// something running as administrator mends, and it is not a fault of this program.
+#[cfg(any(feature = "inject", test))]
+fn uipi_hint(error: &str) -> &'static str {
+    if error.contains("UIPI") {
+        ": most likely the UAC prompt or the lock screen is showing. Windows lets no program \
+         send input there, even one run as administrator (use this computer's own keyboard \
+         and mouse), and it goes on by itself once that is closed"
+    } else {
+        ""
+    }
+}
+
 #[cfg(feature = "inject")]
 pub use enigo_sink::EnigoSink;
 
@@ -172,6 +233,8 @@ mod enigo_sink {
         held_buttons: HashSet<u8>,
         /// This machine's own way of doing the special keys it is sent.
         perform: HashMap<u16, Perform>,
+        /// The injections that failed and have not worked since, to tell them once.
+        failures: FailureRun,
     }
 
     impl EnigoSink {
@@ -183,6 +246,7 @@ mod enigo_sink {
                 held_keys: HashMap::new(),
                 held_buttons: HashSet::new(),
                 perform: HashMap::new(),
+                failures: FailureRun::default(),
             })
         }
 
@@ -219,17 +283,33 @@ mod enigo_sink {
         }
 
         fn inject(&mut self, key: Key, dir: Direction) {
-            if let Err(e) = self.enigo.key(key, dir) {
-                tracing::warn!(error = %e, ?key, "key injection failed");
+            let r = self.enigo.key(key, dir);
+            self.report("key", r);
+        }
+
+        /// Write down how an injection went: a failure once (see [`FailureRun`]), and when
+        /// input works again after some.
+        fn report(&mut self, what: &str, result: Result<(), enigo::InputError>) {
+            match result {
+                Ok(()) => {
+                    if let Some(failed) = self.failures.worked() {
+                        tracing::info!(failed, "input injection works again");
+                    }
+                }
+                Err(e) => {
+                    if let Some(skipped) = self.failures.failed(std::time::Instant::now()) {
+                        let hint = uipi_hint(&e.to_string());
+                        tracing::warn!(error = %e, skipped, "{what} injection failed{hint}");
+                    }
+                }
             }
         }
     }
 
     impl InputSink for EnigoSink {
         fn enter(&mut self, at: Point) {
-            if let Err(e) = self.move_to(at.x, at.y) {
-                tracing::warn!(error = %e, "move_mouse on enter failed");
-            }
+            let r = self.move_to(at.x, at.y);
+            self.report("pointer", r);
         }
 
         fn leave(&mut self) {
@@ -277,9 +357,8 @@ mod enigo_sink {
                     #[cfg(windows)]
                     if let Key::Unicode(c) = key {
                         if win::text_only(c) {
-                            if let Err(e) = self.enigo.key(key, Direction::Click) {
-                                tracing::warn!(error = %e, ?key, "key injection failed");
-                            }
+                            let r = self.enigo.key(key, Direction::Click);
+                            self.report("key", r);
                             return;
                         }
                     }
@@ -328,9 +407,7 @@ mod enigo_sink {
                     r
                 }
             };
-            if let Err(e) = r {
-                tracing::warn!(error = %e, "mouse injection failed");
-            }
+            self.report("mouse", r);
         }
     }
 
@@ -865,6 +942,35 @@ mod tests {
             resolve(&loopy, consumer::MUTE),
             Resolved::Key(consumer::VOLUME_UP)
         );
+    }
+
+    #[test]
+    fn a_run_of_failures_is_said_once_then_every_ten_seconds_and_its_end_is_said() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let mut run = FailureRun::default();
+        assert_eq!(run.worked(), None); // nothing to end
+        assert_eq!(run.failed(t0), Some(0)); // the first is said at once
+        for ms in 1..=500 {
+            assert_eq!(run.failed(t0 + Duration::from_millis(ms)), None);
+        }
+        // Ten seconds on it is said again, with how many were left out meanwhile.
+        assert_eq!(run.failed(t0 + Duration::from_secs(10)), Some(500));
+        assert_eq!(run.failed(t0 + Duration::from_secs(11)), None);
+        assert_eq!(run.worked(), Some(503)); // the end names the whole run
+        assert_eq!(run.worked(), None);
+        // A new run is said at once again.
+        assert_eq!(run.failed(t0 + Duration::from_secs(12)), Some(0));
+    }
+
+    #[test]
+    fn only_a_uipi_block_gets_the_explanation() {
+        let blocked = "simulating input failed: (not all input events were sent. they may have been blocked by UIPI)";
+        assert!(uipi_hint(blocked).contains("UAC prompt"));
+        assert!(uipi_hint(blocked).contains("own keyboard and mouse"));
+        // Running as administrator does not mend it, so it is not offered as the cure.
+        assert!(!uipi_hint(blocked).contains("Run GeserDesk"));
+        assert_eq!(uipi_hint("simulating input failed: something else"), "");
     }
 
     #[test]
