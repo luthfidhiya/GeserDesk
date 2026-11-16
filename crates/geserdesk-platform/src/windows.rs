@@ -68,6 +68,8 @@ const RESYNC_EVERY: Duration = Duration::from_millis(100);
 /// How long after the cursor is moved for a grab or a release a move may still
 /// have been worked out from where it was before (see [`Jump`]).
 const JUMP_PATIENCE: Duration = Duration::from_millis(250);
+/// How long a grab waits for the cursor to be hidden before parking it anyway.
+const HIDE_PATIENCE: Duration = Duration::from_millis(50);
 const WM_KEYUP: u32 = 0x0101;
 const LLKHF_EXTENDED: u32 = 0x01;
 /// Windows reports AltGr as a Right Alt press preceded by a made-up Left Ctrl
@@ -179,6 +181,9 @@ struct HookState {
     /// The Home key of the hotkey chord is down (so its repeats and its release
     /// are swallowed too, and it is reported once).
     hotkey_down: Cell<bool>,
+    /// The cover window was told the cursor is over it since it last showed, so
+    /// hiding the cursor there works.
+    cursor_taken: Cell<bool>,
     /// The modifier keys held, one bit per HID usage 0xE0..=0xE7.
     held: Cell<u16>,
     /// Caps Lock and Num Lock as the grab sees them: a swallowed lock key does
@@ -544,6 +549,9 @@ unsafe extern "system" fn cursor_window_proc(
         WM_SETCURSOR => {
             // SAFETY: a null cursor hides it; no preconditions.
             unsafe { SetCursor(std::ptr::null_mut()) };
+            if let Some(st) = state() {
+                st.cursor_taken.set(true);
+            }
             1
         }
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
@@ -621,6 +629,7 @@ impl Capture {
             keys: RefCell::new(HashMap::new()),
             buttons: RefCell::new(HashSet::new()),
             hotkey_down: Cell::new(false),
+            cursor_taken: Cell::new(false),
             held: Cell::new(0),
             caps: Cell::new(false),
             num: Cell::new(false),
@@ -754,8 +763,12 @@ impl Capture {
         self.state.resync();
         let here = cursor_pos().unwrap_or_else(|| virtual_screen().center());
         let center = monitor_center(here);
+        // Hidden first, so the cursor is not seen running to the middle.
+        self.cover();
+        self.wait_hidden();
         // SAFETY: SetCursorPos takes plain coordinates.
         if unsafe { SetCursorPos(center.x, center.y) } == 0 {
+            self.uncover();
             return Err("cannot move the cursor (a secure desktop is showing?)".into());
         }
         self.state
@@ -764,7 +777,6 @@ impl Capture {
         self.state.center.set((center.x, center.y));
         self.state.keys.borrow_mut().clear();
         self.state.buttons.borrow_mut().clear();
-        self.cover();
         self.state.grabbed.set(true);
         info!("grabbed pointer and keyboard");
         Ok(())
@@ -774,6 +786,7 @@ impl Capture {
     fn cover(&self) {
         if !self.window.is_null() {
             let r = virtual_screen();
+            self.state.cursor_taken.set(false);
             // SAFETY: `window` is the window this thread created.
             unsafe {
                 SetWindowPos(
@@ -785,7 +798,45 @@ impl Capture {
                     r.h,
                     SWP_NOACTIVATE | SWP_SHOWWINDOW,
                 );
+                // The window hides the cursor when told it is over it, which
+                // is at the next move; hide it now.
+                SetCursor(std::ptr::null_mut());
             }
+        }
+    }
+
+    /// Let the cover take the cursor before it is moved. Windows only finds out
+    /// the cursor is over the new window a moment after it shows (until then the
+    /// window below owns it, and hiding it from here does nothing), and it tells
+    /// the cover through this thread's messages. Moved sooner, the cursor was
+    /// seen running to the middle, now and then, when switching fast.
+    fn wait_hidden(&self) {
+        if self.window.is_null() {
+            return;
+        }
+        let end = Instant::now() + HIDE_PATIENCE;
+        loop {
+            // SAFETY: `msg` is a valid MSG; this is the thread's own pump.
+            unsafe {
+                let mut msg: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            if self.state.cursor_taken.get() || Instant::now() >= end {
+                return;
+            }
+            // SAFETY: a null cursor hides it; no preconditions.
+            unsafe { SetCursor(std::ptr::null_mut()) };
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn uncover(&self) {
+        if !self.window.is_null() {
+            // SAFETY: `window` is the window this thread created.
+            unsafe { ShowWindow(self.window, SW_HIDE) };
         }
     }
 
@@ -820,10 +871,7 @@ impl Capture {
         self.state.grabbed.set(false);
         self.state.keys.borrow_mut().clear();
         self.state.buttons.borrow_mut().clear();
-        if !self.window.is_null() {
-            // SAFETY: `window` is the window this thread created.
-            unsafe { ShowWindow(self.window, SW_HIDE) };
-        }
+        // Moved while still hidden, so it is not seen in the middle first.
         if let Some(p) = warp_to {
             let p = virtual_screen().clamp(p);
             // SAFETY: SetCursorPos takes plain coordinates.
@@ -833,6 +881,7 @@ impl Capture {
                 .set(Jump::new(self.state.center.get(), (p.x, p.y)));
             self.last_local = Some(p);
         }
+        self.uncover();
         debug!("released pointer and keyboard");
     }
 }
@@ -906,6 +955,7 @@ mod tests {
         KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_MOVE,
         MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
     };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
 
     fn send_mouse(dx: i32, dy: i32, data: u32, flags: u32) {
         let input = INPUT {
@@ -960,6 +1010,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         out
+    }
+
+    /// Switching back and forth fast, as someone flicking between screens does:
+    /// the cursor parked in the middle should not be seen there. Sampled from
+    /// another thread the whole time. Windows can still show it for a moment now
+    /// and then (about one switch in a hundred here, against one in ten or
+    /// twenty before the grab waited for the cover to take the cursor), so one
+    /// round in twenty is let through.
+    #[test]
+    #[ignore = "grabs the real keyboard and mouse for a moment"]
+    fn the_cursor_is_hardly_ever_seen_in_the_middle_when_switching_fast() {
+        crate::monitors::init_process();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = start(tx).expect("hooks install");
+        let before = cursor_pos().unwrap();
+        let center = monitor_center(before);
+        let edge = Point::new(center.x * 2 - 3, center.y - 100);
+        unsafe { SetCursorPos(edge.x, edge.y) };
+
+        let mut rounds_seen = 0;
+        let mut samples = 0;
+        for round in 0..20 {
+            assert!(handle.send(CaptureCmd::Grab));
+            let mut seen_in_middle = false;
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_millis(40 + round) {
+                send_mouse(4, 1, 0, MOUSEEVENTF_MOVE);
+                let mut info: CURSORINFO = unsafe { std::mem::zeroed() };
+                info.cbSize = std::mem::size_of::<CURSORINFO>() as u32;
+                if unsafe { GetCursorInfo(&mut info) } != 0 {
+                    samples += 1;
+                    let at = Point::new(info.ptScreenPos.x, info.ptScreenPos.y);
+                    seen_in_middle |= at == center && !info.hCursor.is_null();
+                }
+                std::thread::sleep(Duration::from_micros(300));
+            }
+            rounds_seen += usize::from(seen_in_middle);
+            assert!(handle.send(CaptureCmd::Ungrab { warp: edge }));
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        drop(handle);
+        unsafe { SetCursorPos(before.x, before.y) };
+        assert!(samples > 200, "too few samples: {samples}");
+        assert!(
+            rounds_seen <= 1,
+            "seen in the middle in {rounds_seen} of 20 switches"
+        );
     }
 
     /// Takes over this desktop's real keyboard and mouse for about a second and
